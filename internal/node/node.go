@@ -163,10 +163,34 @@ func (n *Node) Start() error {
 		}
 	}
 
-	// Initialize admin server
-	n.adminServer = admin.NewServer(admin.Config{
-		Addr: n.config.Admin.Addr,
+	// Initialize admin server with authentication if enabled
+	var apiKeys []*admin.APIKey
+	if n.config.Security.EnableACLs {
+		// In production, load API keys from secure storage (e.g., HashiCorp Vault)
+		// For now, load from environment variable MATRIX_ADMIN_API_KEY
+		defaultKey := os.Getenv("MATRIX_ADMIN_API_KEY")
+		if defaultKey != "" {
+			apiKeys = append(apiKeys, &admin.APIKey{
+				Key:  defaultKey,
+				Role: admin.RoleAdmin,
+				Name: "default-admin",
+			})
+		}
+		// If no keys provided and auth is required, log a warning
+		if len(apiKeys) == 0 {
+			fmt.Printf("Warning: EnableACLs is true but no API keys configured. Admin server will require auth but no keys are valid.\n")
+		}
+	}
+
+	adminServer, err := admin.NewServer(admin.Config{
+		Addr:        n.config.Admin.Addr,
+		RequireAuth: n.config.Security.EnableACLs,
+		APIKeys:     apiKeys,
 	})
+	if err != nil {
+		return fmt.Errorf("failed to create admin server: %w", err)
+	}
+	n.adminServer = adminServer
 
 	// Start admin server
 	if err := n.adminServer.Start(n.ctx); err != nil {

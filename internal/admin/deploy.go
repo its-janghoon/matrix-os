@@ -10,6 +10,7 @@ import (
 type DeployService struct {
 	deployments map[string]*Deployment
 	mu          sync.RWMutex
+	auth        *Authenticator
 }
 
 // Deployment represents a deployed agent or matrix
@@ -22,14 +23,22 @@ type Deployment struct {
 }
 
 // NewDeployService creates a new deploy service
-func NewDeployService() *DeployService {
+func NewDeployService(auth *Authenticator) *DeployService {
 	return &DeployService{
 		deployments: make(map[string]*Deployment),
+		auth:        auth,
 	}
 }
 
 // DeployAgent deploys a new agent
 func (s *DeployService) DeployAgent(ctx context.Context, id string, config map[string]interface{}) error {
+	// Check authorization
+	if s.auth != nil {
+		if _, err := s.auth.CheckPermission(ctx, PermissionDeployAgent); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -50,6 +59,13 @@ func (s *DeployService) DeployAgent(ctx context.Context, id string, config map[s
 
 // DeployMatrix deploys a new matrix
 func (s *DeployService) DeployMatrix(ctx context.Context, id string, config map[string]interface{}) error {
+	// Check authorization
+	if s.auth != nil {
+		if _, err := s.auth.CheckPermission(ctx, PermissionDeployMatrix); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -96,6 +112,13 @@ func (s *DeployService) ListDeployments() []*Deployment {
 
 // StopDeployment stops a deployment
 func (s *DeployService) StopDeployment(ctx context.Context, id string) error {
+	// Check authorization
+	if s.auth != nil {
+		if _, err := s.auth.CheckPermission(ctx, PermissionStopDeploy); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -110,6 +133,13 @@ func (s *DeployService) StopDeployment(ctx context.Context, id string) error {
 
 // RemoveDeployment removes a deployment
 func (s *DeployService) RemoveDeployment(ctx context.Context, id string) error {
+	// Check authorization
+	if s.auth != nil {
+		if _, err := s.auth.CheckPermission(ctx, PermissionRemoveDeploy); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

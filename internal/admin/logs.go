@@ -9,9 +9,10 @@ import (
 
 // LogsService handles log retrieval and streaming
 type LogsService struct {
-	logs   []LogEntry
-	logsMu sync.RWMutex
+	logs    []LogEntry
+	logsMu  sync.RWMutex
 	maxLogs int
+	auth    *Authenticator
 }
 
 // LogEntry represents a log entry
@@ -24,10 +25,11 @@ type LogEntry struct {
 }
 
 // NewLogsService creates a new logs service
-func NewLogsService() *LogsService {
+func NewLogsService(auth *Authenticator) *LogsService {
 	return &LogsService{
 		logs:    make([]LogEntry, 0),
 		maxLogs: 10000, // Keep last 10k logs
+		auth:    auth,
 	}
 }
 
@@ -54,6 +56,21 @@ func (s *LogsService) AddLog(level, component, message string, fields map[string
 
 // GetLogs retrieves logs matching the given filters
 func (s *LogsService) GetLogs(ctx context.Context, filters LogFilters) ([]LogEntry, error) {
+	// Check authorization
+	if s.auth != nil {
+		role, err := s.auth.CheckPermission(ctx, PermissionReadLogs)
+		if err != nil {
+			return nil, err
+		}
+
+		// Check if sensitive logs are requested and user has permission
+		if filters.Component == "admin" || filters.Component == "auth" {
+			if err := s.auth.Authorize(role, PermissionReadSensitive); err != nil {
+				return nil, err
+			}
+		}
+	}
+
 	s.logsMu.RLock()
 	defer s.logsMu.RUnlock()
 
@@ -72,6 +89,14 @@ func (s *LogsService) GetLogs(ctx context.Context, filters LogFilters) ([]LogEnt
 		}
 		if !filters.Until.IsZero() && entry.Timestamp.After(filters.Until) {
 			continue
+		}
+
+		// Filter sensitive logs for non-admin users
+		if s.auth != nil {
+			role, _ := s.auth.Authenticate(ctx)
+			if role != RoleAdmin && (entry.Component == "admin" || entry.Component == "auth") {
+				continue
+			}
 		}
 
 		result = append(result, entry)

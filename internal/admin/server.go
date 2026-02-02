@@ -12,40 +12,63 @@ import (
 
 // Server represents the admin gRPC server
 type Server struct {
-	grpcServer *grpc.Server
-	healthSvc  *health.Server
-	addr       string
-	deploySvc  *DeployService
-	logsSvc    *LogsService
+	grpcServer   *grpc.Server
+	healthSvc   *health.Server
+	addr        string
+	deploySvc   *DeployService
+	logsSvc     *LogsService
+	auth        *Authenticator
+	requireAuth bool
 }
 
 // Config represents admin server configuration
 type Config struct {
-	Addr string
+	Addr        string
+	RequireAuth bool
+	APIKeys     []*APIKey
 }
 
 // NewServer creates a new admin gRPC server
-func NewServer(cfg Config) *Server {
-	grpcServer := grpc.NewServer()
+func NewServer(cfg Config) (*Server, error) {
+	auth := NewAuthenticator()
+
+	// Add API keys if provided
+	for _, key := range cfg.APIKeys {
+		if err := auth.AddKey(key); err != nil {
+			return nil, fmt.Errorf("invalid API key: %w", err)
+		}
+	}
+
+	// Create server options with auth interceptors if auth is required
+	var opts []grpc.ServerOption
+	if cfg.RequireAuth {
+		// Use a basic auth interceptor that requires authentication for all methods
+		// Individual service methods will check specific permissions
+		opts = append(opts,
+			grpc.UnaryInterceptor(auth.requireAuthUnaryInterceptor),
+			grpc.StreamInterceptor(auth.requireAuthStreamInterceptor),
+		)
+	}
+
+	grpcServer := grpc.NewServer(opts...)
 	healthSvc := health.NewServer()
 
 	// Register health service
 	healthpb.RegisterHealthServer(grpcServer, healthSvc)
 
 	// Create and register custom services
-	deploySvc := NewDeployService()
-	logsSvc := NewLogsService()
-
-	// Register services (proto definitions would be used here)
-	// For now, we'll create the structure that can be extended
+	deploySvc := NewDeployService(auth)
+	logsSvc := NewLogsService(auth)
 
 	return &Server{
-		grpcServer: grpcServer,
-		healthSvc:  healthSvc,
-		addr:       cfg.Addr,
-		deploySvc:  deploySvc,
-		logsSvc:    logsSvc,
-	}
+		grpcServer:  grpcServer,
+		healthSvc:   healthSvc,
+		addr:        cfg.Addr,
+		deploySvc:   deploySvc,
+		logsSvc:     logsSvc,
+		auth:        auth,
+		requireAuth: cfg.RequireAuth,
+	}, nil
 }
 
 // Start starts the gRPC server
@@ -85,4 +108,9 @@ func (s *Server) GetDeployService() *DeployService {
 // GetLogsService returns the logs service instance
 func (s *Server) GetLogsService() *LogsService {
 	return s.logsSvc
+}
+
+// GetAuthenticator returns the authenticator instance
+func (s *Server) GetAuthenticator() *Authenticator {
+	return s.auth
 }
