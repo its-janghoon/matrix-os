@@ -3,6 +3,8 @@ module github.com/ecirlabs/matrix-core
 go 1.24.2
 
 require (
+	google.golang.org/grpc v1.66.0
+	google.golang.org/grpc/health/grpc_health_v1 v1.66.0
 	github.com/DataDog/zstd v1.4.5 // indirect
 	github.com/benbjohnson/clock v1.3.5 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect

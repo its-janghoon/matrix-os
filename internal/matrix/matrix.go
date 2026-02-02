@@ -12,7 +12,7 @@ type Matrix struct {
 	ID      string
 	rules   []Rule
 	rulesMu sync.RWMutex
-	agents  map[string]*Agent
+	agents  map[string]*MatrixAgent
 	agentMu sync.RWMutex
 	metrics MetricsCollector
 }
@@ -24,8 +24,8 @@ type Rule struct {
 	Evaluate func(context.Context, *Matrix) ([]Event, error)
 }
 
-// Agent represents an agent in the matrix
-type Agent struct {
+// MatrixAgent represents an agent in the matrix (to avoid conflict with agent package)
+type MatrixAgent struct {
 	ID      string
 	Type    string
 	State   map[string]interface{}
@@ -51,7 +51,7 @@ func New(id string, metrics MetricsCollector) *Matrix {
 	return &Matrix{
 		ID:      id,
 		rules:   make([]Rule, 0),
-		agents:  make(map[string]*Agent),
+		agents:  make(map[string]*MatrixAgent),
 		metrics: metrics,
 	}
 }
@@ -64,7 +64,7 @@ func (m *Matrix) AddRule(rule Rule) {
 }
 
 // AddAgent adds a new agent to the matrix
-func (m *Matrix) AddAgent(agent *Agent) error {
+func (m *Matrix) AddAgent(agent *MatrixAgent) error {
 	m.agentMu.Lock()
 	defer m.agentMu.Unlock()
 
@@ -100,7 +100,7 @@ func (m *Matrix) Step(ctx context.Context) error {
 }
 
 // GetAgent returns an agent by ID
-func (m *Matrix) GetAgent(id string) (*Agent, bool) {
+func (m *Matrix) GetAgent(id string) (*MatrixAgent, bool) {
 	m.agentMu.RLock()
 	defer m.agentMu.RUnlock()
 	agent, exists := m.agents[id]

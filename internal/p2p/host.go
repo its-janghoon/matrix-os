@@ -23,15 +23,30 @@ type Config struct {
 
 // New creates a new p2p host
 func New(ctx context.Context, cfg *Config) (*Host, error) {
-	// Parse the listen address
-	addr, err := multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/0", cfg.ListenAddr))
+	// Parse the listen address (format: "0.0.0.0:9000" or just IP)
+	// Extract IP and port
+	var listenAddr multiaddr.Multiaddr
+	var err error
+
+	if cfg.ListenAddr == "" {
+		// Default to all interfaces on random port
+		listenAddr, err = multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
+	} else {
+		// Try to parse as multiaddr first
+		listenAddr, err = multiaddr.NewMultiaddr(cfg.ListenAddr)
+		if err != nil {
+			// If not a multiaddr, try to parse as IP:port
+			listenAddr, err = multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/0", cfg.ListenAddr))
+		}
+	}
+
 	if err != nil {
 		return nil, fmt.Errorf("invalid listen address: %w", err)
 	}
 
 	// Create libp2p host
 	h, err := libp2p.New(
-		libp2p.ListenAddrs(addr),
+		libp2p.ListenAddrs(listenAddr),
 		libp2p.EnableRelay(),
 		libp2p.EnableAutoRelayWithPeerSource(nil),
 		libp2p.NATPortMap(),
@@ -65,6 +80,21 @@ func (h *Host) Connect(ctx context.Context, addr string) error {
 	}
 
 	return nil
+}
+
+// GetHost returns the underlying libp2p host
+func (h *Host) GetHost() host.Host {
+	return h.host
+}
+
+// GetPeerID returns the peer ID of this host
+func (h *Host) GetPeerID() peer.ID {
+	return h.host.ID()
+}
+
+// GetAddrs returns the addresses this host is listening on
+func (h *Host) GetAddrs() []multiaddr.Multiaddr {
+	return h.host.Addrs()
 }
 
 // Close shuts down the p2p host
