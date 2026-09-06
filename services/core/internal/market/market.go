@@ -335,8 +335,20 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 }
 
 // CompleteJob transitions a pending or running job to JobCompleted and transfers
-// its price from buyer to provider through the ledger. If the transfer fails the
-// job is left non-completed and the error is returned.
+// its price from buyer to provider directly through the ledger. If the transfer
+// fails the job is left non-completed and the error is returned.
+//
+// This is the DIRECT, non-consensus settlement path. It moves native MATRIX with
+// a single local ledger.Transfer that does NOT go through consensus ordering or
+// the committed-transaction dedup set. The node's default/production compute
+// flow settles through consensus instead, via the node's compute settlement
+// coordinator (node.ComputeSettlementCoordinator), which submits a signed
+// transfer, waits for it to commit and apply, then finalizes the job via
+// ReleaseAsCompleted, so compute and inference share one
+// authoritative native-MATRIX ledger. CompleteJob is retained for local,
+// single-node or test contexts that intentionally want the direct path without a
+// running consensus engine; do NOT combine it with the consensus path for the
+// same job, or the buyer would be charged twice.
 func (m *Market) CompleteJob(jobID string) error {
 	m.jobsMu.Lock()
 
@@ -375,6 +387,76 @@ func (m *Market) CompleteJob(jobID string) error {
 	m.notifyActiveJobs()
 	m.notifyJobCompleted(settled)
 	return nil
+}
+
+// ReleaseAsCompleted finalizes a job whose payment already settled through
+// consensus: it returns the reserved capacity to the provider (like CancelJob)
+// but transitions the job to JobCompleted and reports the settled amount to the
+// observer. Crucially it moves NO native MATRIX itself, because the consensus
+// apply path already transferred settledAmount buyer -> provider on the shared
+// ledger; doing a ledger.Transfer here (as CompleteJob does) would double-charge
+// the buyer. This is the compute analogue of how internal/inference releases the
+// reservation via CancelJob after settling through consensus, kept as a distinct
+// method so the job ends in COMPLETED (not CANCELLED) and the JobCompleted metric
+// fires exactly once.
+//
+// It is exported so the node's consensus-backed compute settlement coordinator
+// (which lives outside this package to avoid a market -> token -> market import
+// cycle) can finalize a job after the consensus transfer applies. It requires
+// the job to be pending or running and returns a copy of the completed job.
+func (m *Market) ReleaseAsCompleted(jobID string, settledAmount uint64) (*Job, error) {
+	var completed Job
+	if err := func() error {
+		// Same providersMu-before-jobsMu lock order as SubmitJob/CancelJob.
+		m.providersMu.Lock()
+		defer m.providersMu.Unlock()
+
+		m.jobsMu.Lock()
+		defer m.jobsMu.Unlock()
+
+		job, ok := m.jobs[jobID]
+		if !ok {
+			return fmt.Errorf("complete settled job %q: %w", jobID, ErrJobNotFound)
+		}
+		if job.Status != JobPending && job.Status != JobRunning {
+			return fmt.Errorf("complete settled job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
+		}
+
+		// Return the reserved capacity to the provider. The reservation only ever
+		// held capacity; the buyer was charged by the consensus settlement, not
+		// here, so no ledger transfer happens.
+		if provider, ok := m.providers[job.Provider]; ok {
+			restored := provider
+			restored.Available += job.Units
+			if restored.Available > restored.Capacity {
+				restored.Available = restored.Capacity
+			}
+			if err := m.persistProvider(restored); err != nil {
+				return err
+			}
+			m.providers[job.Provider] = restored
+		}
+
+		job.Status = JobCompleted
+		job.UpdatedAt = time.Now().UTC()
+		if err := m.persistJob(job); err != nil {
+			return err
+		}
+		m.jobs[jobID] = job
+		completed = job
+		return nil
+	}(); err != nil {
+		return nil, err
+	}
+
+	// A completed job leaves the active set and settled native MATRIX (already
+	// moved through consensus). Notify after releasing the locks to avoid
+	// deadlocking against the observer's reads.
+	m.notifyActiveJobs()
+	m.notifyJobCompleted(settledAmount)
+
+	cp := completed
+	return &cp, nil
 }
 
 // CancelJob cancels a pending or running job, returning the reserved capacity to

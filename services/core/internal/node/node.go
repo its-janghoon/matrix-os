@@ -232,22 +232,31 @@ func (n *Node) Start() error {
 	// consensus identity is persisted so its place in the fixed validator set /
 	// round-robin leader schedule survives restarts.
 	//
-	// SETTLEMENT AUTHORITY (accurate as shipped): consensus does NOT yet REPLACE
-	// the other two settlement paths that write to the same market ledger. Three
-	// writers currently coexist on n.market.Ledger():
+	// SETTLEMENT AUTHORITY (accurate as shipped): consensus is the authoritative
+	// native-MATRIX ledger for BOTH marketplace settlement flows. Both the
+	// inference marketplace (internal/inference.Service) and the compute
+	// marketplace (node.ComputeSettlementCoordinator.SettleAndCompleteJob,
+	// built via n.ComputeSettlementCoordinator) submit
+	// their buyer -> provider payment as a signed transfer into this engine and
+	// confirm it committed AND applied before marking the job done. So the
+	// default/production settlement path for compute and inference is consensus,
+	// charging the buyer exactly once through the committed, globally-agreed log.
+	//
+	// Two other writers still touch n.market.Ledger(), and their scope is now
+	// explicit rather than "deferred":
 	//   1. marketexchange (below) applies signed settlements received over gossip
-	//      via token.SettledLedger — the deliberately per-node PAIRWISE path.
+	//      via token.SettledLedger — the deliberately per-node PAIRWISE path for
+	//      cross-node exchange announcements. It is not consensus-ordered.
 	//   2. marketapi.SubmitSignedTransfer (below) settles directly through
-	//      token.SettledLedger / the token chain.
-	//   3. this consensus engine applies committed blocks.
-	// Consensus is the authoritative, globally-agreed ledger ONLY for the flows
-	// that submit through it (currently the inference marketplace via
-	// SettleThroughConsensus). The pairwise/token-chain paths are not routed
-	// through consensus and are not reconciled against it; a transfer settled on
-	// one path is invisible to the others' dedup/ordering. Routing (1) and (2)
-	// through consensus is planned but intentionally deferred here rather than
-	// done unsafely. Until then, deployments that require a single authoritative
-	// ledger should drive settlement exclusively through consensus.
+	//      token.SettledLedger / the token chain — a signed, nonce-checked direct
+	//      transfer primitive.
+	// These remain distinct primitives (a transfer settled on one is not in the
+	// others' dedup/ordering), but they are no longer the path the compute or
+	// inference marketplace flows take: those go through consensus (3, this
+	// engine). market.CompleteJob's direct ledger.Transfer is likewise retained
+	// only for local/test single-node use, not the default flow. Deployments that
+	// require a single authoritative ledger drive settlement through consensus,
+	// which the marketplace flows now do by default.
 	consensusAccount, err := consensus.LoadOrCreateValidatorAccount(n.kvStore)
 	if err != nil {
 		return fmt.Errorf("failed to load consensus identity: %w", err)
@@ -489,22 +498,40 @@ func (n *Node) GetExchange() *marketexchange.Exchange {
 
 // GetConsensus returns the global consensus engine: the fast leader-based BFT
 // ledger that gives every node an agreed-upon ordered log of settlements. It is
-// the authoritative path for settlement flows that submit through it (e.g. the
-// inference marketplace). Note it coexists with the marketexchange pairwise path
-// and the marketapi token-chain path on the same ledger; see the wiring notes in
-// Start for the current authority model.
+// the authoritative native-MATRIX ledger for the marketplace settlement flows:
+// BOTH compute (node.ComputeSettlementCoordinator) and inference
+// (inference.Service) settle buyer -> provider through this engine. The marketexchange pairwise path
+// and the marketapi token-chain path remain distinct direct primitives on the
+// same ledger; see the wiring notes in Start for the authority model.
 func (n *Node) GetConsensus() *consensus.Engine {
 	return n.consensus
+}
+
+// ComputeSettlementCoordinator builds a consensus-backed compute-settlement
+// coordinator over this node's market and running consensus engine, using the
+// given Accounts resolver to sign buyer transfers. It is the compute-marketplace
+// counterpart to the inference Service: a job completed through
+// SettleAndCompleteJob pays the provider in native MATRIX through consensus and
+// is charged exactly once. It returns an error if the consensus engine is not
+// running. The caller supplies the account resolver because the node does not
+// assume custody of buyer signing keys.
+func (n *Node) ComputeSettlementCoordinator(accounts Accounts) (*ComputeSettlementCoordinator, error) {
+	if n.consensus == nil {
+		return nil, fmt.Errorf("consensus engine is not running")
+	}
+	return NewComputeSettlementCoordinator(n.market, n.consensus, accounts)
 }
 
 // SettleThroughConsensus is the consensus-backed settlement entrypoint. It
 // submits a signed transfer of amount credits from the given account to
 // recipient into the global consensus engine; when a committed block includes
 // the transaction, every node deterministically reflects it on the market
-// ledger. This is the authoritative settlement path for callers that use it;
-// however it does NOT currently disable or reconcile the per-node pairwise
-// (marketexchange) or token-chain (marketapi.SubmitSignedTransfer) paths, which
-// still write to the same ledger. It returns the submitted signed transaction so
+// ledger. This is the authoritative settlement path, and the one the compute
+// (node.ComputeSettlementCoordinator) and inference marketplace flows use. The
+// per-node pairwise (marketexchange) and token-chain
+// (marketapi.SubmitSignedTransfer) paths remain distinct direct primitives on
+// the same ledger and are not reconciled against consensus; the marketplace
+// flows no longer use them. It returns the submitted signed transaction so
 // callers can correlate it with the committed block.
 func (n *Node) SettleThroughConsensus(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {
 	if n.consensus == nil {
