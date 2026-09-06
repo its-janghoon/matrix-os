@@ -18,6 +18,8 @@ func statusToProto(s inference.InferenceJobStatus) inferencev1.InferenceJobStatu
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_PENDING
 	case inference.InferenceJobRunning:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_RUNNING
+	case inference.InferenceJobSettling:
+		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_SETTLING
 	case inference.InferenceJobCompleted:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_COMPLETED
 	case inference.InferenceJobFailed:

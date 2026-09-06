@@ -230,3 +230,101 @@ func TestInferenceMarketplace_EndToEnd(t *testing.T) {
 		t.Fatalf("ValidateChain: %v", err)
 	}
 }
+
+// TestInferenceMarketplace_PriceScaledEndToEnd is the real-consensus counterpart
+// to the price-scaling unit test: it drives the whole path through an actual
+// consensus engine with a provider priced at 3 credits/unit and asserts the
+// buyer is charged units*price (7*3 = 21), settled and applied through consensus,
+// not the raw 7 tokens. This is the scenario the review said the price-1 e2e
+// hid.
+func TestInferenceMarketplace_PriceScaledEndToEnd(t *testing.T) {
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("kv.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	mkt, err := market.NewMarket(store)
+	if err != nil {
+		t.Fatalf("market.NewMarket: %v", err)
+	}
+
+	validator, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount(validator): %v", err)
+	}
+	vs, err := consensus.NewValidatorSet([]ed25519.PublicKey{validator.PublicKey})
+	if err != nil {
+		t.Fatalf("NewValidatorSet: %v", err)
+	}
+	chain := consensus.NewBlockChain(store)
+	engine, err := consensus.New(consensus.Config{
+		Transport:  newMemBus(),
+		Validators: vs,
+		Chain:      chain,
+		Ledger:     mkt.Ledger(),
+		Self:       validator,
+	})
+	if err != nil {
+		t.Fatalf("consensus.New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := engine.Start(ctx); err != nil {
+		t.Fatalf("engine.Start: %v", err)
+	}
+
+	buyer, _ := token.GenerateAccount()
+	provider, _ := token.GenerateAccount()
+	buyerID := buyer.AccountID()
+	providerID := provider.AccountID()
+
+	const initialCredits = 1000
+	const pricePerUnit = 3
+	const wantUnits = 7
+	const wantCharge = wantUnits * pricePerUnit // 21
+	if err := mkt.Ledger().Credit(buyerID, initialCredits); err != nil {
+		t.Fatalf("Credit: %v", err)
+	}
+	if err := mkt.RegisterProvider(market.Provider{ID: providerID, Capacity: 10000, PricePerUnit: pricePerUnit}); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	registry := NewRegistry()
+	if err := registry.Register(providerID, NewEchoBackend()); err != nil {
+		t.Fatalf("registry.Register: %v", err)
+	}
+
+	svc, err := NewService(Config{
+		Market:   mkt,
+		Registry: registry,
+		Settler:  engine,
+		Accounts: memAccounts{m: map[string]*token.Account{buyerID: buyer}},
+	})
+	if err != nil {
+		t.Fatalf("inference.NewService: %v", err)
+	}
+
+	// unitsEstimate 8 reserves price 8*3 = 24, which the buyer can afford.
+	job, err := svc.SubmitInferenceJob(buyerID, providerID, InferenceRequest{Model: "stub", Prompt: "hello world"}, 8)
+	if err != nil {
+		t.Fatalf("SubmitInferenceJob: %v", err)
+	}
+	fulfilled, err := svc.FulfillJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("FulfillJob: %v", err)
+	}
+	if fulfilled.Status != InferenceJobCompleted {
+		t.Fatalf("expected COMPLETED, got %q", fulfilled.Status)
+	}
+	if fulfilled.Units != wantCharge {
+		t.Fatalf("charged units = %d, want %d (7 units * price 3)", fulfilled.Units, wantCharge)
+	}
+
+	// Balances reflect the price-scaled charge applied through consensus.
+	buyerBal, _ := mkt.Ledger().Balance(buyerID)
+	provBal, _ := mkt.Ledger().Balance(providerID)
+	if buyerBal != initialCredits-wantCharge || provBal != wantCharge {
+		t.Fatalf("balances: buyer=%d provider=%d, want buyer=%d provider=%d",
+			buyerBal, provBal, initialCredits-wantCharge, wantCharge)
+	}
+}

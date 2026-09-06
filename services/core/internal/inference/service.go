@@ -33,15 +33,35 @@ var (
 // call to succeed; it reads settled balances back from the market ledger.
 type Settler interface {
 	SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error)
+	// WaitForSettlement blocks until the submitted transfer is committed to a
+	// block and its apply outcome is known, or ctx is done. It reports whether the
+	// transfer committed and whether it actually moved credits (applied). The
+	// Service uses this to avoid reporting a job COMPLETED for a payment that was
+	// only submitted to the mempool and may yet be skipped as unaffordable at
+	// apply time.
+	WaitForSettlement(ctx context.Context, tx *token.Transaction) (committed bool, applied bool, err error)
 }
+
+// DefaultSettlementTimeout bounds how long FulfillJob waits for a submitted
+// settlement to commit and apply before reporting the job as still SETTLING
+// rather than COMPLETED. It is generous relative to consensus commit latency so
+// the common case reports COMPLETED synchronously, while a stalled or dropped
+// settlement is reported honestly instead of being claimed complete.
+const DefaultSettlementTimeout = 5 * time.Second
 
 // InferenceJobStatus mirrors the marketplace job lifecycle for inference jobs.
 type InferenceJobStatus string
 
 // Inference job lifecycle states, aligned with market.JobStatus.
 const (
-	InferenceJobPending   InferenceJobStatus = "pending"
-	InferenceJobRunning   InferenceJobStatus = "running"
+	InferenceJobPending InferenceJobStatus = "pending"
+	InferenceJobRunning InferenceJobStatus = "running"
+	// InferenceJobSettling means the backend ran and the payment transfer was
+	// submitted to consensus, but the settlement has not yet committed+applied. It
+	// is a distinct, honest state so an API client never reads COMPLETED for a
+	// payment still pending in the mempool. A job in this state moves to COMPLETED
+	// once the settlement applies, and the Units/Completion are already populated.
+	InferenceJobSettling  InferenceJobStatus = "settling"
 	InferenceJobCompleted InferenceJobStatus = "completed"
 	InferenceJobFailed    InferenceJobStatus = "failed"
 )
@@ -81,9 +101,10 @@ type InferenceJob struct {
 // after which the underlying market job is marked COMPLETED.
 //
 // The Service is deliberately consistent with the existing market job lifecycle:
-// SubmitInferenceJob is a thin, inference-aware wrapper over market.SubmitJob at
-// a fixed price of one credit per unit-of-work reserved, and FulfillJob performs
-// the run + consensus settlement + market.CompleteJob completion.
+// SubmitInferenceJob is a thin, inference-aware wrapper over market.SubmitJob
+// that reserves capacity and runs the affordability check against the provider's
+// PricePerUnit, and FulfillJob performs the run + consensus settlement (scaled by
+// PricePerUnit and bounded by the reservation) + confirmation before completion.
 type Service struct {
 	market   *market.Market
 	registry *Registry
@@ -195,12 +216,15 @@ func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequ
 // consensus-backed Settler, and marks the underlying market job COMPLETED.
 //
 // Ordering rationale: the backend runs first (producing the real completion and
-// its token usage), then the buyer signs a consensus transfer of exactly that
-// many units to the provider, and only after settlement is submitted is the
-// market job completed. Because both the consensus apply path and
-// market.CompleteJob move credits on the same market ledger, the Service uses
-// the market job's reserved price as the settlement amount so the buyer is
-// charged exactly once and the two paths agree.
+// its token usage), then the buyer signs a consensus transfer for a charge that
+// is scaled by the provider's PricePerUnit and clamped to the reserved,
+// affordability-checked price, and the job is marked SETTLING. Only after the
+// consensus settlement is confirmed to have committed AND applied is the job
+// marked COMPLETED; if the transfer is skipped as unaffordable at apply time the
+// job is reported FAILED, never COMPLETED. Because both the consensus apply path
+// and market.CompleteJob would move credits on the same market ledger, the
+// Service settles once through consensus and releases the reservation rather
+// than calling CompleteJob, so the buyer is charged exactly once.
 func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, error) {
 	s.mu.Lock()
 	job, ok := s.jobs[jobID]
@@ -231,18 +255,42 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 		return nil, fmt.Errorf("inference: backend %q failed: %w", backend.Name(), err)
 	}
 
-	// Settle buyer -> provider through consensus for the ACTUAL units the backend
-	// reported (resp.Units), not the upfront estimate: the reservation was only a
-	// capacity + affordability gate, so the buyer is charged for real usage. The
-	// affordability of the estimate at submit time guarantees the buyer can afford
-	// the actual amount as long as it does not exceed the estimate; the backend's
-	// usage is bounded by the request, and any residual reserved capacity is
-	// released below.
-	if _, ok := s.market.GetJob(job.MarketJobID); !ok {
+	// Determine the amount to charge. The market reservation ran the affordability
+	// check against the reserved PRICE = unitsEstimate * PricePerUnit, so the
+	// settled charge must be (a) scaled by the provider's PricePerUnit and (b)
+	// bounded by that reserved price. We therefore:
+	//   1. clamp the billable units to the reserved estimate (a backend that
+	//      reports more usage than estimated is capped at what was reserved, never
+	//      silently over-charging the buyer), and
+	//   2. multiply by PricePerUnit to get the credit amount.
+	// This keeps the charged quantity identical to what was reserved and
+	// affordability-checked, closing the gap where raw resp.Units (unscaled,
+	// unbounded) was settled.
+	mjob, ok := s.market.GetJob(job.MarketJobID)
+	if !ok {
 		s.failJob(jobID)
 		return nil, fmt.Errorf("%w: market job %q", market.ErrJobNotFound, job.MarketJobID)
 	}
-	amount := resp.Units
+	prov, ok := s.market.GetProvider(provider)
+	if !ok {
+		s.failJob(jobID)
+		return nil, fmt.Errorf("%w: %q", market.ErrProviderNotFound, provider)
+	}
+
+	billableUnits := resp.Units
+	if billableUnits > mjob.Units {
+		// Backend reported more usage than was reserved; cap at the reservation so
+		// the buyer is never charged more than it agreed to and was checked for.
+		billableUnits = mjob.Units
+	}
+	amount := billableUnits * prov.PricePerUnit
+	// Defensive re-check: the charge must not exceed the reserved, affordability-
+	// checked price. Clamping units to the estimate guarantees this, but assert it
+	// so a future pricing change cannot silently reintroduce an over-charge.
+	if amount > mjob.Price {
+		s.failJob(jobID)
+		return nil, fmt.Errorf("inference: computed charge %d exceeds reserved price %d for job %q", amount, mjob.Price, job.MarketJobID)
+	}
 
 	buyerAcct, ok := s.accounts.Account(buyer)
 	if !ok {
@@ -255,27 +303,63 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	s.nonce[buyer] = nonce + 1
 	s.mu.Unlock()
 
-	if _, err := s.settler.SubmitAccountTransfer(buyerAcct, provider, amount, nonce); err != nil {
+	tx, err := s.settler.SubmitAccountTransfer(buyerAcct, provider, amount, nonce)
+	if err != nil {
 		s.failJob(jobID)
 		return nil, fmt.Errorf("inference: settlement failed: %w", err)
 	}
 
-	// The consensus transfer already moved the credits on the shared market
-	// ledger, so completing the market job via market.CompleteJob would transfer
-	// the price a SECOND time and double-charge the buyer. Instead, release the
-	// reserved capacity back to the provider (the settlement, not the reservation,
-	// is what charges the buyer) and record completion in the inference record.
+	// The settlement only moves credits when a consensus block commits and applies
+	// it; commitAndApply deterministically SKIPS an unaffordable transfer. So we
+	// must not report COMPLETED until we have confirmed the transfer actually
+	// applied. Mark the job SETTLING, record the billed units/completion, and wait
+	// (bounded) for the settlement to finalise.
+	s.mu.Lock()
+	job.Status = InferenceJobSettling
+	job.Completion = resp.Completion
+	job.Units = amount
+	job.Model = resp.Model
+	job.UpdatedAt = time.Now().UTC()
+	s.mu.Unlock()
+
+	waitCtx, cancel := context.WithTimeout(ctx, DefaultSettlementTimeout)
+	defer cancel()
+	committed, applied, werr := s.settler.WaitForSettlement(waitCtx, tx)
+	if werr != nil {
+		// We could not confirm the settlement within the timeout (or ctx ended).
+		// Leave the job in SETTLING: the transfer may still commit later, and a
+		// caller polling GetJob will observe COMPLETED only once it truly applies.
+		// We deliberately do NOT release capacity or claim completion here.
+		s.mu.Lock()
+		cp := *job
+		s.mu.Unlock()
+		return &cp, nil
+	}
+	if !committed || !applied {
+		// The transfer committed but was skipped as unaffordable (or did not
+		// commit): no credits moved. Report the job FAILED and release the reserved
+		// capacity. This is the honest outcome instead of a COMPLETED job whose
+		// payment never landed.
+		s.failJob(jobID)
+		s.mu.Lock()
+		cp := *job
+		s.mu.Unlock()
+		return &cp, fmt.Errorf("inference: settlement for job %q did not apply (payment skipped as unaffordable)", jobID)
+	}
+
+	// Settlement applied: credits moved buyer -> provider on the shared market
+	// ledger. Completing the market job via market.CompleteJob would transfer the
+	// price a SECOND time and double-charge the buyer, so instead release the
+	// reserved capacity (the settlement, not the reservation, charged the buyer)
+	// and mark the inference job COMPLETED.
 	if err := s.market.CancelJob(job.MarketJobID); err != nil {
 		// Capacity release failure is non-fatal to settlement, which already
-		// succeeded; surface it so the operator can reconcile capacity.
+		// applied; surface it so the operator can reconcile capacity.
 		return nil, fmt.Errorf("inference: settled but failed to release capacity for job %q: %w", job.MarketJobID, err)
 	}
 
 	s.mu.Lock()
 	job.Status = InferenceJobCompleted
-	job.Completion = resp.Completion
-	job.Units = amount
-	job.Model = resp.Model
 	job.UpdatedAt = time.Now().UTC()
 	cp := *job
 	s.mu.Unlock()

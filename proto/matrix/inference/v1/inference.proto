@@ -16,10 +16,17 @@ enum InferenceJobStatus {
     // Job is actively running on the provider's backend.
     INFERENCE_JOB_STATUS_RUNNING = 2;
     // Job completed: the completion was produced and units settled buyer ->
-    // provider through the consensus-backed token settlement.
+    // provider through the consensus-backed token settlement, and that settlement
+    // has committed and applied on the ledger.
     INFERENCE_JOB_STATUS_COMPLETED = 3;
     // Job failed to run or settle; reserved capacity was returned.
     INFERENCE_JOB_STATUS_FAILED = 4;
+    // Job's completion was produced and its payment transfer was submitted to
+    // consensus, but the settlement has not yet committed+applied. The completion
+    // and billed units are already populated; the job advances to COMPLETED once
+    // the settlement applies. Reported so a client never reads COMPLETED for a
+    // payment still pending in the mempool.
+    INFERENCE_JOB_STATUS_SETTLING = 5;
 }
 
 // ChatRole enumerates the standard chat message roles for chat-style inference.
