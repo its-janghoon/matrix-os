@@ -55,6 +55,13 @@ const DefaultComputeSettlementTimeout = 5 * time.Second
 // moved credits) is known.
 type ComputeSettler interface {
 	SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error)
+	// Submit re-submits an already-signed transfer. The consensus engine dedups
+	// by (sender, nonce, signature), so re-submitting the identical transaction
+	// is a safe no-op if it is already in the mempool or committed. The compute
+	// coordinator uses this on retry to re-drive the SAME pending transfer rather
+	// than signing a fresh one with a new nonce, which is what closes the
+	// retry-after-timeout double-charge window (see SettleAndCompleteJob).
+	Submit(tx *token.Transaction) error
 	WaitForSettlement(ctx context.Context, tx *token.Transaction) (committed bool, applied bool, err error)
 }
 
@@ -89,6 +96,15 @@ type ComputeSettlementCoordinator struct {
 
 	mu    sync.Mutex
 	nonce map[string]uint64
+	// pending remembers the signed transfer submitted for a job whose settlement
+	// has not yet been confirmed committed+applied (or definitively failed). On a
+	// retry after a WaitForSettlement timeout, the coordinator re-submits THIS
+	// exact transaction instead of signing a new one. Because the consensus
+	// engine dedups by (sender, nonce, signature), the late-committing original
+	// and the retry are the SAME transaction and can commit at most once, so a
+	// timeout-then-retry never double-charges the buyer. The entry is cleared once
+	// the settlement is confirmed applied or honestly failed (unaffordable).
+	pending map[string]*token.Transaction
 }
 
 // NewComputeSettlementCoordinator builds a ComputeSettlementCoordinator over the
@@ -109,6 +125,7 @@ func NewComputeSettlementCoordinator(m *market.Market, settler ComputeSettler, a
 		settler:  settler,
 		accounts: accounts,
 		nonce:    make(map[string]uint64),
+		pending:  make(map[string]*token.Transaction),
 	}, nil
 }
 
@@ -119,6 +136,31 @@ func (c *ComputeSettlementCoordinator) nextNonce(buyer string) uint64 {
 	n := c.nonce[buyer]
 	c.nonce[buyer] = n + 1
 	return n
+}
+
+// pendingTx returns the previously-submitted, not-yet-confirmed transfer for a
+// job, if any.
+func (c *ComputeSettlementCoordinator) pendingTx(jobID string) (*token.Transaction, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	tx, ok := c.pending[jobID]
+	return tx, ok
+}
+
+// setPendingTx records the outstanding transfer for a job so a later retry
+// re-drives the SAME transaction instead of signing a fresh one.
+func (c *ComputeSettlementCoordinator) setPendingTx(jobID string, tx *token.Transaction) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.pending[jobID] = tx
+}
+
+// clearPendingTx forgets the outstanding transfer for a job once its settlement
+// is confirmed applied or honestly failed.
+func (c *ComputeSettlementCoordinator) clearPendingTx(jobID string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	delete(c.pending, jobID)
 }
 
 // SettleAndCompleteJob settles a pending or running compute job's price from
@@ -147,6 +189,16 @@ func (c *ComputeSettlementCoordinator) nextNonce(buyer string) uint64 {
 // per-buyer nonce, consensus dedups committed transactions, and the apply path
 // re-checks affordability at commit time.
 //
+// Retry-after-timeout is exactly-once, not at-most-twice. On a WaitForSettlement
+// timeout the job is deliberately left reserved so the caller can retry, and the
+// signed transfer is remembered as pending for this job. A retry does NOT sign a
+// fresh transfer with a new nonce (which would be a distinct transaction that
+// consensus could commit IN ADDITION to a late-committing original, double-
+// charging the buyer). Instead it re-submits the SAME pending transaction; the
+// consensus engine dedups by (sender, nonce, signature), so the original and
+// every retry collapse to one transaction that can commit at most once. This
+// closes the double-charge window that a per-call fresh nonce would open.
+//
 // On success it returns the settled Job (COMPLETED). If the settlement cannot be
 // confirmed within DefaultComputeSettlementTimeout the reservation is left intact
 // and the context error is returned, so a caller can retry rather than seeing a
@@ -165,10 +217,24 @@ func (c *ComputeSettlementCoordinator) SettleAndCompleteJob(ctx context.Context,
 		return nil, fmt.Errorf("settle job %q: %w: %q", jobID, ErrNoSigningAccount, job.Buyer)
 	}
 
-	nonce := c.nextNonce(job.Buyer)
-	tx, err := c.settler.SubmitAccountTransfer(buyerAcct, job.Provider, job.Price, nonce)
-	if err != nil {
-		return nil, fmt.Errorf("settle job %q: %w", jobID, err)
+	// If a previous attempt for this job already submitted a transfer that never
+	// confirmed, re-drive that EXACT transaction rather than signing a new one.
+	// Re-submitting the identical signed tx is a safe no-op in the engine's
+	// dedup set, so the original and the retry are the same transaction and can
+	// only commit once. Only sign a fresh transfer for a job's first attempt.
+	tx, ok := c.pendingTx(jobID)
+	if ok {
+		if err := c.settler.Submit(tx); err != nil {
+			return nil, fmt.Errorf("settle job %q: re-submitting pending transfer: %w", jobID, err)
+		}
+	} else {
+		nonce := c.nextNonce(job.Buyer)
+		submitted, err := c.settler.SubmitAccountTransfer(buyerAcct, job.Provider, job.Price, nonce)
+		if err != nil {
+			return nil, fmt.Errorf("settle job %q: %w", jobID, err)
+		}
+		tx = submitted
+		c.setPendingTx(jobID, tx)
 	}
 
 	waitCtx, cancel := context.WithTimeout(ctx, DefaultComputeSettlementTimeout)
@@ -176,15 +242,20 @@ func (c *ComputeSettlementCoordinator) SettleAndCompleteJob(ctx context.Context,
 	committed, applied, werr := c.settler.WaitForSettlement(waitCtx, tx)
 	if werr != nil {
 		// Could not confirm within the timeout (or ctx ended). Leave the job
-		// reserved and uncompleted: the transfer may still commit later, and the
-		// caller can re-drive settlement. We deliberately do NOT release capacity
+		// reserved and uncompleted and KEEP the pending transfer recorded so a
+		// retry re-drives the same transaction. The transfer may still commit
+		// later; because a retry reuses it rather than submitting a new nonce, the
+		// buyer is charged at most once. We deliberately do NOT release capacity
 		// or claim completion here.
 		return nil, fmt.Errorf("settle job %q: awaiting settlement: %w", jobID, werr)
 	}
 	if !committed || !applied {
 		// The transfer committed but was skipped as unaffordable (or did not
 		// commit): no credits moved. Cancel the reservation and report the honest
-		// failure instead of a COMPLETED job whose payment never landed.
+		// failure instead of a COMPLETED job whose payment never landed. The
+		// pending transfer is resolved (it committed unapplied, so its dedup key
+		// is permanently in the committed set) and can be forgotten.
+		c.clearPendingTx(jobID)
 		_ = c.market.CancelJob(jobID)
 		return nil, fmt.Errorf("settle job %q: %w", jobID, ErrSettlementNotApplied)
 	}
@@ -192,7 +263,9 @@ func (c *ComputeSettlementCoordinator) SettleAndCompleteJob(ctx context.Context,
 	// Settlement applied: credits moved buyer -> provider on the shared market
 	// ledger via consensus. Finalize by releasing the reservation (do NOT
 	// CompleteJob, which would transfer the price a second time) and mark the job
-	// completed.
+	// completed. The pending transfer has committed and applied exactly once, so
+	// forget it.
+	c.clearPendingTx(jobID)
 	completed, err := c.market.ReleaseAsCompleted(jobID, job.Price)
 	if err != nil {
 		return nil, fmt.Errorf("settle job %q: settled but failed to finalize: %w", jobID, err)

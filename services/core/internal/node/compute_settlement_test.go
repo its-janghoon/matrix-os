@@ -80,6 +80,8 @@ type fakeSettler struct {
 	lastNonce     uint64
 	submitted     int
 
+	resubmitted int
+
 	committed bool
 	applied   bool
 	waitErr   error
@@ -97,6 +99,19 @@ func (f *fakeSettler) SubmitAccountTransfer(_ *token.Account, recipient string, 
 	f.lastNonce = nonce
 	f.submitted++
 	return &token.Transaction{To: recipient, Amount: amount, Nonce: nonce}, nil
+}
+
+// Submit records a re-submission of an already-signed transfer, as the coordinator
+// does on retry. It is a no-op that just counts the call so tests can assert a
+// retry re-drove the same transaction rather than signing a new one.
+func (f *fakeSettler) Submit(_ *token.Transaction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.resubmitted++
+	return nil
 }
 
 func (f *fakeSettler) WaitForSettlement(_ context.Context, _ *token.Transaction) (bool, bool, error) {
@@ -345,6 +360,154 @@ func TestComputeSettlement_ChargedExactlyOnce(t *testing.T) {
 	buyerBal, _ := mkt.Ledger().Balance(buyerID)
 	if buyerBal != buyerFunds-wantPrice {
 		t.Fatalf("buyer charged %d, want exactly one price %d (charged once)", buyerFunds-buyerBal, wantPrice)
+	}
+}
+
+// timeoutOnceSettler wraps a real ComputeSettler and forces the FIRST
+// WaitForSettlement call to time out (returning context.DeadlineExceeded) while
+// still submitting the transfer to the real engine, so the original transfer
+// commits in the background. Every later call delegates to the wrapped engine.
+// It models the retry-after-timeout scenario: attempt 1 submits and "times out"
+// (but the tx really does commit later), and the retry must re-drive the SAME
+// transaction rather than a fresh nonce, so the buyer is charged at most once.
+type timeoutOnceSettler struct {
+	inner ComputeSettler
+
+	mu           sync.Mutex
+	waitCalls    int
+	submitCalls  int
+	acctSubmits  int
+	lastSubmitTx *token.Transaction
+}
+
+func (s *timeoutOnceSettler) SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {
+	tx, err := s.inner.SubmitAccountTransfer(from, recipient, amount, nonce)
+	s.mu.Lock()
+	s.acctSubmits++
+	s.lastSubmitTx = tx
+	s.mu.Unlock()
+	return tx, err
+}
+
+func (s *timeoutOnceSettler) Submit(tx *token.Transaction) error {
+	s.mu.Lock()
+	s.submitCalls++
+	s.mu.Unlock()
+	return s.inner.Submit(tx)
+}
+
+func (s *timeoutOnceSettler) WaitForSettlement(ctx context.Context, tx *token.Transaction) (bool, bool, error) {
+	s.mu.Lock()
+	s.waitCalls++
+	first := s.waitCalls == 1
+	s.mu.Unlock()
+	if first {
+		// Force a timeout on the first attempt WITHOUT canceling the underlying
+		// submission: the tx is already in the engine mempool and will commit.
+		return false, false, context.DeadlineExceeded
+	}
+	return s.inner.WaitForSettlement(ctx, tx)
+}
+
+// TestComputeSettlement_RetryAfterTimeoutChargesAtMostOnce proves the double-
+// charge window is closed. Attempt 1 submits the transfer and times out (but the
+// transfer still commits on the real engine in the background). A retry re-drives
+// the SAME pending transaction (not a fresh nonce), so consensus dedup collapses
+// the original and the retry into one committed transaction and the buyer is
+// charged exactly the single job price, never twice.
+func TestComputeSettlement_RetryAfterTimeoutChargesAtMostOnce(t *testing.T) {
+	const (
+		pricePerUnit = 7
+		units        = 6
+		buyerFunds   = 1000
+		wantPrice    = units * pricePerUnit // 42
+	)
+
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("kv.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	mkt, err := market.NewMarket(store)
+	if err != nil {
+		t.Fatalf("market.NewMarket: %v", err)
+	}
+	buyer, _ := token.GenerateAccount()
+	provider, _ := token.GenerateAccount()
+	buyerID := buyer.AccountID()
+	providerID := provider.AccountID()
+
+	treasury := token.NewTreasury(mkt.Ledger(), store)
+	if err := treasury.ApplyGenesis(nil, token.NativeMaxSupply); err != nil {
+		t.Fatalf("ApplyGenesis: %v", err)
+	}
+	if err := treasury.FundFromRewardPool(buyerID, buyerFunds); err != nil {
+		t.Fatalf("FundFromRewardPool: %v", err)
+	}
+	if err := mkt.RegisterProvider(market.Provider{ID: providerID, Capacity: 100000, PricePerUnit: pricePerUnit}); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	engine, committed := newConsensusEngine(t, ctx, mkt, store)
+	settler := &timeoutOnceSettler{inner: engine}
+	coord, err := NewComputeSettlementCoordinator(mkt, settler, memAccounts{m: map[string]*token.Account{buyerID: buyer}})
+	if err != nil {
+		t.Fatalf("NewComputeSettlementCoordinator: %v", err)
+	}
+
+	job, err := mkt.SubmitJob(buyerID, providerID, units)
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	// Attempt 1: submits the transfer, then "times out". The job stays reserved.
+	if _, err := coord.SettleAndCompleteJob(ctx, job.ID); err == nil {
+		t.Fatal("attempt 1 expected to fail with a settlement timeout")
+	}
+	got, _ := mkt.GetJob(job.ID)
+	if got.Status != market.JobPending {
+		t.Fatalf("after timeout job status = %q, want pending (reservation intact)", got.Status)
+	}
+
+	// The original transfer commits on the engine in the background.
+	select {
+	case <-committed:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for the original transfer to commit")
+	}
+
+	// Retry: must re-drive the SAME transaction (Submit), not sign a fresh nonce.
+	settled, err := coord.SettleAndCompleteJob(ctx, job.ID)
+	if err != nil {
+		t.Fatalf("retry SettleAndCompleteJob: %v", err)
+	}
+	if settled.Status != market.JobCompleted {
+		t.Fatalf("after retry job status = %q, want completed", settled.Status)
+	}
+
+	// The retry re-submitted the pending transfer rather than signing a new one.
+	settler.mu.Lock()
+	acctSubmits := settler.acctSubmits
+	resubmits := settler.submitCalls
+	settler.mu.Unlock()
+	if acctSubmits != 1 {
+		t.Errorf("SubmitAccountTransfer called %d times, want exactly 1 (retry must reuse the pending tx)", acctSubmits)
+	}
+	if resubmits < 1 {
+		t.Errorf("Submit (re-submit of pending tx) called %d times, want >= 1 on retry", resubmits)
+	}
+
+	// SAFETY: even though the original committed AND the retry re-drove it, the
+	// buyer is charged exactly one price, never twice.
+	buyerBal, _ := mkt.Ledger().Balance(buyerID)
+	if buyerBal != buyerFunds-wantPrice {
+		t.Fatalf("buyer balance = %d, want %d (charged exactly one price %d, never twice)", buyerBal, buyerFunds-wantPrice, wantPrice)
+	}
+	provBal, _ := mkt.Ledger().Balance(providerID)
+	if provBal != wantPrice {
+		t.Fatalf("provider balance = %d, want %d (paid exactly once)", provBal, wantPrice)
 	}
 }
 
