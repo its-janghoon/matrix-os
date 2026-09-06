@@ -4,9 +4,9 @@ import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import HeroBackdrop from '@/components/HeroBackdrop';
 import Navigation from '@/components/Navigation';
+import { Card, CheckItem, Eyebrow, IconBadge, Section } from '@/components/marketing';
 import {
   FiArrowRight,
-  FiCheck,
   FiCpu,
   FiDownload,
   FiGlobe,
@@ -17,72 +17,6 @@ import {
   FiTerminal,
   FiZap,
 } from 'react-icons/fi';
-
-const CheckItem = ({ children }: { children: React.ReactNode }) => (
-  <li className='flex gap-3'>
-    <span className='mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-primary/15 border border-primary/30'>
-      <FiCheck className='h-3 w-3 text-primary-300' />
-    </span>
-    <span className='text-grayscale-300'>{children}</span>
-  </li>
-);
-
-const Eyebrow = ({ children, tone = 'primary' }: { children: React.ReactNode; tone?: 'primary' | 'secondary' | 'accent' }) => {
-  const tones = {
-    primary: 'bg-primary/10 text-primary-300 border-primary/25',
-    secondary: 'bg-secondary/10 text-secondary-300 border-secondary/25',
-    accent: 'bg-accent-300/10 text-accent-300 border-accent-300/25',
-  } as const;
-  return (
-    <span
-      className={`inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] ${tones[tone]}`}
-    >
-      {children}
-    </span>
-  );
-};
-
-// Section wrapper with a consistent container + vertical rhythm.
-const Section = ({
-  id,
-  children,
-  className = '',
-}: {
-  id?: string;
-  children: React.ReactNode;
-  className?: string;
-}) => (
-  <section id={id} className={`relative py-24 sm:py-28 ${id ? 'scroll-mt-20' : ''} ${className}`}>
-    <div className='mx-auto max-w-7xl px-4 sm:px-6 lg:px-8'>{children}</div>
-  </section>
-);
-
-const Card = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => (
-  <div
-    className={`rounded-3xl border border-white/10 bg-white/[0.03] p-8 shadow-card backdrop-blur-sm transition-all duration-300 hover:border-white/20 hover:bg-white/[0.05] ${className}`}
-  >
-    {children}
-  </div>
-);
-
-const IconBadge = ({
-  icon: Icon,
-  tone = 'primary',
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  tone?: 'primary' | 'secondary' | 'accent';
-}) => {
-  const tones = {
-    primary: 'bg-primary/10 border-primary/25 text-primary-300',
-    secondary: 'bg-secondary/10 border-secondary/25 text-secondary-300',
-    accent: 'bg-accent-300/10 border-accent-300/25 text-accent-300',
-  } as const;
-  return (
-    <div className={`flex h-12 w-12 items-center justify-center rounded-2xl border ${tones[tone]}`}>
-      <Icon className='h-5 w-5' />
-    </div>
-  );
-};
 
 // Original placeholder tiles for the ecosystem band (NOT real third-party logos).
 const ecosystemTiles = [

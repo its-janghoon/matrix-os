@@ -2,13 +2,14 @@ import Link from 'next/link';
 
 const columns: { title: string; links: { label: string; href: string; external?: boolean }[] }[] = [
   {
-    title: 'Platform',
+    title: 'Products',
     links: [
-      { label: 'Compute marketplace', href: '/#marketplace' },
-      { label: 'MATRIX coin', href: '/#token' },
-      { label: 'Consensus', href: '/#consensus' },
-      { label: 'LLM inference', href: '/#inference' },
-      { label: 'Matrix Console', href: '/#console' },
+      { label: 'Compute Marketplace', href: '/products/marketplace' },
+      { label: 'MATRIX Token', href: '/products/token' },
+      { label: 'Consensus', href: '/products/consensus' },
+      { label: 'LLM Inference', href: '/products/inference' },
+      { label: 'Matrix Console', href: '/products/console' },
+      { label: 'matrix CLI', href: '/products/cli' },
     ],
   },
   {
@@ -16,15 +17,16 @@ const columns: { title: string; links: { label: string; href: string; external?:
     links: [
       { label: 'Documentation', href: '/docs' },
       { label: 'Quickstart', href: '/docs/quickstart' },
-      { label: 'matrix CLI', href: '/docs/cli' },
+      { label: 'Installation', href: '/docs/installation' },
       { label: 'Architecture', href: '/docs/architecture' },
       { label: 'Configuration', href: '/docs/configuration' },
+      { label: 'matrix CLI', href: '/docs/cli' },
     ],
   },
   {
     title: 'Resources',
     links: [
-      { label: 'Introduction', href: '/docs/introduction' },
+      { label: 'How it works', href: '/how-it-works' },
       { label: 'Matrix Protocol', href: '/docs/matrix-protocol' },
       { label: 'Soul Protocol', href: '/docs/soul-protocol' },
       { label: 'Download', href: '/download' },
