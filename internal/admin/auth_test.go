@@ -316,11 +316,12 @@ func TestDeployService_Authorization(t *testing.T) {
 			name: "admin can stop deployment",
 			ctx:  metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "admin-key"})),
 			fn: func(ctx context.Context) error {
-				// First deploy
-				if err := service.DeployAgent(ctx, "test-agent", map[string]interface{}{}); err != nil {
+				// First deploy (use a unique ID to avoid colliding with
+				// the deployment created by earlier subtests).
+				if err := service.DeployAgent(ctx, "test-agent-stop", map[string]interface{}{}); err != nil {
 					return err
 				}
-				return service.StopDeployment(ctx, "test-agent")
+				return service.StopDeployment(ctx, "test-agent-stop")
 			},
 			wantErr: nil,
 		},

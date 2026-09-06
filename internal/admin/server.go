@@ -56,9 +56,15 @@ func NewServer(cfg Config) (*Server, error) {
 	// Register health service
 	healthpb.RegisterHealthServer(grpcServer, healthSvc)
 
-	// Create and register custom services
-	deploySvc := NewDeployService(auth)
-	logsSvc := NewLogsService(auth)
+	// Create and register custom services.
+	// When auth is not required, pass a nil authenticator so the services
+	// skip permission checks (they guard on `s.auth != nil`).
+	svcAuth := auth
+	if !cfg.RequireAuth {
+		svcAuth = nil
+	}
+	deploySvc := NewDeployService(svcAuth)
+	logsSvc := NewLogsService(svcAuth)
 
 	return &Server{
 		grpcServer:  grpcServer,
