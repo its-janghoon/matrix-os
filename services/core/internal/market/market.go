@@ -65,15 +65,16 @@ type Observer interface {
 	ProviderCountChanged(count int)
 	// ActiveJobsChanged reports the current number of pending or running jobs.
 	ActiveJobsChanged(count int)
-	// JobCompleted reports that one job settled to completion, transferring
-	// credits compute credits from buyer to provider.
-	JobCompleted(credits uint64)
+	// JobCompleted reports that one job settled to completion, transferring the
+	// given amount of native MATRIX (in native base units) from buyer to
+	// provider.
+	JobCompleted(amount uint64)
 }
 
-// Market is the compute-job marketplace engine. It owns a credits Ledger and
-// in-memory indexes of providers and jobs, each guarded by its own RWMutex
-// following the map+mutex field convention used in node.go. All entities are
-// persisted through the Pebble kv.Store as JSON.
+// Market is the compute-job marketplace engine. It owns the native MATRIX
+// Ledger and in-memory indexes of providers and jobs, each guarded by its own
+// RWMutex following the map+mutex field convention used in node.go. All entities
+// are persisted through the Pebble kv.Store as JSON.
 type Market struct {
 	store  *kv.Store
 	ledger *Ledger
@@ -88,7 +89,7 @@ type Market struct {
 }
 
 // NewMarket creates a new Market backed by the given store, constructing the
-// credits ledger internally. It rehydrates any providers and jobs previously
+// native MATRIX ledger internally. It rehydrates any providers and jobs previously
 // persisted to the store so a Market built over an existing store observes the
 // durable marketplace state rather than starting empty. Over a fresh store this
 // is a no-op and the maps start empty.
@@ -134,8 +135,9 @@ func (m *Market) load() error {
 	return nil
 }
 
-// Ledger exposes the underlying compute-credits ledger so callers can credit
-// buyer accounts and inspect balances.
+// Ledger exposes the underlying native MATRIX ledger so callers can inspect
+// balances and perform internal balance adjustments. Honest issuance of new
+// native MATRIX goes through token.Treasury, not raw ledger credits.
 func (m *Market) Ledger() *Ledger {
 	return m.ledger
 }
@@ -188,12 +190,12 @@ func (m *Market) notifyActiveJobs() {
 	m.observer.ActiveJobsChanged(m.countActiveJobs())
 }
 
-// notifyJobCompleted reports a settled job and the credits it transferred.
-func (m *Market) notifyJobCompleted(credits uint64) {
+// notifyJobCompleted reports a settled job and the native MATRIX it transferred.
+func (m *Market) notifyJobCompleted(amount uint64) {
 	if m.observer == nil {
 		return
 	}
-	m.observer.JobCompleted(credits)
+	m.observer.JobCompleted(amount)
 }
 
 // persistProvider writes a provider to the KV store as JSON.
@@ -252,8 +254,8 @@ func (m *Market) RegisterProvider(p Provider) error {
 // SubmitJob reserves capacity for a paid compute job. It looks up the provider
 // (ErrProviderNotFound if unknown), verifies available capacity
 // (ErrInsufficientCapacity), computes price = units * PricePerUnit, and verifies
-// the buyer can afford it (ErrInsufficientFunds). No credits move at submit
-// time; the buyer is only charged on completion. On success it decrements the
+// the buyer can afford it (ErrInsufficientFunds). No native MATRIX moves at
+// submit time; the buyer is only charged on completion. On success it decrements the
 // provider's Available capacity, creates a pending Job with a generated ID, and
 // persists both.
 func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error) {
@@ -261,7 +263,7 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 		return nil, fmt.Errorf("units must be > 0: %w", ErrInsufficientCapacity)
 	}
 	// Reject self-dealing: a buyer settling a job against their own provider
-	// account would transfer credits from an account to itself on completion,
+	// account would transfer native MATRIX from an account to itself on completion,
 	// which is economically meaningless and would otherwise exercise the
 	// self-transfer path in the ledger.
 	if buyer == providerID {
@@ -287,7 +289,7 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 		return nil, err
 	}
 	if balance < price {
-		return nil, fmt.Errorf("buyer %q has %d credits, job costs %d: %w",
+		return nil, fmt.Errorf("buyer %q has %d native MATRIX, job costs %d: %w",
 			buyer, balance, price, ErrInsufficientFunds)
 	}
 
@@ -348,11 +350,11 @@ func (m *Market) CompleteJob(jobID string) error {
 		return fmt.Errorf("complete job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
 	}
 
-	// Transfer credits first; only mark completed if the transfer succeeds so a
-	// failed transfer leaves the job non-completed. job.Provider is always a
+	// Transfer native MATRIX first; only mark completed if the transfer succeeds
+	// so a failed transfer leaves the job non-completed. job.Provider is always a
 	// provider ID that RegisterProvider validated and SubmitJob looked up, and
 	// SubmitJob rejects buyer == provider, so the ledger credits a real, distinct
-	// counterparty rather than stranding credits on a typo'd account.
+	// counterparty rather than stranding funds on a typo'd account.
 	if err := m.ledger.Transfer(job.Buyer, job.Provider, job.Price); err != nil {
 		m.jobsMu.Unlock()
 		return fmt.Errorf("complete job %q: %w", jobID, err)
@@ -365,18 +367,18 @@ func (m *Market) CompleteJob(jobID string) error {
 		return err
 	}
 	m.jobs[jobID] = job
-	credits := job.Price
+	settled := job.Price
 	m.jobsMu.Unlock()
 
-	// A completed job leaves the active set and settles credits. Notify after
-	// releasing the lock to avoid deadlocking against the observer's reads.
+	// A completed job leaves the active set and settles native MATRIX. Notify
+	// after releasing the lock to avoid deadlocking against the observer's reads.
 	m.notifyActiveJobs()
-	m.notifyJobCompleted(credits)
+	m.notifyJobCompleted(settled)
 	return nil
 }
 
 // CancelJob cancels a pending or running job, returning the reserved capacity to
-// its provider. No credits are transferred.
+// its provider. No native MATRIX is transferred.
 func (m *Market) CancelJob(jobID string) error {
 	if err := func() error {
 		// Acquire providersMu before jobsMu to match SubmitJob's global lock

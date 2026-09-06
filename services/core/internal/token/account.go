@@ -7,7 +7,13 @@
 // append-only, SHA-256 hash-chained transaction log (see Chain) persisted in
 // the shared Pebble kv.Store, forming a minimal blockchain-style ledger of
 // settlements. The SettledLedger type integrates the existing market.Ledger so
-// compute credits move only through verified, signed, chained transactions.
+// native MATRIX moves only through verified, signed, chained transactions.
+//
+// This package also defines the native MATRIX monetary model: supply.go holds
+// the single source of truth for the native base-unit scale and its exact
+// conversion to the wrapped ERC-20, and genesis.go (Treasury) provides the
+// honest issuance path (a one-time genesis allocation, a supply cap, and a
+// genesis-funded reward pool) that replaces ad-hoc unbounded minting.
 //
 // This package deliberately depends only on the Go standard library
 // (crypto/ed25519, crypto/sha256, encoding/hex, encoding/binary) so it adds no

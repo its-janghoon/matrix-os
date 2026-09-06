@@ -14,8 +14,8 @@ import (
 var ErrUnaffordable = fmt.Errorf("token: %w", market.ErrInsufficientFunds)
 
 // ErrSelfTransfer is returned when a signed transfer names the same account as
-// both sender and recipient. Such a transfer moves zero credits (the ledger
-// no-ops a self-transfer) but would still consume a nonce and append an
+// both sender and recipient. Such a transfer moves zero native MATRIX (the
+// ledger no-ops a self-transfer) but would still consume a nonce and append an
 // economically-empty record, so Settle rejects it before touching the chain. It
 // wraps market.ErrSelfDealing so callers may match on either.
 var ErrSelfTransfer = fmt.Errorf("token: %w", market.ErrSelfDealing)
@@ -27,15 +27,15 @@ var ErrSelfTransfer = fmt.Errorf("token: %w", market.ErrSelfDealing)
 var ErrEmptyRecipient = fmt.Errorf("%w: recipient must not be empty", ErrInvalidTransaction)
 
 // SettledLedger is the signed-settlement entrypoint the marketplace, gRPC and
-// P2P layers use to move compute credits. Credits move ONLY through this path:
-// a caller submits a signed Transaction, the settlement verifies and appends it
-// to the hash-chained log, and only then moves credits on the wrapped
-// market.Ledger.
+// P2P layers use to move native MATRIX. Native MATRIX moves ONLY through this
+// path: a caller submits a signed Transaction, the settlement verifies and
+// appends it to the hash-chained log, and only then moves the balance on the
+// wrapped market.Ledger.
 //
 // Invariant and ordering: SettledLedger appends the transaction to the chain
 // FIRST and performs the ledger transfer SECOND. Append is the authoritative,
 // gatekeeping step (signature + nonce + hash-link checks); if it fails, no
-// credits move and no record is written. To avoid a chain record without a
+// native MATRIX moves and no record is written. To avoid a chain record without a
 // matching balance change, Settle runs the affordability check, the append, and
 // the transfer as one critical section under the market ledger's write lock (via
 // Ledger.Atomically). Because every other ledger writer, including the direct
@@ -57,7 +57,10 @@ func NewSettledLedger(ledger *market.Ledger, chain *Chain) *SettledLedger {
 }
 
 // Ledger exposes the wrapped market.Ledger for balance reads and internal,
-// unsigned operations (e.g. minting initial credits in tests or bootstrap).
+// unsigned operations. Honest issuance of new native MATRIX (genesis allocation,
+// the genesis-funded reward pool, and supply-capped issuance) goes through
+// Treasury, which tracks cumulative supply and enforces NativeMaxSupply; the raw
+// ledger handle here is for balance reads and internal, non-issuing adjustments.
 func (s *SettledLedger) Ledger() *market.Ledger {
 	return s.ledger
 }
@@ -67,11 +70,11 @@ func (s *SettledLedger) Chain() *Chain {
 	return s.chain
 }
 
-// Settle verifies and records a signed transfer, then moves credits from the
-// sender (tx.From's AccountID) to the recipient (tx.To). It returns the appended
-// chain Record on success.
+// Settle verifies and records a signed transfer, then moves native MATRIX from
+// the sender (tx.From's AccountID) to the recipient (tx.To). It returns the
+// appended chain Record on success.
 //
-// On any failure NO credits move and NO transaction is appended:
+// On any failure NO native MATRIX moves and NO transaction is appended:
 //   - an empty recipient or a self-transfer is rejected before the chain is
 //     touched;
 //   - an invalid signature, wrong nonce, or bad prev-hash is rejected by

@@ -1,13 +1,19 @@
 // Package market implements the economic core of the Matrix OS compute
-// marketplace: a compute-credits ledger and a compute-job marketplace.
+// marketplace: the native MATRIX balance ledger and a compute-job marketplace.
 //
 // Providers register idle-compute capacity, buyers submit paid compute jobs,
-// and credits transfer from buyer to provider when a job completes. All state
-// is persisted through the existing Pebble-backed kv.Store.
+// and native MATRIX transfers from buyer to provider when a job completes. All
+// state is persisted through the existing Pebble-backed kv.Store.
 //
-// This is a self-contained internal package. It is not a proto/gRPC service,
-// not wired into the Node, and not a real blockchain or token; those remain
-// future roadmap items.
+// Balances are the canonical native MATRIX balances of the consensus L1: this
+// ledger is the single source of truth for who holds how much of the coin.
+// Every balance is a uint64 count of native base units (9 native decimals; see
+// token.NativeUnit) stored under the market/balance/<account> key prefix.
+// Issuance is not open-ended: native MATRIX enters circulation only through the
+// genesis allocation and the supply-capped issuance/reward-pool path defined in
+// internal/token (see token.Treasury), and thereafter moves between accounts via
+// signed, consensus-ordered transfers. The low-level Credit/Debit/Transfer
+// primitives here are the mechanism those higher layers build on.
 package market
 
 import (
@@ -38,11 +44,12 @@ var (
 	// requested state.
 	ErrInvalidJobState = errors.New("market: invalid job state")
 	// ErrSelfDealing is returned when a buyer submits a job against their own
-	// provider account, which would settle credits from an account to itself.
+	// provider account, which would settle native MATRIX from an account to
+	// itself.
 	ErrSelfDealing = errors.New("market: buyer and provider must differ")
 )
 
-// balanceKeyPrefix namespaces compute-credit balances in the KV store.
+// balanceKeyPrefix namespaces native MATRIX balances in the KV store.
 const balanceKeyPrefix = "market/balance/"
 
 // balanceKey returns the KV key used to persist an account balance.
@@ -50,10 +57,20 @@ func balanceKey(account string) []byte {
 	return []byte(balanceKeyPrefix + account)
 }
 
-// Ledger is a compute-credits ledger backed by a Pebble kv.Store. Balances are
-// stored as big-endian uint64 values under the `market/balance/<account>` key
-// prefix. All mutations are guarded by a sync.RWMutex so concurrent callers
-// observe consistent balances.
+// BalanceKey returns the KV key under which the given account's native MATRIX
+// balance is persisted. It is exported so the issuance layer in internal/token
+// (token.Treasury) can stage genesis and issuance credits in the same balance
+// keyspace through an atomic kv batch, using the identical encoding this ledger
+// uses. The on-disk layout (the market/balance/<account> prefix and 8-byte
+// big-endian value) is unchanged.
+func BalanceKey(account string) []byte {
+	return balanceKey(account)
+}
+
+// Ledger is the native MATRIX balance ledger backed by a Pebble kv.Store.
+// Balances are stored as big-endian uint64 values (native base units) under the
+// `market/balance/<account>` key prefix. All mutations are guarded by a
+// sync.RWMutex so concurrent callers observe consistent balances.
 type Ledger struct {
 	store *kv.Store
 	mu    sync.RWMutex
@@ -127,15 +144,20 @@ func encodeBalance(amount uint64) []byte {
 	return buf
 }
 
-// Balance returns the current compute-credit balance for an account. Unknown
-// accounts have a zero balance.
+// Balance returns the current native MATRIX balance (in native base units) for
+// an account. Unknown accounts have a zero balance.
 func (l *Ledger) Balance(account string) (uint64, error) {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	return l.readBalance(account)
 }
 
-// Credit adds amount to an account balance.
+// Credit adds amount (native base units) to an account balance. It is the
+// low-level, unguarded balance-increase primitive: it does NOT track cumulative
+// issued supply or enforce the native supply cap, so honest minting of new
+// native MATRIX must go through the supply-tracked path in internal/token
+// (token.Treasury.ApplyGenesis / Issue) rather than calling Credit directly.
+// Credit remains for internal, non-issuing balance adjustments and tests.
 func (l *Ledger) Credit(account string, amount uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

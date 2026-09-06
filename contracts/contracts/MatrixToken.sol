@@ -24,6 +24,17 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 contract MatrixToken is ERC20, ERC20Permit, Ownable {
     /// @notice Hard cap on total supply. Minting can never exceed this amount.
     /// @dev 1,000,000,000 MATRIX expressed with 18 decimals.
+    ///
+    ///      NATIVE <-> WRAPPED SCALE (single source of truth:
+    ///      services/core/internal/token/supply.go). MATRIX is native-first: the
+    ///      canonical coin lives on the consensus L1 with 9 decimals (1 whole
+    ///      MATRIX = 1e9 native base units, native cap = 1e18 base units, which
+    ///      fits a uint64). This ERC-20 is the wrapped mirror with 18 decimals, so
+    ///      1 native base unit == 1e9 ERC-20 base units (ERC20PerNativeUnit in
+    ///      supply.go) and the caps line up exactly: native 1e18 base units maps
+    ///      to this MAX_SUPPLY of 1e9 * 1e18 = 1e27. The lock-and-mint bridge
+    ///      (FEAT-004) must use that 1e9 factor so wrapped supply is backed 1:1 by
+    ///      locked native.
     uint256 public constant MAX_SUPPLY = 1_000_000_000 * 10 ** 18;
 
     /// @notice Raised when a mint would push total supply above MAX_SUPPLY.
