@@ -1,9 +1,40 @@
 'use client';
 
+import { CopyButton } from '@/components/CopyButton';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
 import { FiCopy } from 'react-icons/fi';
 import { toast } from 'sonner';
+
+const REPO = 'savagemanage/matrix-os';
+
+const BUILD_FROM_SOURCE = `git clone https://github.com/${REPO}.git
+cd matrix-os
+
+# Generate the Protocol Buffers stubs the CLI imports.
+make proto
+
+cd services/core
+go build -o matrix  ./cmd/matrix
+go build -o matrixd ./cmd/matrixd`;
+
+// Uses the archive naming the release workflow produces, and verifies against
+// the SHA256SUMS file it publishes rather than a hash pasted into a page.
+const FETCH_RELEASE = `TAG=$(curl -fsSL https://api.github.com/repos/${REPO}/releases/latest \\
+  | grep -m1 '"tag_name"' | cut -d'"' -f4)
+OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+
+curl -fsSLO "https://github.com/${REPO}/releases/download/$TAG/matrix-os-$TAG-$OS-$ARCH.tar.gz"
+curl -fsSLO "https://github.com/${REPO}/releases/download/$TAG/SHA256SUMS"
+sha256sum -c SHA256SUMS --ignore-missing
+
+tar xzf "matrix-os-$TAG-$OS-$ARCH.tar.gz"`;
+
+const VERIFY_INSTALL = `matrix --version     # matrix version v0.1.0   (or "dev")
+matrixd -version     # matrixd v0.1.0          (or "dev")
+
+matrix --help        # the full command tree`;
 
 export default function MatrixOsInstallation() {
   const copyCode = (code: string) => {
@@ -56,123 +87,71 @@ export default function MatrixOsInstallation() {
                     </div>
                   </div>
 
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Installation Methods</h2>
+                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Installation</h2>
 
-                  <div className='space-y-8'>
-                    {/* Package Manager Installation */}
+                  {/* This section used to advertise `brew install matrix-os`,
+                      `winget install matrix-os`, an apt repository at
+                      repo.matrix.os signed by a key at matrix.os/gpg, and
+                      `npm install -g @ecirlabs/matrix-core`. None of those
+                      exist - `.os` is not a TLD, and the npm scope is empty -
+                      and the manual path pointed at github.com/matrix-os/matrix-os
+                      with an install.sh that no archive contains. What is left
+                      is what actually works. */}
+                  <div className='space-y-6'>
                     <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-4'>Using Package Managers (Recommended)</h3>
-
-                      {/* macOS */}
-                      <div className='mb-8'>
-                        <h4 className='text-lg font-semibold text-white mb-3'>macOS (Homebrew)</h4>
-                        <div className='bg-black rounded-lg p-4'>
-                          <div className='flex justify-between items-center mb-2'>
-                            <span className='text-sm text-gray-100'>Install via Homebrew</span>
-                            <button
-                              onClick={() => copyCode('brew install matrix-os')}
-                              className='p-2 hover:bg-gray-800 rounded transition-colors'
-                            >
-                              <FiCopy className='w-4 h-4' />
-                            </button>
-                          </div>
-                          <pre className='text-sm text-gray-100'>
-                            <code>brew install matrix-os</code>
-                          </pre>
+                      <h3 className='text-xl font-bold text-white mb-3'>Build from source</h3>
+                      <p className='text-gray-300 mb-4'>
+                        The supported path today, and the one the release workflow itself runs. You
+                        need Go (the version pinned in <code className='text-white'>services/core/go.mod</code>) and{' '}
+                        <a
+                          href='https://buf.build/docs/installation'
+                          className='text-primary-300 hover:text-secondary-300'
+                        >
+                          buf
+                        </a>
+                        , which generates the Protocol Buffers stubs the CLI imports. There is no
+                        package-manager install and no installer script.
+                      </p>
+                      <div className='bg-black rounded-lg p-4'>
+                        <div className='flex justify-between items-center mb-3'>
+                          <span className='text-sm text-gray-400'>Clone, generate, build</span>
+                          <CopyButton value={BUILD_FROM_SOURCE} label='Copy the build commands' />
                         </div>
+                        <pre className='text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-words'>
+                          <code>{BUILD_FROM_SOURCE}</code>
+                        </pre>
                       </div>
-
-                      {/* Linux */}
-                      <div className='mb-6'>
-                        <h4 className='text-lg font-semibold text-white mb-3'>Linux (apt)</h4>
-                        <div className='bg-black rounded-lg p-4'>
-                          <div className='flex justify-between items-center mb-2'>
-                            <span className='text-sm text-gray-400'>Install via apt</span>
-                            <button
-                              onClick={() =>
-                                copyCode(`# Add Matrix OS repository
-curl -fsSL https://matrix.os/gpg | sudo gpg --dearmor -o /usr/share/keyrings/matrix-os-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/matrix-os-archive-keyring.gpg] https://repo.matrix.os stable main" | sudo tee /etc/apt/sources.list.d/matrix-os.list
-
-# Install Matrix OS
-sudo apt update
-sudo apt install matrix-os`)
-                              }
-                              className='p-2 hover:bg-gray-800 rounded transition-colors'
-                            >
-                              <FiCopy className='w-4 h-4' />
-                            </button>
-                          </div>
-                          <pre className='text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-words'>
-                            <code>{`# Add Matrix OS repository
-curl -fsSL https://matrix.os/gpg | sudo gpg --dearmor -o /usr/share/keyrings/matrix-os-archive-keyring.gpg
-echo "deb [signed-by=/usr/share/keyrings/matrix-os-archive-keyring.gpg] https://repo.matrix.os stable main" | sudo tee /etc/apt/sources.list.d/matrix-os.list
-
-# Install Matrix OS
-sudo apt update
-sudo apt install matrix-os`}</code>
-                          </pre>
-                        </div>
-                      </div>
-
-                      {/* Windows */}
-                      <div>
-                        <h4 className='text-lg font-semibold text-white mb-3'>Windows (winget)</h4>
-                        <div className='bg-black rounded-lg p-4'>
-                          <div className='flex justify-between items-center mb-2'>
-                            <span className='text-sm text-gray-400'>Install via winget</span>
-                            <button
-                              onClick={() => copyCode('winget install matrix-os')}
-                              className='p-2 hover:bg-gray-800 rounded transition-colors'
-                            >
-                              <FiCopy className='w-4 h-4' />
-                            </button>
-                          </div>
-                          <pre className='text-sm text-gray-300'>
-                            <code>winget install matrix-os</code>
-                          </pre>
-                        </div>
-                      </div>
+                      <p className='text-gray-400 text-sm mt-4'>
+                        This produces two binaries: <code className='text-white'>matrix</code>, the
+                        CLI, and <code className='text-white'>matrixd</code>, the node. Put them
+                        somewhere on your <code className='text-white'>PATH</code> if you want them
+                        available everywhere.
+                      </p>
                     </div>
 
-                    {/* Manual Installation */}
                     <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Manual Installation</h3>
+                      <h3 className='text-xl font-bold text-white mb-3'>Prebuilt binaries</h3>
                       <p className='text-gray-300 mb-4'>
-                        If you prefer manual installation or your system doesn&apos;t support package managers, you can
-                        download and install Matrix OS directly from our GitHub releases.
+                        Tagged releases publish archives for Linux, macOS and Windows on x64 and
+                        arm64, each containing both binaries, alongside a{' '}
+                        <code className='text-white'>SHA256SUMS</code> file generated over those
+                        archives. The{' '}
+                        <a href='/download' className='text-primary-300 hover:text-secondary-300'>
+                          download page
+                        </a>{' '}
+                        reads the release list directly, so it shows only what exists &mdash; if it
+                        offers nothing, nothing has been published yet.
                       </p>
-
-                      <div className='mb-6'>
-                        <h4 className='text-lg font-semibold text-white mb-3'>Linux/macOS</h4>
-                        <div className='bg-black rounded-lg p-4'>
-                          <div className='flex justify-between items-center mb-2'>
-                            <span className='text-sm text-gray-400'>Manual installation steps</span>
-                            <button
-                              onClick={() =>
-                                copyCode(`# Download the latest release
-curl -LO https://github.com/matrix-os/matrix-os/releases/latest/download/matrix-os-$(uname -s)-$(uname -m).tar.gz
-
-# Extract and install
-tar xzf matrix-os-*.tar.gz
-cd matrix-os-*
-sudo ./install.sh`)
-                              }
-                              className='p-2 hover:bg-gray-800 rounded transition-colors'
-                            >
-                              <FiCopy className='w-4 h-4' />
-                            </button>
-                          </div>
-                          <pre className='text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-words'>
-                            <code>{`# Download the latest release
-curl -LO https://github.com/matrix-os/matrix-os/releases/latest/download/matrix-os-$(uname -s)-$(uname -m).tar.gz
-
-# Extract and install
-tar xzf matrix-os-*.tar.gz
-cd matrix-os-*
-sudo ./install.sh`}</code>
-                          </pre>
+                      <div className='bg-black rounded-lg p-4'>
+                        <div className='flex justify-between items-center mb-3'>
+                          <span className='text-sm text-gray-400'>
+                            Fetch and verify a published release
+                          </span>
+                          <CopyButton value={FETCH_RELEASE} label='Copy the download commands' />
                         </div>
+                        <pre className='text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-words'>
+                          <code>{FETCH_RELEASE}</code>
+                        </pre>
                       </div>
                     </div>
                   </div>
@@ -183,21 +162,24 @@ sudo ./install.sh`}</code>
                     {/* Verification */}
                     <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
                       <h3 className='text-xl font-bold text-white mb-3'>Verify Installation</h3>
+                      {/* This used to say `matrix-os --version`. There is no
+                          matrix-os binary - the two are `matrix` and `matrixd` -
+                          and the CLI had no --version flag at all, so the
+                          command errored with "unknown flag". Both binaries now
+                          report a version, stamped from the tag at release
+                          time. */}
                       <p className='text-gray-100 leading-relaxed mb-4'>
-                        After installation, verify that Matrix OS is properly installed by checking the version:
+                        Both binaries report their version. A release prints its tag; a binary you
+                        built yourself prints <code className='text-white'>dev</code>, which is the
+                        honest answer for a build that did not come from a tag.
                       </p>
                       <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Check version</span>
-                          <button
-                            onClick={() => copyCode('matrix-os --version')}
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
+                        <div className='flex justify-between items-center mb-3'>
+                          <span className='text-sm text-gray-100'>Check both binaries</span>
+                          <CopyButton value={VERIFY_INSTALL} label='Copy the verify commands' />
                         </div>
-                        <pre className='text-sm text-gray-100'>
-                          <code>matrix-os --version</code>
+                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
+                          <code>{VERIFY_INSTALL}</code>
                         </pre>
                       </div>
                     </div>

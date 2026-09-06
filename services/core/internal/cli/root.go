@@ -19,6 +19,7 @@ package cli
 import (
 	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/version"
 	"github.com/spf13/cobra"
 )
 
@@ -58,6 +59,9 @@ an ed25519 wallet to sign and submit native MATRIX transfers.
 Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		SilenceUsage:  true,
 		SilenceErrors: false,
+		// Setting Version is what makes cobra provide `--version`. The docs
+		// told users to run it long before the flag existed.
+		Version: version.String(),
 	}
 
 	pf := root.PersistentFlags()

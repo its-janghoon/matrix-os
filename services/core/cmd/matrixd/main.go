@@ -11,13 +11,20 @@ import (
 	"syscall"
 
 	"github.com/ecirlabs/matrix-core/internal/node"
+	"github.com/ecirlabs/matrix-core/internal/version"
 )
 
 func main() {
 	// Parse command line flags
 	initMode := flag.Bool("init", false, "Initialize a new node")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
+	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("matrixd %s\n", version.String())
+		return
+	}
 
 	if *initMode {
 		if err := node.Initialize(*configPath); err != nil {

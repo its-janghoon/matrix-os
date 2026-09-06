@@ -1,0 +1,98 @@
+name: Release
+
+# Cuts a real release: cross-compiles the two binaries for every supported
+# platform, writes checksums over the actual artifacts, and publishes them.
+#
+# This exists because the site used to advertise downloads that were never
+# built. /download and /docs/installation now read this workflow's output
+# through the GitHub releases API, so a tag here is what makes a download
+# appear there.
+on:
+  push:
+    tags: ['v*']
+  # Lets a maintainer produce artifacts for an existing tag without re-tagging.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build and publish'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: ${{ github.event.inputs.tag || github.ref }}
+    - uses: actions/setup-go@v5
+      with:
+        go-version-file: 'services/core/go.mod'
+    # cmd/matrix and cmd/matrixd import the matrix-proto stubs, which are
+    # gitignored, so they have to be generated before anything will build.
+    - uses: bufbuild/buf-setup-action@v1
+      with:
+        version: '1.72.0'
+    - name: Generate proto stubs
+      run: make proto
+
+    - name: Build every target
+      id: build
+      working-directory: services/core
+      env:
+        VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+      run: |
+        set -euo pipefail
+        DIST="$GITHUB_WORKSPACE/dist"
+        mkdir -p "$DIST"
+
+        # CGO is off so every target is a static binary with no host toolchain,
+        # and -trimpath keeps runner paths out of the output so builds are
+        # reproducible.
+        for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+          goos="${target%/*}"
+          goarch="${target#*/}"
+          ext=""
+          [ "$goos" = "windows" ] && ext=".exe"
+
+          stage="$(mktemp -d)"
+          for cmd in matrix matrixd; do
+            # -X stamps the tag into internal/version, so `matrix --version`
+            # and `matrixd -version` report the release rather than "dev".
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath \
+              -ldflags="-s -w -X github.com/ecirlabs/matrix-core/internal/version.Version=${VERSION}" \
+              -o "$stage/${cmd}${ext}" "./cmd/${cmd}"
+          done
+          cp "$GITHUB_WORKSPACE/LICENSE" "$GITHUB_WORKSPACE/README.md" "$stage/"
+
+          name="matrix-os-${VERSION}-${goos}-${goarch}"
+          if [ "$goos" = "windows" ]; then
+            (cd "$stage" && zip -q -r "$DIST/${name}.zip" .)
+          else
+            tar -czf "$DIST/${name}.tar.gz" -C "$stage" .
+          fi
+          rm -rf "$stage"
+        done
+
+        # Checksums over the archives that are actually being published. The
+        # site shows these verbatim, so they must never be written by hand.
+        (cd "$DIST" && sha256sum * > SHA256SUMS)
+        ls -lh "$DIST"
+
+    - name: Publish
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+      run: |
+        set -euo pipefail
+        gh release create "$VERSION" \
+          --repo "$GITHUB_REPOSITORY" \
+          --title "$VERSION" \
+          --generate-notes \
+          --verify-tag \
+          dist/* \
+        || gh release upload "$VERSION" --repo "$GITHUB_REPOSITORY" --clobber dist/*
