@@ -1,10 +1,18 @@
 'use client';
 
 import { Button } from '@/components/Button';
+import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiCpu, FiGlobe, FiServer, FiShoppingCart } from 'react-icons/fi';
+
+// The exact CLI a user runs to submit an inference job against a local node. It
+// is accurate to the shipped `matrix inference` command: a fresh node registers
+// a GPU-free echo backend for its demo provider, so this runs end to end with no
+// GPU. The provider ID matches the node's default Inference.EchoProvider.
+const INFERENCE_CLI_COMMAND =
+  'matrix inference submit --buyer $(matrix wallet show | awk \'/^account:/{print $2}\') \\\n  --provider demo-inference-provider --prompt "hello world"';
 
 export default function InferencePage() {
   return (
@@ -81,6 +89,20 @@ export default function InferencePage() {
               the job is reported complete only once that settlement commits and applies, so a buyer is charged exactly
               once for work that really happened and never more than it reserved.
             </p>
+
+            {/* Click-to-copy: the actual `matrix inference` CLI, runnable against a
+                local node with the GPU-free echo backend. */}
+            <div className='mt-6 rounded-xl border border-white/10 bg-black/60 p-4'>
+              <div className='mb-2 flex items-center justify-between'>
+                <span className='text-xs font-medium uppercase tracking-wide text-grayscale-400'>
+                  Run a job from the CLI
+                </span>
+                <CopyButton value={INFERENCE_CLI_COMMAND} label='Copy inference command' />
+              </div>
+              <pre className='overflow-x-auto text-sm text-grayscale-200'>
+                <code>{INFERENCE_CLI_COMMAND}</code>
+              </pre>
+            </div>
           </Card>
         </Section>
 
