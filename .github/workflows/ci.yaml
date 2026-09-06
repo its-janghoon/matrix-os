@@ -51,9 +51,16 @@ jobs:
     - name: Install dependencies
       working-directory: apps/web
       run: corepack yarn install --frozen-lockfile
+    # `yarn lint` is the ESLint CLI now: Next 16 removed `next lint`, and
+    # `next build` no longer lints. Type-checking is also its own step, because
+    # the build used to run with `typescript.ignoreBuildErrors` and never
+    # checked types at all.
     - name: Lint
       working-directory: apps/web
       run: corepack yarn lint
+    - name: Typecheck
+      working-directory: apps/web
+      run: corepack yarn typecheck
     - name: Build
       working-directory: apps/web
       run: corepack yarn build

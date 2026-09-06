@@ -87,7 +87,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang='en'>
+    // Next 16 stopped overriding `scroll-behavior` during route transitions.
+    // globals.css sets `scroll-behavior: smooth` on <html> for in-page anchors,
+    // so without this attribute every navigation would smooth-scroll to the top
+    // instead of jumping there.
+    <html lang='en' data-scroll-behavior='smooth'>
       <body className={inter.className}>
         <Providers>{children}</Providers>
       </body>

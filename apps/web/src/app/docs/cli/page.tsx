@@ -5,26 +5,29 @@ import Navigation from '@/components/Navigation';
 import { FiCopy } from 'react-icons/fi';
 import { toast } from 'sonner';
 
-export default function MatrixCliDocs() {
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    toast.success('Code copied to clipboard');
-  };
+const copyCode = (code: string) => {
+  navigator.clipboard.writeText(code);
+  toast.success('Code copied to clipboard');
+};
 
-  const CodeBlock = ({ label, code }: { label: string; code: string }) => (
-    <div className='bg-black rounded-lg p-4'>
-      <div className='flex justify-between items-center mb-2'>
-        <span className='text-sm text-gray-100'>{label}</span>
-        <button onClick={() => copyCode(code)} className='p-2 hover:bg-gray-800 rounded transition-colors'>
-          <FiCopy className='w-4 h-4' />
-        </button>
-      </div>
-      <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-        <code>{code}</code>
-      </pre>
+// Declared at module scope, not inside the page component. Defining it during
+// render creates a new component type on every render, which throws away the
+// subtree's state each time - react-hooks/static-components flags exactly this.
+const CodeBlock = ({ label, code }: { label: string; code: string }) => (
+  <div className='bg-black rounded-lg p-4'>
+    <div className='flex justify-between items-center mb-2'>
+      <span className='text-sm text-gray-100'>{label}</span>
+      <button onClick={() => copyCode(code)} className='p-2 hover:bg-gray-800 rounded transition-colors'>
+        <FiCopy className='w-4 h-4' />
+      </button>
     </div>
-  );
+    <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
+      <code>{code}</code>
+    </pre>
+  </div>
+);
 
+export default function MatrixCliDocs() {
   return (
     <>
       <Navigation />
