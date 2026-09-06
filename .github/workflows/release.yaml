@@ -33,7 +33,11 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.inputs.ref || github.event.inputs.version || github.ref }}
+        # NOT inputs.version: on a dispatch the tag does not exist yet, so
+        # checking it out fails with "a branch or tag ... could not be found".
+        # github.ref is the branch the dispatch was made on, and the tag itself
+        # on a tag push, which covers both triggers.
+        ref: ${{ github.event.inputs.ref || github.ref }}
         # Full history so the tag can be created here and so `gh` can resolve it.
         fetch-depth: 0
 
