@@ -53,9 +53,18 @@ wrapped burn -> unlock native               (wMATRIX -> native MATRIX)
   distinct registered attestor addresses, mints `amount` wMATRIX to `recipient`,
   and marks the `lockId` minted so it can never be replayed.
 - **Burn (wrapped -> native):** a holder calls `WrappedMatrix.burn(amount,
-  nativeRecipient)`, which burns the wMATRIX and emits `Burned`. The Go bridge
-  applies that event exactly once (replay-protected) and releases the escrowed
-  native MATRIX to `nativeRecipient`.
+  nativeRecipient)`, which burns the wMATRIX and emits
+  `Burned(address indexed burner, string nativeRecipient, uint256 amount)`. The
+  Go bridge decodes that log with `bridge.DecodeBurnedLog` (a dependency-free ABI
+  decoder that recovers the burner, native recipient, and amount, and derives a
+  stable id from `txHash:logIndex`) into a `BurnEvent`, then `ProcessBurn`
+  applies it exactly once (replay-protected on that id) and releases the escrowed
+  native MATRIX to `nativeRecipient`. The `BridgeE2E` test cross-checks the raw
+  emitted log against the exact bytes the Go decoder parses. Feeding the log into
+  the decoder is currently operator-driven (or driven by that test): an on-chain
+  `eth_getLogs`/subscription watcher that ingests `Burned` events automatically
+  is not yet wired, so the unlock half is a decoded, replay-safe primitive rather
+  than an always-on autonomous loop.
 
 ### Why secp256k1 attestor keys
 

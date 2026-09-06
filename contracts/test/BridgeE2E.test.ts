@@ -128,11 +128,36 @@ describe("Bridge end-to-end (Go attestation -> Solidity mint)", function () {
     // recipient the Go side would release escrow to.
     const burnAmount = 2n * ERC20_PER_NATIVE_UNIT;
     const nativeRecipient = "cafe".repeat(16); // an L1 account id
-    await expect(wmatrix.connect(recipient).burn(burnAmount, nativeRecipient))
+    const burnTx = await wmatrix.connect(recipient).burn(burnAmount, nativeRecipient);
+    await expect(burnTx)
       .to.emit(wmatrix, "Burned")
       .withArgs(recipient.address, nativeRecipient, burnAmount);
 
     expect(await wmatrix.totalSupply()).to.equal(wrappedAmount - burnAmount);
+
+    // Cross-check the RAW emitted log against the layout the Go burn-log decoder
+    // (internal/bridge.DecodeBurnedLog) parses, so the on-chain event bytes and
+    // the Go parser are proven byte-compatible. This is the payload an operator
+    // (or a future log subscription) hands to ProcessBurn to unlock native.
+    const rcpt = await burnTx.wait();
+    const burnedTopic = ethers.id("Burned(address,string,uint256)");
+    const log = rcpt!.logs.find((l) => l.topics[0] === burnedTopic);
+    expect(log, "a Burned log must be emitted").to.not.equal(undefined);
+
+    // topics[0] is keccak256 of the exact signature the Go decoder keys on.
+    expect(log!.topics[0]).to.equal(burnedTopic);
+    // topics[1] is the indexed burner address, left-padded to 32 bytes.
+    expect(log!.topics[1]).to.equal(ethers.zeroPadValue(recipient.address, 32));
+    // data is abi.encode(string nativeRecipient, uint256 amount) in the head/tail
+    // layout the Go decoder inverts: offset word (0x40), amount, length, bytes.
+    const [decodedRecipient, decodedAmount] = ethers.AbiCoder.defaultAbiCoder().decode(
+      ["string", "uint256"],
+      log!.data
+    );
+    expect(decodedRecipient).to.equal(nativeRecipient);
+    expect(decodedAmount).to.equal(burnAmount);
+    // The first data word is the string offset 0x40 the Go decoder expects.
+    expect(log!.data.slice(0, 66)).to.equal("0x" + "40".padStart(64, "0"));
   });
 
   it("rejects a replay of the same Go attestation (same lockId)", async () => {

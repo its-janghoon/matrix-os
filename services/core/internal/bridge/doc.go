@@ -16,9 +16,21 @@
 //	      verifying a threshold of those validator signatures.
 //
 //	burn  (wrapped -> native): the Ethereum contract burns wrapped tokens and
-//	      emits an unlock event naming the native recipient. The bridge applies
-//	      that event exactly once (replay-protected) and releases the escrowed
-//	      native MATRIX back to the recipient.
+//	      emits a Burned event naming the native recipient and amount.
+//	      DecodeBurnedLog parses that on-chain log (topics + ABI data) into a
+//	      BurnEvent with a stable txHash:logIndex id, and ProcessBurn applies it
+//	      exactly once (replay-protected on that id), releasing the escrowed
+//	      native MATRIX back to the recipient. The decoder makes the unlock half
+//	      a real, testable step from an actual emitted event rather than a
+//	      hand-built value; see burnlog.go and burnlog_test.go (and the
+//	      contracts BridgeE2E test, which cross-checks the raw log bytes).
+//
+//	      Ingestion of Burned logs is currently operator-driven (or driven by the
+//	      end-to-end test): an always-on eth_getLogs/subscription watcher that
+//	      pulls Burned events off Ethereum automatically is not yet wired, so the
+//	      unlock half is a decoded, replay-safe primitive rather than a fully
+//	      autonomous closed loop. The mint half IS end-to-end (a real Go
+//	      attestation mints on-chain unmodified).
 //
 // Because every mint is gated on a real lock and every unlock consumes a real
 // burn exactly once, total locked native always reconciles 1:1 (via the
