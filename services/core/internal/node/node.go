@@ -442,6 +442,15 @@ func (n *Node) Start() error {
 	// sender and the sender's correct next nonce, so an unauthenticated client can
 	// only move credits it already holds the signing key for. Operators exposing a
 	// node to untrusted networks should keep ACLs enabled.
+	//
+	// FundAccount is the ONE mutating RPC that carries no per-request signature
+	// (it moves reward-pool MATRIX by account id + amount only), so the
+	// signature-based safety argument above does not cover it. To keep the
+	// "every mutating RPC is authorized" invariant honest, FundAccount refuses to
+	// run unless the server enforces authentication: on an ACLs-off node it
+	// returns FailedPrecondition rather than acting, so an open node cannot be
+	// used to drain the reward pool. Reward-pool funding is therefore only exposed
+	// when ACLs are enabled (marketapi.Service gates on cfg.Auth != nil).
 	var marketAuth *admin.Authenticator
 	if n.config.Security.EnableACLs {
 		marketAuth = n.adminServer.GetAuthenticator()

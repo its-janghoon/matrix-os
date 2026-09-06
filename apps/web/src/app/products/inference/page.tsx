@@ -7,12 +7,25 @@ import Navigation from '@/components/Navigation';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiCpu, FiGlobe, FiServer, FiShoppingCart } from 'react-icons/fi';
 
-// The exact CLI a user runs to submit an inference job against a local node. It
-// is accurate to the shipped `matrix inference` command: a fresh node registers
-// a GPU-free echo backend for its demo provider, so this runs end to end with no
-// GPU. The provider ID matches the node's default Inference.EchoProvider.
-const INFERENCE_CLI_COMMAND =
-  'matrix inference submit --buyer $(matrix wallet show | awk \'/^account:/{print $2}\') \\\n  --provider demo-inference-provider --prompt "hello world"';
+// The full, copy-paste-runnable sequence to get an inference job to settle
+// against a fresh local node. It is accurate to the shipped CLI:
+//   1. resolve the local wallet's account id into BUYER,
+//   2. fund BUYER from the node's reward pool so it can afford the job,
+//   3. register the demo provider on the order book with capacity + price
+//      (the node auto-registers the GPU-free echo BACKEND for this provider id,
+//      but a provider must still be listed on the order book to reserve against),
+//   4. submit the job, which reserves -> fulfills -> settles in one command.
+// The provider id matches the node's default Inference.EchoProvider, so no GPU
+// is needed. `matrix fund` moves reward-pool MATRIX and, like every mutating
+// market RPC, requires the node's API key when ACLs are enabled (the default);
+// the note under the block covers adding `--api-key <key>` to each command.
+const INFERENCE_CLI_COMMAND = [
+  'BUYER=$(matrix wallet show | awk \'/^account:/{print $2}\')',
+  'matrix fund --account "$BUYER" --amount 1000000',
+  'matrix provider register --id demo-inference-provider --capacity 1000 --price 5',
+  'matrix inference submit --buyer "$BUYER" \\',
+  '  --provider demo-inference-provider --prompt "hello world"',
+].join('\n');
 
 export default function InferencePage() {
   return (
@@ -90,18 +103,27 @@ export default function InferencePage() {
               once for work that really happened and never more than it reserved.
             </p>
 
-            {/* Click-to-copy: the actual `matrix inference` CLI, runnable against a
-                local node with the GPU-free echo backend. */}
+            {/* Click-to-copy: the full `matrix` sequence that gets an inference
+                job to settle against a fresh local node with the GPU-free echo
+                backend. It funds the buyer and registers the demo provider first
+                so the copied block succeeds end to end, not just the submit. */}
             <div className='mt-6 rounded-xl border border-white/10 bg-black/60 p-4'>
               <div className='mb-2 flex items-center justify-between'>
                 <span className='text-xs font-medium uppercase tracking-wide text-grayscale-400'>
-                  Run a job from the CLI
+                  Run a job from the CLI (fund, register, submit)
                 </span>
-                <CopyButton value={INFERENCE_CLI_COMMAND} label='Copy inference command' />
+                <CopyButton value={INFERENCE_CLI_COMMAND} label='Copy inference commands' />
               </div>
               <pre className='overflow-x-auto text-sm text-grayscale-200'>
                 <code>{INFERENCE_CLI_COMMAND}</code>
               </pre>
+              <p className='mt-3 text-xs text-grayscale-400'>
+                Against a fresh node the buyer must be funded and the demo provider registered before a job can reserve
+                and settle, so the block does both first. It assumes a local wallet (<span className='text-grayscale-300'>matrix wallet create</span>) and a
+                running node. Because a default node runs with ACLs enabled, add <span className='text-grayscale-300'>--api-key &lt;key&gt;</span> to each
+                command (the key the node was started with); on an open dev node with ACLs disabled you can drop it, though
+                that node will not expose reward-pool funding.
+              </p>
             </div>
           </Card>
         </Section>

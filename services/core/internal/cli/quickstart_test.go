@@ -18,7 +18,7 @@ func TestCLI_Quickstart(t *testing.T) {
 
 	// Small deterministic params so the arithmetic is easy to assert:
 	// fund 1000, provider price 5, job of 10 units => settle 50.
-	out, err := runFund(t, addr, "quickstart",
+	out, err := runFund(t, addr, "--api-key", fundServerAPIKey, "quickstart",
 		"--wallet", walletPath,
 		"--fund", "1000",
 		"--provider", "qs-prov",
@@ -66,10 +66,10 @@ func TestCLI_QuickstartReusesWallet(t *testing.T) {
 	addr, _ := startFundServer(t, 1_000_000_000)
 	walletPath := t.TempDir() + "/wallet.json"
 
-	if out, err := runFund(t, addr, "quickstart", "--wallet", walletPath, "--fund", "1000", "--provider", "p1"); err != nil {
+	if out, err := runFund(t, addr, "--api-key", fundServerAPIKey, "quickstart", "--wallet", walletPath, "--fund", "1000", "--provider", "p1"); err != nil {
 		t.Fatalf("first quickstart: %v (%s)", err, out)
 	}
-	out, err := runFund(t, addr, "quickstart", "--wallet", walletPath, "--fund", "1000", "--provider", "p1")
+	out, err := runFund(t, addr, "--api-key", fundServerAPIKey, "quickstart", "--wallet", walletPath, "--fund", "1000", "--provider", "p1")
 	if err != nil {
 		t.Fatalf("second quickstart: %v (%s)", err, out)
 	}

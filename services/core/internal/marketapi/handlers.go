@@ -293,6 +293,17 @@ func (s *Service) FundAccount(ctx context.Context, req *marketv1.FundAccountRequ
 	if s.funder == nil {
 		return nil, status.Error(codes.Unimplemented, "reward-pool funding is not enabled on this node")
 	}
+	// Reward-pool funding carries no per-request signature (unlike
+	// SubmitSignedTransfer), so it MUST NOT be served on an unauthenticated
+	// surface: on an ACLs-off node any client on the wire could otherwise move
+	// reward-pool MATRIX into any account it names. Require the server to enforce
+	// authentication for this RPC regardless of the node's general posture. The
+	// interceptor still enforces the actual credential check when auth is on; this
+	// guard closes the open-node hole where no interceptor runs at all.
+	if !s.authEnforced {
+		return nil, status.Error(codes.FailedPrecondition,
+			"reward-pool funding requires authentication: enable ACLs (security.enable_acls) to expose FundAccount")
+	}
 	if req.GetAccount() == "" {
 		return nil, status.Error(codes.InvalidArgument, "account is required")
 	}

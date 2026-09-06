@@ -13,10 +13,14 @@
 // OPERATOR MODEL (honest): this command runs a single-node relayer that applies
 // burns to a LOCAL ledger it is given. It seeds a throwaway escrow so the demo
 // unlock has backing; a production deployment points --escrow-fund at the real
-// outstanding escrow (or, better, runs the watcher inside matrixd against the
-// node's own ledger, which this command's internal/bridge.Watcher is built to
-// support). It does not itself reach multi-validator consensus on the unlock;
-// see internal/bridge/watcher.go for the automation boundary.
+// outstanding escrow. The internal/bridge.Watcher this command drives is a
+// reusable library type, but matrixd does NOT currently construct or run a
+// Watcher against the node's own ledger: there is no in-node bridge-watch
+// subsystem wired into internal/node yet, so today an operator runs the watcher
+// out of process via this command (or a script). Wiring an optional
+// config-driven Watcher into matrixd is a remaining item (see STILL-REMAINING.md).
+// The watcher does not itself reach multi-validator consensus on the unlock; see
+// internal/bridge/watcher.go for the automation boundary.
 //
 // Usage:
 //

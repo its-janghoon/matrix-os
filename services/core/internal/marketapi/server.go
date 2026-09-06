@@ -59,6 +59,14 @@ type Service struct {
 	chain    *token.Chain
 	exchange *marketexchange.Exchange
 	funder   Funder
+	// authEnforced reports whether the server in front of this Service requires
+	// authentication on every mutating RPC. FundAccount refuses to run when it is
+	// false: unlike SubmitSignedTransfer, a funding request carries no per-request
+	// signature, so on an unauthenticated (ACLs-off) server it would be an
+	// unauthenticated reward-pool drain into any caller-named account. Requiring
+	// auth for FundAccount regardless of the node's general posture keeps the
+	// "every mutating RPC is authorized" invariant the market-auth note relies on.
+	authEnforced bool
 }
 
 // NewService constructs a Service. market, settled and chain are required;
@@ -79,6 +87,12 @@ func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Cha
 	}
 	return &Service{market: m, settled: settled, chain: chain, exchange: exchange, funder: funder}, nil
 }
+
+// SetAuthEnforced records whether the server hosting this Service requires
+// authentication on every mutating RPC. It is set by NewServer from cfg.Auth and
+// gates FundAccount (see the Service.authEnforced doc). It is called once during
+// construction, before the server starts serving, so no locking is needed.
+func (s *Service) SetAuthEnforced(enforced bool) { s.authEnforced = enforced }
 
 // Server hosts the market gRPC service on its own listener, following the
 // internal/admin.Server construction pattern (grpc.NewServer, health service,
@@ -119,6 +133,9 @@ func NewServer(cfg Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Record whether this server authenticates every mutating RPC. FundAccount
+	// (unsigned, unlike SubmitSignedTransfer) refuses to run without it.
+	svc.SetAuthEnforced(cfg.Auth != nil)
 
 	var opts []grpc.ServerOption
 	if cfg.Auth != nil {

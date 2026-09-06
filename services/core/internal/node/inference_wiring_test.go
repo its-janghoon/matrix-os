@@ -60,6 +60,51 @@ func TestWalletAccounts_ResolvesFromMemoryAndDisk(t *testing.T) {
 	}
 }
 
+// TestWalletAccounts_RejectsMismatchedKeyPair asserts the on-disk loader refuses
+// a wallet whose public key does not correspond to its private key: the resolver
+// must never surface an account whose signing key would fail verification against
+// the id it is matched on.
+func TestWalletAccounts_RejectsMismatchedKeyPair(t *testing.T) {
+	dir := t.TempDir()
+
+	a, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount a: %v", err)
+	}
+	b, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount b: %v", err)
+	}
+
+	// Splice A's private key with B's public key and write it as a wallet file.
+	wf := walletDiskFile{
+		PublicKey:  hex.EncodeToString(b.PublicKey),
+		PrivateKey: hex.EncodeToString(a.PrivateKey),
+	}
+	data, err := json.Marshal(wf)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	path := filepath.Join(dir, "corrupt.json")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// The direct loader rejects it.
+	if _, ok := loadWalletAccount(path); ok {
+		t.Fatal("expected loadWalletAccount to reject a mismatched key pair")
+	}
+
+	// And the resolver does not surface it under either id.
+	wa := newWalletAccountsDir(dir)
+	if _, ok := wa.Account(b.AccountID()); ok {
+		t.Fatal("expected resolver to not resolve the mismatched wallet's public id")
+	}
+	if _, ok := wa.Account(a.AccountID()); ok {
+		t.Fatal("expected resolver to not resolve the mismatched wallet's private-derived id")
+	}
+}
+
 // TestNodeInferenceWiring_EndToEnd proves the exact wiring the node builds in
 // Start (inference.NewService over the market, a consensus-backed settler, the
 // GPU-free echo backend registered for the demo provider, and the node's

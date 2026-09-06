@@ -108,5 +108,19 @@ func loadWallet(path string) (*token.Account, error) {
 	copy(pub, pubBytes)
 	priv := make(ed25519.PrivateKey, ed25519.PrivateKeySize)
 	copy(priv, privBytes)
+
+	// Verify the key pair is self-consistent: the public key stored in the file
+	// must be the one the private key actually derives. A corrupt or hand-edited
+	// wallet (mismatched halves) is not a theft vector because the account id is
+	// the public key and any transfer is verified against it, but it would fail
+	// only later at signing/verification time. Fail fast here with a clear error.
+	if !derived(priv).Equal(pub) {
+		return nil, fmt.Errorf("wallet %s is corrupt: its private key does not match its public key", path)
+	}
 	return &token.Account{PublicKey: pub, PrivateKey: priv}, nil
+}
+
+// derived returns the ed25519 public key that priv derives.
+func derived(priv ed25519.PrivateKey) ed25519.PublicKey {
+	return priv.Public().(ed25519.PublicKey)
 }

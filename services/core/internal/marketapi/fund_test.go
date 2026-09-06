@@ -8,17 +8,40 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
+// fundTestAPIKey is the API key the authenticated fund harness accepts.
+const fundTestAPIKey = "fund-test-key"
+
+// authCtx returns a context carrying a valid API key so a call passes the
+// require-auth interceptor.
+func authCtx(ctx context.Context) context.Context {
+	return metadata.AppendToOutgoingContext(ctx, "authorization", fundTestAPIKey)
+}
+
 // newFundHarness stands up a MarketService backed by a real Treasury funder over
 // a temp store, applies a genesis reward pool of the given size, and returns a
-// wired client plus the market for balance assertions.
+// wired client plus the market for balance assertions. The server enforces
+// authentication (FundAccount refuses to run on an unauthenticated server), so
+// callers must use authCtx to reach FundAccount successfully.
 func newFundHarness(t *testing.T, rewardPool uint64) (marketv1.MarketServiceClient, *market.Market) {
+	t.Helper()
+	client, mkt, _ := newFundHarnessWithAuth(t, rewardPool, true)
+	return client, mkt
+}
+
+// newFundHarnessWithAuth is newFundHarness with control over whether the server
+// enforces authentication, so a test can prove FundAccount is rejected on an
+// unauthenticated (ACLs-off) server. It returns the authenticator (nil when auth
+// is disabled) so a test could add more keys if needed.
+func newFundHarnessWithAuth(t *testing.T, rewardPool uint64, withAuth bool) (marketv1.MarketServiceClient, *market.Market, *admin.Authenticator) {
 	t.Helper()
 
 	store, err := kv.New(kv.Config{Path: t.TempDir()})
@@ -38,8 +61,17 @@ func newFundHarness(t *testing.T, rewardPool uint64) (marketv1.MarketServiceClie
 		t.Fatalf("ApplyGenesis: %v", err)
 	}
 
+	var auth *admin.Authenticator
+	if withAuth {
+		auth = admin.NewAuthenticator()
+		if err := auth.AddKey(&admin.APIKey{Key: fundTestAPIKey, Role: admin.RoleAdmin}); err != nil {
+			t.Fatalf("AddKey: %v", err)
+		}
+	}
+
 	srv, err := NewServer(Config{
 		Addr:    "127.0.0.1:0",
+		Auth:    auth,
 		Market:  mkt,
 		Settled: settled,
 		Chain:   chain,
@@ -62,7 +94,7 @@ func newFundHarness(t *testing.T, rewardPool uint64) (marketv1.MarketServiceClie
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 
-	return marketv1.NewMarketServiceClient(conn), mkt
+	return marketv1.NewMarketServiceClient(conn), mkt, auth
 }
 
 // TestFundAccount_MovesRewardPoolFunds proves FundAccount moves native MATRIX
@@ -72,7 +104,7 @@ func newFundHarness(t *testing.T, rewardPool uint64) (marketv1.MarketServiceClie
 func TestFundAccount_MovesRewardPoolFunds(t *testing.T) {
 	const rewardPool = uint64(1_000_000)
 	client, mkt := newFundHarness(t, rewardPool)
-	ctx := context.Background()
+	ctx := authCtx(context.Background())
 
 	const amount = uint64(250_000)
 	resp, err := client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "buyer-1", Amount: amount})
@@ -101,7 +133,7 @@ func TestFundAccount_MovesRewardPoolFunds(t *testing.T) {
 func TestFundAccount_RejectsOverPool(t *testing.T) {
 	const rewardPool = uint64(100)
 	client, mkt := newFundHarness(t, rewardPool)
-	ctx := context.Background()
+	ctx := authCtx(context.Background())
 
 	_, err := client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "buyer-1", Amount: rewardPool + 1})
 	if status.Code(err) != codes.FailedPrecondition {
@@ -119,7 +151,7 @@ func TestFundAccount_RejectsOverPool(t *testing.T) {
 // InvalidArgument.
 func TestFundAccount_ValidatesArgs(t *testing.T) {
 	client, _ := newFundHarness(t, 1_000)
-	ctx := context.Background()
+	ctx := authCtx(context.Background())
 
 	if _, err := client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "", Amount: 10}); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("empty account: expected InvalidArgument, got %v (%v)", status.Code(err), err)
@@ -137,5 +169,46 @@ func TestFundAccount_UnimplementedWithoutFunder(t *testing.T) {
 
 	if _, err := h.client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "x", Amount: 1}); status.Code(err) != codes.Unimplemented {
 		t.Fatalf("expected Unimplemented without funder, got %v (%v)", status.Code(err), err)
+	}
+}
+
+// TestFundAccount_RejectedWithoutAuth is the security regression test for the
+// unauthenticated reward-pool drain: a funder-backed server that does NOT
+// enforce authentication (ACLs off) must reject FundAccount rather than move
+// reward-pool MATRIX for an unauthenticated caller. Unlike SubmitSignedTransfer,
+// a funding request carries no signature, so serving it open would let any client
+// drain the pool into an account it names.
+func TestFundAccount_RejectedWithoutAuth(t *testing.T) {
+	const rewardPool = uint64(1_000_000)
+	client, mkt, _ := newFundHarnessWithAuth(t, rewardPool, false)
+	ctx := context.Background()
+
+	_, err := client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "attacker", Amount: 500_000})
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("expected FailedPrecondition on unauthenticated funding, got %v (%v)", status.Code(err), err)
+	}
+	// No funds moved: the attacker got nothing and the pool is intact.
+	if bal, _ := mkt.Ledger().Balance("attacker"); bal != 0 {
+		t.Fatalf("attacker balance = %d, want 0 (no funds moved on rejection)", bal)
+	}
+	if poolBal, _ := mkt.Ledger().Balance(token.RewardPoolAccount); poolBal != rewardPool {
+		t.Fatalf("reward pool = %d, want %d (unchanged on rejection)", poolBal, rewardPool)
+	}
+}
+
+// TestFundAccount_RejectedWithoutCredentials asserts that even on an
+// auth-enforcing server, a call missing credentials is rejected by the
+// interceptor (Unauthenticated) and moves no funds.
+func TestFundAccount_RejectedWithoutCredentials(t *testing.T) {
+	const rewardPool = uint64(1_000_000)
+	client, mkt := newFundHarness(t, rewardPool)
+	ctx := context.Background() // no authCtx: no credentials
+
+	_, err := client.FundAccount(ctx, &marketv1.FundAccountRequest{Account: "attacker", Amount: 500_000})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Fatalf("expected Unauthenticated without credentials, got %v (%v)", status.Code(err), err)
+	}
+	if poolBal, _ := mkt.Ledger().Balance(token.RewardPoolAccount); poolBal != rewardPool {
+		t.Fatalf("reward pool = %d, want %d (unchanged on rejection)", poolBal, rewardPool)
 	}
 }

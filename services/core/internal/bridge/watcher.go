@@ -24,12 +24,13 @@ import (
 // WrappedMatrix contract address, and the start block (see cmd/matrixd wiring or
 // an operator script); the Watcher does the rest.
 
-// WatcherState is the persisted cursor of a Watcher: the next block it should
-// scan from. It is stored under the bridge/* namespace so a restarted watcher
-// resumes without re-scanning (idempotent regardless, since ProcessBurn dedups
-// by burn id, but persisting the cursor avoids redundant work).
-const watcherCursorKey = "bridge/watch_cursor"
-
+// RESUME BEHAVIOR (honest): the Watcher does NOT persist its cursor. On start it
+// always resumes from StartBlock and re-scans the range from there. That re-scan
+// is harmless: ProcessBurn is replay-protected per burn id, so a re-observed burn
+// returns ErrBurnAlreadyProcessed and applyLog treats it as a benign no-op. A
+// persisted cursor (to skip redundant work across restarts) is not wired in here;
+// WatcherConfig exposes no Store field, and correctness never depends on one.
+//
 // Applier is the subset of *Bridge the Watcher needs to apply a decoded burn. It
 // is an interface so the Watcher can be unit-tested with a recording fake and so
 // the dependency is explicit.
@@ -47,8 +48,9 @@ type WatcherConfig struct {
 	// Contract is the WrappedMatrix contract address whose Burned events are
 	// watched (required).
 	Contract Address
-	// StartBlock is the first block to scan. On a fresh watcher scanning begins
-	// here; a persisted cursor (when Store is set) takes precedence on resume.
+	// StartBlock is the first block to scan. Scanning always begins here on
+	// start; the watcher does not persist a cursor, so a restart re-scans from
+	// StartBlock (harmless, since ProcessBurn dedups by burn id).
 	StartBlock uint64
 	// Confirmations is how many blocks behind head the watcher stays before
 	// treating a block as final, to avoid acting on a reorged burn. Zero means
@@ -197,7 +199,9 @@ func (w *Watcher) Poll(ctx context.Context) (int, error) {
 			}
 			applied += n
 		}
-		// Advance the cursor past the scanned range so a restart resumes here.
+		// Advance the in-memory cursor past the scanned range so the next poll in
+		// this process continues forward. It is not persisted: a fresh process
+		// starts again from StartBlock (see RESUME BEHAVIOR above).
 		w.mu.Lock()
 		w.next = to + 1
 		w.mu.Unlock()

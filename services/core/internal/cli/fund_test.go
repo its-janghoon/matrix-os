@@ -6,16 +6,24 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/marketapi"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
+// fundServerAPIKey is the API key the fund test server accepts. FundAccount now
+// requires the server to enforce authentication, so the harness enables ACLs and
+// the fund/quickstart tests pass this key via `--api-key`.
+const fundServerAPIKey = "cli-fund-test-key"
+
 // startFundServer stands up an in-process MarketService whose FundAccount RPC is
 // backed by a real Treasury with a genesis reward pool, so the `matrix fund`
-// command can be exercised end to end in-process. It returns the bound address
-// and the backing market for balance assertions.
+// command can be exercised end to end in-process. FundAccount refuses to run on
+// an unauthenticated server, so the harness enables auth; callers pass
+// fundServerAPIKey via `--api-key`. It returns the bound address and the backing
+// market for balance assertions.
 func startFundServer(t *testing.T, rewardPool uint64) (addr string, mkt *market.Market) {
 	t.Helper()
 
@@ -36,8 +44,14 @@ func startFundServer(t *testing.T, rewardPool uint64) (addr string, mkt *market.
 		t.Fatalf("ApplyGenesis: %v", err)
 	}
 
+	auth := admin.NewAuthenticator()
+	if err := auth.AddKey(&admin.APIKey{Key: fundServerAPIKey, Role: admin.RoleAdmin}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
 	srv, err := marketapi.NewServer(marketapi.Config{
 		Addr:    "127.0.0.1:0",
+		Auth:    auth,
 		Market:  mkt,
 		Settled: settled,
 		Chain:   chain,
@@ -81,7 +95,7 @@ func runFund(t *testing.T, addr string, args ...string) (string, error) {
 func TestCLI_Fund(t *testing.T) {
 	addr, mkt := startFundServer(t, 1_000_000)
 
-	out, err := runFund(t, addr, "fund", "--account", "buyer-1", "--amount", "250000")
+	out, err := runFund(t, addr, "--api-key", fundServerAPIKey, "fund", "--account", "buyer-1", "--amount", "250000")
 	if err != nil {
 		t.Fatalf("fund: %v (%s)", err, out)
 	}
@@ -95,7 +109,7 @@ func TestCLI_Fund(t *testing.T) {
 	}
 
 	// A second fund tops up and the printed balance reflects the cumulative total.
-	out, err = runFund(t, addr, "fund", "--account", "buyer-1", "--amount", "50000")
+	out, err = runFund(t, addr, "--api-key", fundServerAPIKey, "fund", "--account", "buyer-1", "--amount", "50000")
 	if err != nil {
 		t.Fatalf("fund (top up): %v (%s)", err, out)
 	}

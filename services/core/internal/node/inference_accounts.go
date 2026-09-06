@@ -138,8 +138,18 @@ func loadWalletAccount(path string) (*token.Account, bool) {
 	if err != nil || len(priv) != ed25519.PrivateKeySize {
 		return nil, false
 	}
+	// Verify the key pair is self-consistent: the stored public key must be the
+	// one the private key derives. A mismatched (corrupt or hand-edited) wallet is
+	// rejected here rather than silently resolved and failing later at signature
+	// verification time. The account id used for matching is the public key, so a
+	// resolver must never surface an account whose signing key would produce a
+	// signature that does not verify against that id.
+	privKey := ed25519.PrivateKey(priv)
+	if !privKey.Public().(ed25519.PublicKey).Equal(ed25519.PublicKey(pub)) {
+		return nil, false
+	}
 	return &token.Account{
 		PublicKey:  ed25519.PublicKey(pub),
-		PrivateKey: ed25519.PrivateKey(priv),
+		PrivateKey: privKey,
 	}, true
 }
