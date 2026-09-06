@@ -1,10 +1,46 @@
 name: CI
 on: [push, pull_request]
 jobs:
-  test:
+  core:
+    name: Go (services/core)
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
     - uses: actions/setup-go@v5
-      with: {go-version-file: 'go.mod'}
-    - run: go test ./...
+      with:
+        go-version-file: 'services/core/go.mod'
+    - name: go test
+      working-directory: services/core
+      run: go test ./...
+
+  proto:
+    name: Proto (buf lint)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: bufbuild/buf-setup-action@v1
+      with:
+        version: '1.72.0'
+    - name: buf lint
+      working-directory: proto
+      run: buf lint
+
+  web:
+    name: Web (apps/web)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Enable corepack
+      run: corepack enable
+    - name: Install dependencies
+      working-directory: apps/web
+      run: corepack yarn install --frozen-lockfile
+    - name: Lint
+      working-directory: apps/web
+      run: corepack yarn lint
+    - name: Build
+      working-directory: apps/web
+      run: corepack yarn build
