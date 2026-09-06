@@ -214,6 +214,11 @@ export default defineAgent({
                         Jump to Agent Development Guide →
                       </a>
                     </li>
+                    <li>
+                      <a href='/docs/cli' className='text-blue-400 hover:text-blue-300 underline'>
+                        Operate a node with the matrix CLI (matrix --help) →
+                      </a>
+                    </li>
                   </ul>
                 </article>
               </div>

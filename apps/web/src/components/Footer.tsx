@@ -1,77 +1,106 @@
 import Link from 'next/link';
 
-const productLinks = [
-  { label: 'Download', href: '/download' },
-  { label: 'Documentation', href: '/docs' },
-  { label: 'Quickstart', href: '/docs/quickstart' },
-  { label: 'Architecture', href: '/docs/architecture' },
-];
-
-const resourceLinks = [
-  { label: 'Introduction', href: '/docs/introduction' },
-  { label: 'Matrix Protocol', href: '/docs/matrix-protocol' },
-  { label: 'Soul Protocol', href: '/docs/soul-protocol' },
-  { label: 'Configuration', href: '/docs/configuration' },
+const columns: { title: string; links: { label: string; href: string; external?: boolean }[] }[] = [
+  {
+    title: 'Platform',
+    links: [
+      { label: 'Compute marketplace', href: '/#marketplace' },
+      { label: 'MATRIX coin', href: '/#token' },
+      { label: 'Consensus', href: '/#consensus' },
+      { label: 'LLM inference', href: '/#inference' },
+      { label: 'Matrix Console', href: '/#console' },
+    ],
+  },
+  {
+    title: 'Developers',
+    links: [
+      { label: 'Documentation', href: '/docs' },
+      { label: 'Quickstart', href: '/docs/quickstart' },
+      { label: 'matrix CLI', href: '/docs/cli' },
+      { label: 'Architecture', href: '/docs/architecture' },
+      { label: 'Configuration', href: '/docs/configuration' },
+    ],
+  },
+  {
+    title: 'Resources',
+    links: [
+      { label: 'Introduction', href: '/docs/introduction' },
+      { label: 'Matrix Protocol', href: '/docs/matrix-protocol' },
+      { label: 'Soul Protocol', href: '/docs/soul-protocol' },
+      { label: 'Download', href: '/download' },
+      { label: 'GitHub', href: 'https://github.com/ecirlabs/matrix-core', external: true },
+    ],
+  },
 ];
 
 export function Footer() {
   return (
-    <footer className='border-t border-grayscale-800 bg-black text-grayscale-400'>
-      <div className='max-w-6xl mx-auto px-4 py-16'>
-        <div className='grid grid-cols-1 gap-10 md:grid-cols-4'>
-          <div className='md:col-span-2'>
+    <footer className='relative border-t border-white/10 bg-black text-grayscale-400'>
+      <div className='pointer-events-none absolute inset-x-0 top-0 h-px bg-decorative-1 opacity-60' />
+      <div className='mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-16'>
+        <div className='grid grid-cols-2 gap-10 md:grid-cols-5'>
+          <div className='col-span-2'>
             <div className='flex items-center'>
-              <div className='h-10 w-10 rounded flex items-center justify-center border border-white/20 bg-white/10'>
-                <span className='text-xs font-semibold text-white tracking-wider'>ECIR</span>
+              <div className='h-10 w-10 rounded-xl bg-decorative-1 flex items-center justify-center shadow-glow'>
+                <span className='text-[11px] font-bold text-white tracking-wider'>ECIR</span>
               </div>
-              <span className='ml-3 text-lg font-semibold text-white'>Labs</span>
+              <span className='ml-3 text-lg font-semibold text-white tracking-tight'>Matrix</span>
             </div>
-            <p className='mt-4 max-w-sm text-sm text-grayscale-400'>
-              Matrix OS is an open operating fabric for decentralized intelligence: own your execution, keep data local,
-              and trade idle compute across a peer-to-peer network.
+            <p className='mt-4 max-w-sm text-sm leading-relaxed text-grayscale-400'>
+              A peer-to-peer marketplace for compute and LLM inference, settled in native MATRIX on a fast
+              leader-based BFT Layer 1. Own your execution, keep data local, and transact in one coin end to end.
             </p>
+            <div className='mt-6 flex items-center gap-4'>
+              <a
+                href='https://github.com/ecirlabs/matrix-core'
+                target='_blank'
+                rel='noopener noreferrer'
+                className='text-grayscale-400 hover:text-white transition-colors'
+                aria-label='GitHub'
+              >
+                <svg className='w-5 h-5' fill='currentColor' viewBox='0 0 24 24'>
+                  <path
+                    fillRule='evenodd'
+                    clipRule='evenodd'
+                    d='M12 2C6.477 2 2 6.477 2 12c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34-.46-1.16-1.11-1.47-1.11-1.47-.91-.62.07-.6.07-.6 1 .07 1.53 1.03 1.53 1.03.87 1.52 2.34 1.07 2.91.83.09-.65.35-1.09.63-1.34-2.22-.25-4.55-1.11-4.55-4.92 0-1.11.38-2 1.03-2.71-.1-.25-.45-1.29.1-2.64 0 0 .84-.27 2.75 1.02.79-.22 1.65-.33 2.5-.33.85 0 1.71.11 2.5.33 1.91-1.29 2.75-1.02 2.75-1.02.55 1.35.2 2.39.1 2.64.65.71 1.03 1.6 1.03 2.71 0 3.82-2.34 4.66-4.57 4.91.36.31.69.92.69 1.85V21c0 .27.16.59.67.5C19.14 20.16 22 16.42 22 12A10 10 0 0012 2z'
+                  />
+                </svg>
+              </a>
+            </div>
           </div>
 
-          <div>
-            <h3 className='text-sm font-semibold text-white'>Product</h3>
-            <ul className='mt-4 space-y-3 text-sm'>
-              {productLinks.map((link) => (
-                <li key={link.href}>
-                  <Link href={link.href} className='text-grayscale-400 transition-colors hover:text-primary-300'>
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-            </ul>
-          </div>
-
-          <div>
-            <h3 className='text-sm font-semibold text-white'>Resources</h3>
-            <ul className='mt-4 space-y-3 text-sm'>
-              {resourceLinks.map((link) => (
-                <li key={link.href}>
-                  <Link href={link.href} className='text-grayscale-400 transition-colors hover:text-primary-300'>
-                    {link.label}
-                  </Link>
-                </li>
-              ))}
-              <li>
-                <a
-                  href='https://github.com/ecirlabs/matrix-core'
-                  target='_blank'
-                  rel='noopener noreferrer'
-                  className='text-grayscale-400 transition-colors hover:text-primary-300'
-                >
-                  GitHub
-                </a>
-              </li>
-            </ul>
-          </div>
+          {columns.map((col) => (
+            <div key={col.title}>
+              <h3 className='text-xs font-semibold uppercase tracking-[0.14em] text-grayscale-500'>{col.title}</h3>
+              <ul className='mt-4 space-y-3 text-sm'>
+                {col.links.map((link) =>
+                  link.external ? (
+                    <li key={link.href}>
+                      <a
+                        href={link.href}
+                        target='_blank'
+                        rel='noopener noreferrer'
+                        className='text-grayscale-400 transition-colors hover:text-white'
+                      >
+                        {link.label}
+                      </a>
+                    </li>
+                  ) : (
+                    <li key={link.href}>
+                      <Link href={link.href} className='text-grayscale-400 transition-colors hover:text-white'>
+                        {link.label}
+                      </Link>
+                    </li>
+                  )
+                )}
+              </ul>
+            </div>
+          ))}
         </div>
 
-        <div className='mt-12 flex flex-col items-center justify-between gap-4 border-t border-grayscale-800 pt-8 text-sm text-grayscale-500 md:flex-row'>
+        <div className='mt-14 flex flex-col items-center justify-between gap-4 border-t border-white/10 pt-8 text-sm text-grayscale-500 md:flex-row'>
           <p>&copy; {new Date().getFullYear()} ECIR Labs. All rights reserved.</p>
-          <p>Matrix OS &mdash; decentralized intelligence, built in the open.</p>
+          <p>Native-first compute, settled through consensus.</p>
         </div>
       </div>
     </footer>

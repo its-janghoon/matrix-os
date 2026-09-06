@@ -28,6 +28,10 @@ export default function DocSidebar() {
       ],
     },
     {
+      section: 'Tools',
+      items: [{ name: 'matrix CLI', href: '/docs/cli' }],
+    },
+    {
       section: 'Protocols',
       items: [
         { name: 'Matrix Protocol', href: '/docs/matrix-protocol' },

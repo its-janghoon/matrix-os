@@ -2,5 +2,17 @@
 
 html,
 body {
-  background: #000;
+  background: #060a16;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Smooth in-page anchor scrolling for the single-page marketing site. */
+html {
+  scroll-behavior: smooth;
+}
+
+::selection {
+  background: rgba(46, 107, 255, 0.35);
+  color: #fff;
 }
