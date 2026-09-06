@@ -60,11 +60,56 @@ wrapped burn -> unlock native               (wMATRIX -> native MATRIX)
   stable id from `txHash:logIndex`) into a `BurnEvent`, then `ProcessBurn`
   applies it exactly once (replay-protected on that id) and releases the escrowed
   native MATRIX to `nativeRecipient`. The `BridgeE2E` test cross-checks the raw
-  emitted log against the exact bytes the Go decoder parses. Feeding the log into
-  the decoder is currently operator-driven (or driven by that test): an on-chain
-  `eth_getLogs`/subscription watcher that ingests `Burned` events automatically
-  is not yet wired, so the unlock half is a decoded, replay-safe primitive rather
-  than an always-on autonomous loop.
+  emitted log against the exact bytes the Go decoder parses. Feeding logs into
+  the decoder is automated by `bridge.Watcher`, an `eth_getLogs` poller that runs
+  as a `matrixd` subsystem against the node's own ledger - see
+  [Running the burn watcher in `matrixd`](#running-the-burn-watcher-in-matrixd).
+
+  What the watcher is not is consensus: it applies the unlock to the ledger of
+  whichever node runs it, rather than through a consensus-ordered operation. On a
+  multi-validator deployment that means one operator-run relayer node performs
+  the unlock. Making burn -> unlock consensus-ordered is a separate design item.
+
+### Running the burn watcher in `matrixd`
+
+Add a `bridge` section to the node config (`~/.matrix/config.yaml`) with the
+deployment facts, then restart the node:
+
+```yaml
+bridge:
+  contract: "0xYourWrappedMatrixAddress"   # required to enable the bridge at all
+  chain_id: 1                              # EVM chain id the contract is on
+  watch:
+    enabled: true
+    rpc_url: "https://your-eth-endpoint"
+    start_block: 18000000                  # the contract's deployment block
+    confirmations: 12                      # null -> 12; set 0 only on a local chain
+    poll_interval: 12s                     # empty/0 -> 2s
+    max_block_span: 2000                   # blocks per eth_getLogs call
+```
+
+On start the node logs the enabled bridge and the block the watcher resumes
+from. Notes that matter in operation:
+
+- **The bridge is opt-in.** With no `contract` the subsystem stays off and the
+  node behaves as it did before. A config that sets `watch.enabled` without a
+  `contract`, `chain_id`, or `rpc_url` **fails startup** rather than coming up
+  quietly not relaying.
+- **`chain_id` and `contract` are bound into every attestation digest.** Wrong
+  values produce signatures `WrappedMatrix.mint` rejects, so they are validated
+  at startup, not on first use.
+- **The scan cursor is persisted** in the node's KV store (namespaced per
+  contract address), so a restart resumes at the next unscanned block instead of
+  re-scanning from `start_block`. Correctness never depends on it: the cursor is
+  written after a span's burns are applied, and `ProcessBurn` dedups by burn id,
+  so a crash re-scans harmlessly rather than double-unlocking.
+- **`confirmations` left unset defaults to 12,** not 0 - a node on a real
+  endpoint must not release escrow on a block that can still be reorged away.
+  Set it to `0` only for an instant-finality dev chain such as Hardhat.
+- **Because the node holds both halves on one ledger,** `Bridge.Reconcile` is a
+  real invariant check there (escrow balance == locked - unlocked).
+  `cmd/bridge-watch` applies burns to a throwaway ledger it seeds, so use it to
+  inspect a range or verify an endpoint and address, not to run a bridge.
 
 ### Why secp256k1 attestor keys
 
@@ -258,9 +303,13 @@ npx hardhat verify --network mainnet <address> '["0x..","0x.."]' <threshold>
 
 ### 6. Post-deploy
 
-Register the deployed contract address with the Go bridge and confirm the
-attestor addresses match, so Go-produced attestations mint on-chain. The wrapped
-supply must always equal the outstanding native locked in L1 escrow.
+Register the deployed contract address with the Go bridge (the `bridge.contract`
+and `bridge.chain_id` node config keys) and confirm the attestor addresses match,
+so Go-produced attestations mint on-chain. Then enable `bridge.watch` on the
+relayer node with the deployment block as `start_block` so burns unlock
+automatically - see [Running the burn watcher in `matrixd`](#running-the-burn-watcher-in-matrixd).
+The wrapped supply must always equal the outstanding native locked in L1 escrow;
+`Bridge.Reconcile` on the node checks that on the native side.
 
 > **Reminder:** this repository holds no private keys and never executes a real
 > mainnet deploy. The commands above are run by the operator with their own key.

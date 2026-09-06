@@ -25,12 +25,21 @@
 //	      hand-built value; see burnlog.go and burnlog_test.go (and the
 //	      contracts BridgeE2E test, which cross-checks the raw log bytes).
 //
-//	      Ingestion of Burned logs is currently operator-driven (or driven by the
-//	      end-to-end test): an always-on eth_getLogs/subscription watcher that
-//	      pulls Burned events off Ethereum automatically is not yet wired, so the
-//	      unlock half is a decoded, replay-safe primitive rather than a fully
-//	      autonomous closed loop. The mint half IS end-to-end (a real Go
-//	      attestation mints on-chain unmodified).
+//	      Ingestion of those Burned logs is automated by Watcher (watcher.go): an
+//	      always-on eth_getLogs poller that pulls Burned events off an Ethereum
+//	      endpoint and drives each through ProcessBurn exactly once, with
+//	      confirmation-depth handling and an optionally persisted scan cursor. It
+//	      runs as a matrixd subsystem against the node's own ledger (the
+//	      bridge.watch config section; see internal/node/bridge_watch.go) or out
+//	      of process via cmd/bridge-watch. So both halves are closed loops: the
+//	      mint half is end-to-end (a real Go attestation mints on-chain
+//	      unmodified) and the unlock half ingests real on-chain events without an
+//	      operator hand-feeding logs.
+//
+//	      What the watcher is NOT is consensus: it applies the unlock to the
+//	      ledger of whichever node runs it, rather than through a
+//	      consensus-ordered operation. That boundary is stated in watcher.go and
+//	      is unchanged by the in-node wiring.
 //
 // Because every mint is gated on a real lock and every unlock consumes a real
 // burn exactly once, total locked native always reconciles 1:1 (via the

@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
+	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/inference"
 	"github.com/ecirlabs/matrix-core/internal/inferenceapi"
@@ -59,6 +61,12 @@ type Config struct {
 		// must be registered out of band via GetInference().Registry().
 		EchoProvider string `yaml:"echo_provider"`
 	} `yaml:"inference"`
+	// Bridge configures the opt-in lock-and-mint bridge to wrapped MATRIX on
+	// Ethereum, including the always-on burn->unlock watcher. With no contract
+	// configured the subsystem stays off and the node behaves exactly as a node
+	// without a bridge. See bridge_watch.go for the fields and the authority
+	// model.
+	Bridge BridgeConfig `yaml:"bridge"`
 	Consensus struct {
 		// Validators is the fixed validator set as hex-encoded account IDs
 		// (ed25519 public keys). This node's own consensus identity is always
@@ -117,6 +125,9 @@ type Node struct {
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
 	inferenceAccts   *walletAccounts
+	bridge           *bridge.Bridge
+	bridgeWatcher    *bridge.Watcher
+	bridgeWatchDone  chan struct{}
 	agents           map[string]*agent.Agent
 	agentsMu         sync.RWMutex
 	souls            map[string]*soul.Soul
@@ -156,6 +167,16 @@ func Initialize(configPath string) error {
 	// == NativeMaxSupply and allocations are empty.
 	config.Genesis.RewardPool = token.NativeMaxSupply
 	config.Genesis.Allocations = nil
+	// Leave the bridge subsystem OFF in a freshly-initialized config. Enabling it
+	// requires deployment facts a generated config cannot invent: the deployed
+	// WrappedMatrix address, its EVM chain id, an Ethereum RPC endpoint, and the
+	// contract's deployment block. Writing the empty section documents the knobs
+	// without pretending a bridge exists; an operator fills them in and sets
+	// bridge.watch.enabled to run the burn->unlock relayer inside matrixd. The
+	// conservative default confirmation depth applies when confirmations is left
+	// null (see defaultBridgeConfirmations); set it to 0 only for a local chain
+	// with instant finality, such as hardhat.
+	config.Bridge = BridgeConfig{}
 
 	// Create config directory if it doesn't exist
 	configDir := filepath.Dir(configPath)
@@ -535,6 +556,85 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start inference API server: %w", err)
 	}
 
+	// Initialize the lock-and-mint bridge subsystem over this node's own market
+	// ledger and KV store, and (when configured) run the always-on burn->unlock
+	// watcher against it. This is the piece that makes the bridge a matrixd
+	// subsystem rather than an out-of-process demo: because the Bridge here holds
+	// BOTH halves on one ledger (Lock moves native into bridge/escrow, the
+	// watcher's ProcessBurn releases it back out), escrow accounting is coherent
+	// and Bridge.Reconcile is a real invariant check. cmd/bridge-watch, by
+	// contrast, applies burns to a throwaway ledger it seeds, so it can only ever
+	// demonstrate the decode+unlock step.
+	//
+	// The whole subsystem is opt-in and off by default: with no bridge.contract
+	// configured, newConfiguredBridge returns nil and the node runs exactly as it
+	// did before this wiring existed. A config that enables bridge.watch without
+	// a contract, chain id, or rpc_url is rejected here rather than silently
+	// ignored, so a deployment that believes it is relaying never comes up quiet.
+	//
+	// AUTHORITY (honest, unchanged by this wiring): the watcher is a per-node
+	// polling relayer. Running it inside matrixd does not make the unlock
+	// consensus-ordered; on a multi-validator deployment the burn is applied by
+	// whichever node runs the watcher. That is the correct model for a solo/dev
+	// node or a single operator-run relayer node; consensus-ordered unlock is a
+	// separate design change (see bridge_watch.go).
+	nodeBridge, err := newConfiguredBridge(n.market.Ledger(), n.kvStore, n.config.Bridge)
+	if err != nil {
+		return fmt.Errorf("failed to initialize bridge: %w", err)
+	}
+	n.bridge = nodeBridge
+	if nodeBridge != nil {
+		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d.\n",
+			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID)
+	}
+
+	ethClient, err := dialBridgeClient(n.config.Bridge)
+	if err != nil {
+		return fmt.Errorf("failed to initialize bridge watcher: %w", err)
+	}
+	// newConfiguredBridgeWatcher takes bridge.Applier, so pass a typed nil-safe
+	// value: a nil *bridge.Bridge in an interface is non-nil, which would defeat
+	// the builder's own "no bridge configured" check.
+	var applier bridge.Applier
+	if nodeBridge != nil {
+		applier = nodeBridge
+	}
+	watcher, err := newConfiguredBridgeWatcher(
+		applier,
+		n.kvStore,
+		ethClient,
+		n.config.Bridge,
+		func(d bridge.DecodedBurn) {
+			native, convErr := token.ERC20ToNative(d.ERC20Amount)
+			if convErr != nil {
+				fmt.Printf("Bridge watcher: applied burn %s to %s (amount conversion failed: %v)\n",
+					d.ID, d.NativeRecipient, convErr)
+				return
+			}
+			fmt.Printf("Bridge watcher: unlocked %d native base units to %s (burn %s)\n",
+				native, d.NativeRecipient, d.ID)
+		},
+		func(watchErr error) {
+			// Non-fatal: a transient RPC failure or one malformed log. The watcher
+			// retries on the next tick; surface it so the operator can see a
+			// persistently broken endpoint.
+			fmt.Printf("Bridge watcher warning: %v\n", watchErr)
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to initialize bridge watcher: %w", err)
+	}
+	if watcher != nil {
+		n.bridgeWatcher = watcher
+		n.bridgeWatchDone = runBridgeWatcher(n.ctx, watcher, func(exitErr error) {
+			if exitErr != nil && !errors.Is(exitErr, context.Canceled) {
+				fmt.Printf("Bridge watcher stopped: %v\n", exitErr)
+			}
+		})
+		fmt.Printf("Bridge watcher: polling %s from block %d (%d confirmations).\n",
+			n.config.Bridge.Watch.RPCURL, watcher.Cursor(), n.config.Bridge.Watch.confirmations())
+	}
+
 	// Update metrics
 	n.metrics.RecordPeerCount(len(n.p2pHost.GetHost().Network().Peers()))
 
@@ -553,6 +653,16 @@ func (n *Node) Stop() error {
 		}
 	}
 	n.agentsMu.Unlock()
+
+	// Stop the bridge burn->unlock watcher first. It writes to the market ledger
+	// and the KV store, both of which are torn down below, so it must be joined
+	// (not merely signalled) before that happens. Cancelling the node context
+	// ends its Run loop; n.cancel is idempotent, so the later cancel for the
+	// exchange/consensus loops is harmless.
+	if n.bridgeWatchDone != nil {
+		n.cancel()
+		<-n.bridgeWatchDone
+	}
 
 	// Stop inference API server
 	if n.inferenceServer != nil {
@@ -750,6 +860,27 @@ func (n *Node) GetInference() *inference.Service {
 // (matrix.inference.v1.InferenceService), served on the node's Inference.Addr.
 func (n *Node) GetInferenceAPI() *inferenceapi.Server {
 	return n.inferenceServer
+}
+
+// GetBridge returns the node's lock-and-mint bridge, or nil when no bridge is
+// configured (bridge.contract unset, the default). The returned Bridge holds
+// both halves of the flow on this node's own ledger: Lock escrows native MATRIX
+// into bridge/escrow and produces the validator attestation the Ethereum
+// WrappedMatrix contract needs to mint, and ProcessBurn (driven by the watcher
+// or an operator) releases escrow back on a burn. Because both halves share one
+// ledger, Reconcile is a meaningful 1:1 backing check on this node.
+func (n *Node) GetBridge() *bridge.Bridge {
+	return n.bridge
+}
+
+// GetBridgeWatcher returns the running burn->unlock watcher, or nil when
+// bridge.watch is not enabled. The watcher polls the configured Ethereum
+// endpoint for WrappedMatrix Burned events and applies each exactly once to the
+// bridge above; its scan cursor is persisted in the node's KV store so a restart
+// resumes rather than re-scanning from start_block. It is a per-node relayer,
+// not a consensus-ordered operation; see bridge_watch.go for that boundary.
+func (n *Node) GetBridgeWatcher() *bridge.Watcher {
+	return n.bridgeWatcher
 }
 
 // RegisterInferenceAccount makes acct's signing key available to the inference

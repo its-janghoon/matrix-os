@@ -11,16 +11,23 @@
 // BridgeWatch test.
 //
 // OPERATOR MODEL (honest): this command runs a single-node relayer that applies
-// burns to a LOCAL ledger it is given. It seeds a throwaway escrow so the demo
-// unlock has backing; a production deployment points --escrow-fund at the real
-// outstanding escrow. The internal/bridge.Watcher this command drives is a
-// reusable library type, but matrixd does NOT currently construct or run a
-// Watcher against the node's own ledger: there is no in-node bridge-watch
-// subsystem wired into internal/node yet, so today an operator runs the watcher
-// out of process via this command (or a script). Wiring an optional
-// config-driven Watcher into matrixd is a remaining item (see STILL-REMAINING.md).
-// The watcher does not itself reach multi-validator consensus on the unlock; see
-// internal/bridge/watcher.go for the automation boundary.
+// burns to a THROWAWAY LOCAL ledger it creates and seeds with escrow so the demo
+// unlock has backing. That makes it a diagnostic and a proof of the
+// decode+unlock step, NOT the way to run a bridge: because its ledger is not the
+// node's ledger, its unlock is disconnected from the locks that back the wrapped
+// supply, and Bridge.Reconcile cannot be checked against it (see the note near
+// the end of main).
+//
+// For a real deployment run the watcher INSIDE matrixd instead: the node has a
+// config-driven bridge subsystem (the `bridge:` config section, with
+// `bridge.watch`) that constructs the same internal/bridge.Watcher against the
+// node's own market ledger and KV store, persisting its scan cursor so a restart
+// resumes instead of re-scanning. See internal/node/bridge_watch.go. Use this
+// command to inspect a block range, or to verify an endpoint and contract
+// address before enabling bridge.watch.
+//
+// Neither form reaches multi-validator consensus on the unlock; see
+// internal/bridge/watcher.go for that automation boundary.
 //
 // Usage:
 //
