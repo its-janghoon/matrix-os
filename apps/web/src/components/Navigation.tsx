@@ -31,6 +31,18 @@ export default function Navigation() {
                 Marketplace
               </Link>
               <Link
+                href='/#token'
+                className='text-sm text-grayscale-400 transition-colors hover:text-white'
+              >
+                Token
+              </Link>
+              <Link
+                href='/#consensus'
+                className='text-sm text-grayscale-400 transition-colors hover:text-white'
+              >
+                Consensus
+              </Link>
+              <Link
                 href='/docs'
                 className={`text-sm transition-colors ${isActive('/docs') ? 'text-primary-300' : 'text-grayscale-400 hover:text-white'}`}
               >
@@ -91,6 +103,27 @@ export default function Navigation() {
                 onClick={() => setIsMenuOpen(false)}
               >
                 Marketplace
+              </Link>
+              <Link
+                href='/#token'
+                className='text-sm text-grayscale-400'
+                onClick={() => setIsMenuOpen(false)}
+              >
+                Token
+              </Link>
+              <Link
+                href='/#consensus'
+                className='text-sm text-grayscale-400'
+                onClick={() => setIsMenuOpen(false)}
+              >
+                Consensus
+              </Link>
+              <Link
+                href='/#inference'
+                className='text-sm text-grayscale-400'
+                onClick={() => setIsMenuOpen(false)}
+              >
+                Inference
               </Link>
               <Link
                 href='/docs'

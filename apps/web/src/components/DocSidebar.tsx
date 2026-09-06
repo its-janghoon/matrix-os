@@ -23,6 +23,7 @@ export default function DocSidebar() {
       section: 'Core Concepts',
       items: [
         { name: 'Architecture', href: '/docs/architecture' },
+        { name: 'Compute Marketplace', href: '/docs/compute-marketplace' },
         { name: 'Configuration', href: '/docs/configuration' },
       ],
     },

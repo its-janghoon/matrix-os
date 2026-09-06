@@ -58,6 +58,14 @@ export default function Docs() {
                             <p className='text-gray-300'>Understand the system architecture and design.</p>
                           </a>
                         </li>
+                        <li>
+                          <a href='/docs/compute-marketplace' className='block'>
+                            <h3 className='text-lg font-semibold text-white mb-2'>Compute Marketplace</h3>
+                            <p className='text-gray-300'>
+                              The MATRIX token, fast consensus chain, and LLM inference backends.
+                            </p>
+                          </a>
+                        </li>
                       </ul>
                     </div>
                   </section>

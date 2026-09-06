@@ -17,6 +17,35 @@ document describes the layout and how to build and test each piece.
 - [`apps/console`](apps/console/README.md) — Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
 - [`contracts`](contracts/README.md) — the Hardhat project for MATRIX, the ERC-20 settlement and earning token of the compute marketplace.
 
+## Screenshots
+
+The marketing site and the console below present the four shipped capabilities: the MATRIX
+ERC-20 settlement token, the fast leader-based consensus chain, real LLM inference (local
+runner + provider-API proxy), and the Matrix Console desktop app. Images live in
+[`docs/screenshots`](docs/screenshots).
+
+### Marketing site (`apps/web`)
+
+![Matrix OS home hero](docs/screenshots/web-home.png)
+*The Matrix OS home page.*
+
+![MATRIX token section](docs/screenshots/web-token.png)
+*MATRIX, the ERC-20 settlement and earning token: name, symbol, decimals, and supply cap.*
+
+![Global consensus section](docs/screenshots/web-consensus.png)
+*The fast, leader-based BFT consensus chain that agrees one global ledger.*
+
+![LLM inference section](docs/screenshots/web-inference.png)
+*Two ways to contribute LLM compute: a local runner and a provider-API proxy.*
+
+![Compute marketplace docs](docs/screenshots/web-docs.png)
+*The Compute Marketplace documentation page.*
+
+### Console (`apps/console`)
+
+![Matrix Console desktop app](docs/screenshots/console-app.png)
+*Matrix Console: providers, jobs, MATRIX wallet, consensus, and inference in one window.*
+
 ## Repository tooling
 
 A root [`go.work`](go.work) ties the Go modules (`services/core` and `proto`) together so
