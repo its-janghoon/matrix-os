@@ -15,6 +15,7 @@ document describes the layout and how to build and test each piece.
 - [`proto`](proto/README.md) — Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
 - [`apps/web`](apps/web) — the Next.js marketing website (ecirlabs-web).
 - [`apps/console`](apps/console/README.md) — Matrix Console, the docs and future Tauri desktop app.
+- [`contracts`](contracts/README.md) — the Hardhat project for MATRIX, the ERC-20 settlement and earning token of the compute marketplace.
 
 ## Repository tooling
 
@@ -49,6 +50,15 @@ cd apps/web
 corepack yarn install --frozen-lockfile
 corepack yarn lint
 corepack yarn build
+```
+
+### Contracts — `contracts`
+
+```sh
+cd contracts
+npm install
+npx hardhat compile
+npx hardhat test
 ```
 
 ## License

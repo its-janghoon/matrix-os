@@ -1,0 +1,21 @@
+{
+  "name": "matrix-contracts",
+  "version": "1.0.0",
+  "description": "Matrix Compute Token (MATRIX) — the ERC-20 settlement and earning currency for the Matrix OS compute marketplace.",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "node": "hardhat node",
+    "deploy:localhost": "hardhat run scripts/deploy.ts --network localhost"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "@openzeppelin/contracts": "^5.1.0",
+    "chai": "^4.3.10",
+    "hardhat": "^2.22.17",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.6.3"
+  }
+}
