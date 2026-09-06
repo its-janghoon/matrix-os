@@ -1,14 +1,16 @@
 // Matrix Console transport client.
 //
 // The console connects to a local `matrixd` node. matrixd exposes its
-// marketplace and inference surfaces as gRPC services (MarketService on :9091,
-// InferenceService on :9092 by default; see services/core/internal/marketapi and
-// internal/inferenceapi). Raw gRPC uses HTTP/2 trailers that browsers cannot
-// speak directly, so a browser/WebView client talks to those services through
-// the Connect protocol (https://connectrpc.com), which is a plain HTTP POST of
-// a JSON (or binary) message to `/{package}.{Service}/{Method}`. matrixd can
-// front its gRPC services with a Connect/grpc-web handler; the client below
-// speaks that protocol over `fetch`, so it is real wire code rather than a mock.
+// marketplace and inference surfaces as gRPC services (on :9091 and :9092), and
+// raw gRPC uses HTTP/2 trailers that a browser or WebView cannot produce. So it
+// also serves both of those services over the Connect protocol
+// (https://connectrpc.com) on :9093 - a plain HTTP POST of a JSON message to
+// `/{package}.{Service}/{Method}` - which is what this client speaks over
+// `fetch`. See services/core/internal/connectapi.
+//
+// That endpoint is why this is now a working path rather than aspirational: the
+// client shipped speaking Connect before the daemon served it, so only the demo
+// backend below could ever answer.
 //
 // When no node is reachable (the common case in a fresh checkout with no daemon
 // running) the client surfaces a typed error and the UI renders a graceful
@@ -32,15 +34,17 @@ import {
 } from "./types";
 
 export interface ConnectionConfig {
-  /** Base URL of the matrixd MarketService Connect endpoint, e.g. http://127.0.0.1:9091 */
+  /** Base URL of the matrixd Connect endpoint serving MarketService. */
   marketUrl: string;
-  /** Base URL of the matrixd InferenceService Connect endpoint, e.g. http://127.0.0.1:9092 */
+  /** Base URL of the matrixd Connect endpoint serving InferenceService. It is
+   *  the same endpoint by default: Connect paths carry the service name, so one
+   *  port serves both. */
   inferenceUrl: string;
 }
 
 export const DEFAULT_CONFIG: ConnectionConfig = {
-  marketUrl: "http://127.0.0.1:9091",
-  inferenceUrl: "http://127.0.0.1:9092",
+  marketUrl: "http://127.0.0.1:9093",
+  inferenceUrl: "http://127.0.0.1:9093",
 };
 
 export interface SubmitInferenceParams {

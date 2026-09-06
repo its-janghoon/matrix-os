@@ -18,7 +18,9 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
 
-    "baseUrl": ".",
+    // No baseUrl: TypeScript 7 removes it, and with moduleResolution "bundler"
+    // the paths below already resolve relative to this file. Keeping it made
+    // `yarn build` fail outright (TS5101).
     "paths": {
       "@/*": ["./src/*"]
     }

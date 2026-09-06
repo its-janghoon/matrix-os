@@ -12,8 +12,8 @@ export function NodeConnectionPanel() {
       <h2>Node Connection</h2>
       <p className="hint">
         Configure the local <span className="mono">matrixd</span> endpoints. The console speaks the
-        Connect protocol to the MarketService (default <span className="mono">:9091</span>) and
-        InferenceService (default <span className="mono">:9092</span>). Use the built-in demo backend
+        Connect protocol to matrixd's HTTP endpoint (default <span className="mono">:9093</span>), which
+        serves both MarketService and InferenceService. Use the built-in demo backend
         to explore the console without a running daemon.
       </p>
 
@@ -31,7 +31,7 @@ export function NodeConnectionPanel() {
             value={config.marketUrl}
             disabled={mode === "demo"}
             onChange={(e) => setConfig({ ...config, marketUrl: e.target.value })}
-            placeholder="http://127.0.0.1:9091"
+            placeholder="http://127.0.0.1:9093"
           />
         </div>
         <div className="field grow">
@@ -40,7 +40,7 @@ export function NodeConnectionPanel() {
             value={config.inferenceUrl}
             disabled={mode === "demo"}
             onChange={(e) => setConfig({ ...config, inferenceUrl: e.target.value })}
-            placeholder="http://127.0.0.1:9092"
+            placeholder="http://127.0.0.1:9093"
           />
         </div>
         <button className="btn" onClick={connect} disabled={state === "connecting"}>

@@ -11,6 +11,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
 	"github.com/ecirlabs/matrix-core/internal/bridge"
+	"github.com/ecirlabs/matrix-core/internal/connectapi"
 	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/inference"
 	"github.com/ecirlabs/matrix-core/internal/inferenceapi"
@@ -24,6 +25,8 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/soul"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/transport"
+	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
+	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"gopkg.in/yaml.v3"
 )
 
@@ -67,6 +70,19 @@ type Config struct {
 	// without a bridge. See bridge_watch.go for the fields and the authority
 	// model.
 	Bridge BridgeConfig `yaml:"bridge"`
+	// Connect exposes the same market and inference services over plain HTTP
+	// (the Connect protocol's unary JSON form) so a browser can call them. Raw
+	// gRPC needs HTTP/2 trailers, which no browser can produce, so without this
+	// surface a web app or a dApp front end cannot reach the node at all.
+	Connect struct {
+		// Addr is the TCP listen address. Default 0.0.0.0:9093. Set to "off" (or
+		// "-") to disable the endpoint entirely.
+		Addr string `yaml:"addr"`
+		// AllowedOrigins lists the browser origins allowed to call it. Default
+		// ["*"], which suits a daemon a user's own page talks to; a public
+		// deployment should narrow it.
+		AllowedOrigins []string `yaml:"allowed_origins"`
+	} `yaml:"connect"`
 	Consensus struct {
 		// Validators is the fixed validator set as hex-encoded account IDs
 		// (ed25519 public keys). This node's own consensus identity is always
@@ -104,6 +120,28 @@ type GenesisAllocationConfig struct {
 	Amount uint64 `yaml:"amount"`
 }
 
+// connectAuth adapts the admin authenticator to the small interface the
+// Connect endpoint takes. It returns nil when there is no authenticator, which
+// is how "ACLs disabled" reaches the endpoint: exactly the rule the gRPC
+// servers apply, expressed once.
+//
+// The adapter exists because the endpoint deliberately does not import the
+// admin package - it needs one question answered ("is this caller
+// authenticated?"), not the whole role model.
+func connectAuth(auth *admin.Authenticator) connectapi.Authenticator {
+	if auth == nil {
+		return nil
+	}
+	return authenticatorFunc(func(ctx context.Context) (string, error) {
+		role, err := auth.Authenticate(ctx)
+		return string(role), err
+	})
+}
+
+type authenticatorFunc func(ctx context.Context) (string, error)
+
+func (f authenticatorFunc) Authenticate(ctx context.Context) (string, error) { return f(ctx) }
+
 // Node represents a Matrix node instance
 type Node struct {
 	ctx              context.Context
@@ -124,6 +162,7 @@ type Node struct {
 	marketServer     *marketapi.Server
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
+	connectServer    *connectapi.Server
 	inferenceAccts   *walletAccounts
 	bridge           *bridge.Bridge
 	bridgeWatcher    *bridge.Watcher
@@ -153,6 +192,7 @@ func Initialize(configPath string) error {
 	config.Admin.Addr = "0.0.0.0:9090"
 	config.Market.Addr = "0.0.0.0:9091"
 	config.Inference.Addr = "0.0.0.0:9092"
+	config.Connect.Addr = "0.0.0.0:9093"
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -222,6 +262,12 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	}
 	if config.Inference.Addr == "" {
 		config.Inference.Addr = "0.0.0.0:9092"
+	}
+	if config.Connect.Addr == "" {
+		config.Connect.Addr = "0.0.0.0:9093"
+	}
+	if len(config.Connect.AllowedOrigins) == 0 {
+		config.Connect.AllowedOrigins = []string{"*"}
 	}
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
@@ -556,6 +602,28 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start inference API server: %w", err)
 	}
 
+	// Serve the SAME market and inference implementations over plain HTTP, so a
+	// browser can reach them. It is the same objects, not a copy: one code path
+	// serves both surfaces, so they cannot drift, and the same authenticator
+	// gates both when ACLs are enabled.
+	if addr := n.config.Connect.Addr; addr != "" && addr != "off" && addr != "-" {
+		connectServer, err := connectapi.NewServer(addr, connectapi.Config{
+			Bindings: []connectapi.Binding{
+				{Desc: &marketv1.MarketService_ServiceDesc, Impl: n.marketServer.Service()},
+				{Desc: &inferencev1.InferenceService_ServiceDesc, Impl: n.inferenceServer.Service()},
+			},
+			Auth:           connectAuth(marketAuth),
+			AllowedOrigins: n.config.Connect.AllowedOrigins,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create connect endpoint: %w", err)
+		}
+		n.connectServer = connectServer
+		if err := n.connectServer.Start(n.ctx); err != nil {
+			return fmt.Errorf("failed to start connect endpoint: %w", err)
+		}
+	}
+
 	// Initialize the lock-and-mint bridge subsystem over this node's own market
 	// ledger and KV store, and (when configured) run the always-on burn->unlock
 	// watcher against it. This is the piece that makes the bridge a matrixd
@@ -665,6 +733,12 @@ func (n *Node) Stop() error {
 	}
 
 	// Stop inference API server
+	if n.connectServer != nil {
+		if err := n.connectServer.Stop(n.ctx); err != nil {
+			fmt.Printf("Warning: failed to stop connect endpoint: %v\n", err)
+		}
+	}
+
 	if n.inferenceServer != nil {
 		if err := n.inferenceServer.Stop(n.ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop inference API server: %w", err))

@@ -148,15 +148,24 @@ meaningful state with no daemon. To connect to a real node, run `matrixd`
 (from [`services/core`](../../services/core)) and, in the **Connection** tab,
 switch the backend to **Live matrixd** and point the endpoints at your node:
 
-- **MarketService URL** — default `http://127.0.0.1:9091`
-- **InferenceService URL** — default `http://127.0.0.1:9092`
+- **MarketService URL** - default `http://127.0.0.1:9093`
+- **InferenceService URL** - default `http://127.0.0.1:9093`
 
-The client posts Connect-protocol JSON to
-`/{package}.{Service}/{Method}` (e.g. `POST
-http://127.0.0.1:9091/matrix.market.v1.MarketService/ListProviders`). Raw gRPC
-uses HTTP/2 trailers a browser cannot produce, so expose the node's gRPC
-services behind a Connect/gRPC-web handler when connecting from the browser
-frontend; inside the Tauri WebView the same HTTP path is used.
+Both point at the same port on purpose: matrixd serves its market and
+inference services over the Connect protocol on `:9093`, and a Connect path
+carries the service name, so one endpoint answers for both.
+
+The client posts Connect-protocol JSON to `/{package}.{Service}/{Method}`.
+Raw gRPC (`:9091`, `:9092`) uses HTTP/2 trailers a browser cannot produce,
+which is why the node also serves this HTTP surface - see
+[`internal/connectapi`](../../services/core/internal/connectapi). It is the
+same service objects behind both, with the same authentication when ACLs are
+enabled. Try it with curl:
+
+```sh
+curl -X POST http://127.0.0.1:9093/matrix.market.v1.MarketService/ListProviders \
+  -H 'Content-Type: application/json' -d '{}'
+```
 
 ### Desktop build (Tauri)
 

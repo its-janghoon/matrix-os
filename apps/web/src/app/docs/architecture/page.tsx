@@ -31,6 +31,9 @@ market:
 inference:
   addr: 0.0.0.0:9092      # gRPC: matrix.inference.v1.InferenceService
   echo_provider: local    # GPU-free backend, for trying the flow
+connect:
+  addr: 0.0.0.0:9093      # HTTP/JSON for the same services; "off" disables it
+  allowed_origins: ["*"]  # browser origins allowed to call it
 consensus:
   validators: []          # hex account IDs; empty = solo validator`;
 
@@ -59,6 +62,10 @@ const subsystems = [
     name: 'gRPC services',
     body: 'Market, inference and admin, each on its own port, gated by the same authentication when ACLs are enabled.',
   },
+  {
+    name: 'HTTP endpoint',
+    body: 'The same market and inference services over plain HTTP, as JSON, on port 9093. Raw gRPC needs HTTP/2 trailers that no browser can produce, so this is the surface a web app, a dApp front end or the Console in a WebView actually calls. Same objects, same auth.',
+  },
 ];
 
 export default function ArchitecturePage() {
@@ -76,7 +83,7 @@ export default function ArchitecturePage() {
                   <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
                     <h1 className='mb-4 text-4xl font-bold text-white'>Architecture</h1>
                     <p className='text-xl text-gray-100'>
-                      One process, one store, six subsystems. Here is what a node is made of and how you reach it.
+                      One process, one store. Here is what a node is made of and how you reach it.
                     </p>
                   </div>
 

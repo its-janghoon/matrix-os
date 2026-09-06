@@ -9,7 +9,7 @@ export function NodeStack({ className }: { className?: string }) {
   return (
     <Diagram
       title='What runs inside a node'
-      description='One matrixd process holds a libp2p host and gossip transport, the marketplace and its order book, the consensus engine, the LLM inference runner, and a Pebble key-value store holding the ledger and the committed block chain. Operators reach it through the matrix CLI and the gRPC services for market, inference and admin.'
+      description='One matrixd process holds a libp2p host and gossip transport, the marketplace and its order book, the consensus engine, the LLM inference runner, and a Pebble key-value store holding the ledger and the committed block chain. It is reachable through the matrix CLI, the gRPC services for market, inference and admin, and an HTTP endpoint that serves the same market and inference services as JSON so a browser can call them.'
       viewBox='0 0 760 380'
       minWidth={640}
       className={className}
@@ -25,9 +25,10 @@ export function NodeStack({ className }: { className?: string }) {
       <Box x={272} y={150} w={448} h={64} tone='neutral' lines={['Pebble store']} sub='ledger, token chain, committed blocks' />
 
       <Group x={16} y={252} w={728} h={104} label='How you reach it' tone='neutral' />
-      <Box x={40} y={278} w={216} h={60} tone='neutral' lines={['matrix CLI']} sub='same host' />
-      <Box x={272} y={278} w={216} h={60} tone='neutral' lines={['gRPC services']} sub='market, inference, admin' />
-      <Box x={504} y={278} w={216} h={60} tone='neutral' lines={['Matrix Console']} sub='desktop app' />
+      <Box x={40} y={278} w={158} h={60} tone='neutral' lines={['matrix CLI']} sub='same host' />
+      <Box x={214} y={278} w={158} h={60} tone='neutral' lines={['gRPC']} sub=':9090-:9092' />
+      <Box x={388} y={278} w={158} h={60} tone='secondary' lines={['HTTP / Connect']} sub=':9093, browser-ready' />
+      <Box x={562} y={278} w={158} h={60} tone='neutral' lines={['Matrix Console']} sub='desktop app' />
 
       <Note x={380} y={372}>
         every balance-changing path ends in the same committed ledger

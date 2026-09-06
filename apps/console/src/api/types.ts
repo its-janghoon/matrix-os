@@ -3,8 +3,8 @@
 // These mirror the wire contracts defined in the matrix-proto packages
 // `matrix.market.v1` (proto/matrix/market/v1/market.proto) and
 // `matrix.inference.v1` (proto/matrix/inference/v1/inference.proto). The console
-// talks to a local `matrixd` node's MarketService (default :9091) and
-// InferenceService (default :9092). We keep the models here as plain TypeScript
+// talks to a local `matrixd` node over its Connect endpoint (default :9093),
+// which serves both MarketService and InferenceService. We keep the models here as plain TypeScript
 // so the UI and the transport layer share a single source of truth.
 
 /** Job lifecycle, mirrors matrix.market.v1.JobStatus. */
