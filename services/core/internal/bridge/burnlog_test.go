@@ -230,6 +230,37 @@ func TestDecodeStringUint_OverflowLen(t *testing.T) {
 	}
 }
 
+// TestDecodeStringUint_OverflowOffset is the focused regression for the string
+// OFFSET guard (the twin of the length guard): a Burned-event data buffer whose
+// offset word is near MaxUint64 must be rejected with ErrMalformedLog and must
+// not panic on a wrapped off+wordLen slice. This is the same untrusted/corrupt
+// operator- or RPC-supplied input the decoder promises to parse safely.
+func TestDecodeStringUint_OverflowOffset(t *testing.T) {
+	// Head word0: a near-MaxUint64, word-aligned offset that would wrap
+	// off+wordLen below len(data). MaxUint64-31 is divisible by 32 and wraps to 0
+	// when wordLen (32) is added.
+	off := new(big.Int).SetUint64(^uint64(0) - 31)
+	data := make([]byte, 3*wordLen)
+	off.FillBytes(data[0:wordLen])
+	// word1 amount, word2 padding; their contents do not matter since the offset
+	// guard must reject before they are read.
+	big.NewInt(1_000_000_000).FillBytes(data[wordLen : 2*wordLen])
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("decodeStringUint panicked on overflowing offset: %v", r)
+		}
+	}()
+
+	_, _, err := decodeStringUint(data)
+	if err == nil {
+		t.Fatal("expected error for overflowing string offset, got nil")
+	}
+	if !errors.Is(err, ErrMalformedLog) {
+		t.Fatalf("error = %v, want errors.Is(err, ErrMalformedLog)", err)
+	}
+}
+
 // TestDecodeBurnedLog_DrivesProcessBurn is the closed-loop proof: a real-shaped
 // Burned log is decoded into a BurnEvent and fed through ProcessBurn against a
 // bridge that has escrowed native MATRIX, asserting the native unlock lands and

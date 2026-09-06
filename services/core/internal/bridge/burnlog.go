@@ -179,7 +179,13 @@ func decodeStringUint(data []byte) (string, *big.Int, error) {
 		return "", nil, fmt.Errorf("%w: string offset out of range", ErrMalformedLog)
 	}
 	off := strOffset.Uint64()
-	if off%wordLen != 0 || off+wordLen > uint64(len(data)) {
+	// Bound the offset without overflowing: the earlier len(data) < 3*wordLen
+	// rejection guarantees wordLen <= len(data), so uint64(len(data))-wordLen does
+	// not underflow. Comparing off against that remaining room avoids computing
+	// off+wordLen, which would wrap for a near-MaxUint64 offset word and let an
+	// adversarial log bypass the guard and panic on the data[off:off+wordLen]
+	// slice below.
+	if off%wordLen != 0 || off > uint64(len(data))-wordLen {
 		return "", nil, fmt.Errorf("%w: string offset %d out of bounds", ErrMalformedLog, off)
 	}
 
