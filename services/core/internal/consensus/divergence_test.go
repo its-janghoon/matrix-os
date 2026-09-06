@@ -20,7 +20,10 @@ import (
 // leader over txs, linking to prevHash. It mirrors what a leader's
 // buildBlockLocked produces, but is driven directly by the test so we can force
 // two conflicting blocks at the SAME height across a round rotation.
-func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64, prevHash []byte, txs []token.Transaction, justify *PolkaCertificate) *Block {
+//
+// Unlock evidence belongs to the proposal envelope, not the block, so it is
+// passed to deliverProposal rather than here.
+func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64, prevHash []byte, txs []token.Transaction) *Block {
 	t.Helper()
 	b := &Block{
 		Height:        height,
@@ -28,7 +31,6 @@ func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64,
 		PrevBlockHash: append([]byte(nil), prevHash...),
 		Txs:           txs,
 		ProposerID:    leader.AccountID(),
-		Justify:       justify,
 	}
 	if err := b.Sign(leader.PrivateKey); err != nil {
 		t.Fatalf("sign block: %v", err)
@@ -36,11 +38,24 @@ func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64,
 	return b
 }
 
-// buildVote constructs and signs a vote by voter for a block hash at
-// (height, round).
+// buildVote constructs and signs a PREVOTE by voter for a block hash at
+// (height, round). Prevotes are what polka certificates are made of.
 func buildVote(t *testing.T, voter *token.Account, height, round uint64, blockHash []byte) Vote {
 	t.Helper()
+	return buildTypedVote(t, voter, VoteTypePrevote, height, round, blockHash)
+}
+
+// buildPrecommit constructs and signs a PRECOMMIT, the phase a quorum of which
+// commits a block.
+func buildPrecommit(t *testing.T, voter *token.Account, height, round uint64, blockHash []byte) Vote {
+	t.Helper()
+	return buildTypedVote(t, voter, VoteTypePrecommit, height, round, blockHash)
+}
+
+func buildTypedVote(t *testing.T, voter *token.Account, typ VoteType, height, round uint64, blockHash []byte) Vote {
+	t.Helper()
 	v := Vote{
+		Type:      typ,
 		Height:    height,
 		Round:     round,
 		BlockHash: append([]byte(nil), blockHash...),
@@ -158,31 +173,39 @@ func TestConsensusNoDivergenceAcrossRotation(t *testing.T) {
 	txB := signedTransfer(t, sender, "recipient-B", 200, 1)
 	leader0 := leaderForRound(t, vs, accts, 0)
 	leader1 := leaderForRound(t, vs, accts, 1)
-	blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA}, nil)
-	blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB}, nil)
+	blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
+	blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB})
 	if string(blockA.Hash()) == string(blockB.Hash()) {
 		t.Fatal("test setup: blocks A and B must differ")
 	}
 
-	// The subject sees block A (round 0) and votes for it -> it locks on A.
-	deliverProposal(t, eng, blockA)
-	if !engHasVotedFor(eng, blockA.Hash()) {
-		t.Fatal("subject should have voted for block A at round 0")
+	// The subject sees block A (round 0) and prevotes it.
+	deliverProposal(t, eng, leader0, 0, blockA, nil)
+	if !engHasPrevotedFor(eng, blockA.Hash()) {
+		t.Fatal("subject should have prevoted block A at round 0")
 	}
 
-	// Now a conflicting block B arrives for round 1 WITHOUT a justification. The
-	// locked subject must REFUSE it: it must not cache it and must not vote for it.
-	deliverProposal(t, eng, blockB)
-	if engHasVotedFor(eng, blockB.Hash()) {
-		t.Fatal("SAFETY VIOLATION: subject voted for conflicting block B without a polka certificate")
-	}
-
-	// Feed the subject the OTHER validators' votes for A so A reaches quorum (3)
-	// and commits on the subject. We pick voters that are not the subject itself
-	// (whose vote is already tallied) so we add exactly two distinct votes.
+	// Two other validators prevote A, so A reaches a prevote quorum (3 of 4) -
+	// a polka. The subject answers a polka with a precommit, and THAT is what
+	// locks it on A. A lock is never taken on a node's own single vote.
 	others := otherValidators(accts, subject, 2)
 	deliverVote(t, eng, buildVote(t, others[0], 0, 0, blockA.Hash()))
 	deliverVote(t, eng, buildVote(t, others[1], 0, 0, blockA.Hash()))
+	if !engHasPrecommittedFor(eng, blockA.Hash()) {
+		t.Fatal("subject should have precommitted block A after the polka")
+	}
+
+	// Now a conflicting block B arrives for round 1 WITHOUT a polka certificate.
+	// The locked subject must REFUSE to prevote it.
+	deliverProposal(t, eng, leader1, 1, blockB, nil)
+	if engHasPrevotedFor(eng, blockB.Hash()) {
+		t.Fatal("SAFETY VIOLATION: subject prevoted conflicting block B without a polka certificate")
+	}
+
+	// Feed the subject the other validators' PRECOMMITS for A so A reaches a
+	// precommit quorum and commits here.
+	deliverVote(t, eng, buildPrecommit(t, others[0], 0, 0, blockA.Hash()))
+	deliverVote(t, eng, buildPrecommit(t, others[1], 0, 0, blockA.Hash()))
 
 	// A must commit at height 0; B must never commit.
 	deadline := time.Now().Add(2 * time.Second)
@@ -230,100 +253,127 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	store, err := kv.New(kv.Config{Path: t.TempDir()})
-	if err != nil {
-		t.Fatalf("kv: %v", err)
-	}
-	t.Cleanup(func() { _ = store.Close() })
-	ledger := market.NewLedger(store)
-	chain := NewBlockChain(store)
 
-	subject := leaderForRound(t, vs, accts, 0)
-	eng, err := New(Config{
-		Transport:    noopTransport{},
-		Validators:   vs,
-		Chain:        chain,
-		Ledger:       ledger,
-		Self:         subject,
-		RoundTimeout: time.Hour,
-	})
-	if err != nil {
-		t.Fatalf("new: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() { cancel(); eng.Wait() }()
-	if err := eng.Start(ctx); err != nil {
-		t.Fatalf("start: %v", err)
-	}
-
-	sender := accts[0]
-	if err := ledger.Credit(sender.AccountID(), 1000); err != nil {
-		t.Fatalf("credit: %v", err)
-	}
-	head, _, _ := chain.Head()
-
-	txA := signedTransfer(t, sender, "recipient-A", 100, 0)
-	txB := signedTransfer(t, sender, "recipient-B", 200, 1)
 	leader0 := leaderForRound(t, vs, accts, 0)
 	leader1 := leaderForRound(t, vs, accts, 1)
-	blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA}, nil)
+	subject := leader0
 
-	// Subject sees A at round 0 and locks on it.
-	deliverProposal(t, eng, blockA)
-	if !engHasVotedFor(eng, blockA.Hash()) {
-		t.Fatal("subject should vote for A")
+	// Each case gets its own engine so one case's votes cannot influence another.
+	newSubject := func(t *testing.T) (*Engine, *BlockChain, []byte) {
+		t.Helper()
+		store, err := kv.New(kv.Config{Path: t.TempDir()})
+		if err != nil {
+			t.Fatalf("kv: %v", err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		ledger := market.NewLedger(store)
+		chain := NewBlockChain(store)
+		eng, err := New(Config{
+			Transport:    noopTransport{},
+			Validators:   vs,
+			Chain:        chain,
+			Ledger:       ledger,
+			Self:         subject,
+			RoundTimeout: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("new: %v", err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		t.Cleanup(func() { cancel(); eng.Wait() })
+		if err := eng.Start(ctx); err != nil {
+			t.Fatalf("start: %v", err)
+		}
+		if err := ledger.Credit(subject.AccountID(), 1000); err != nil {
+			t.Fatalf("credit: %v", err)
+		}
+		head, _, _ := chain.Head()
+		return eng, chain, head
 	}
 
-	// Build a VALID polka certificate for block B at round 1: a quorum (3) of
-	// validators voted for B at round 1. In reality this can only arise if the
-	// network genuinely converged on B; here we synthesise it to prove the unlock
-	// path honors a valid certificate.
-	blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB}, nil)
-	cert := &PolkaCertificate{
-		Height:    0,
-		Round:     1,
-		BlockHash: blockB.Hash(),
-		Votes: []Vote{
-			buildVote(t, accts[0], 0, 1, blockB.Hash()),
-			buildVote(t, accts[1], 0, 1, blockB.Hash()),
-			buildVote(t, accts[2], 0, 1, blockB.Hash()),
-		},
-	}
-	if err := cert.Verify(vs); err != nil {
-		t.Fatalf("synthesised certificate should verify: %v", err)
-	}
-	blockBJustified := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB}, cert)
+	t.Run("a valid certificate releases the lock", func(t *testing.T) {
+		eng, _, head := newSubject(t)
 
-	// With a valid certificate, the locked subject releases its lock and votes B.
-	deliverProposal(t, eng, blockBJustified)
-	if !engHasVotedFor(eng, blockB.Hash()) {
-		t.Fatal("subject should vote for B once shown a valid polka certificate at a round >= its lock")
-	}
+		txA := signedTransfer(t, subject, "recipient-A", 100, 0)
+		blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
 
-	// A tampered certificate (one vote's signature broken) must be rejected: the
-	// subject must NOT vote for a third conflicting block waving an invalid cert.
-	txC := signedTransfer(t, sender, "recipient-C", 300, 2)
-	blockC := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txC}, nil)
-	badVote := buildVote(t, accts[2], 0, 1, blockC.Hash())
-	badVote.Signature[0] ^= 0xFF
-	badCert := &PolkaCertificate{
-		Height:    0,
-		Round:     1,
-		BlockHash: blockC.Hash(),
-		Votes: []Vote{
-			buildVote(t, accts[0], 0, 1, blockC.Hash()),
-			buildVote(t, accts[1], 0, 1, blockC.Hash()),
-			badVote,
-		},
-	}
-	if err := badCert.Verify(vs); err == nil {
-		t.Fatal("tampered certificate should not verify")
-	}
-	blockCBad := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txC}, badCert)
-	deliverProposal(t, eng, blockCBad)
-	if engHasVotedFor(eng, blockC.Hash()) {
-		t.Fatal("SAFETY VIOLATION: subject voted for block C waving an invalid certificate")
-	}
+		// Subject prevotes A, then a polka for A makes it precommit and lock.
+		deliverProposal(t, eng, leader0, 0, blockA, nil)
+		others := otherValidators(accts, subject, 2)
+		deliverVote(t, eng, buildVote(t, others[0], 0, 0, blockA.Hash()))
+		deliverVote(t, eng, buildVote(t, others[1], 0, 0, blockA.Hash()))
+		if !engHasPrecommittedFor(eng, blockA.Hash()) {
+			t.Fatal("subject should be locked on A (precommitted) before the unlock is tested")
+		}
+
+		// A VALID polka certificate for block B at round 1: a quorum (3) of
+		// validators voted for B at round 1. In reality this can only arise if the
+		// network genuinely converged on B; here we synthesise it to prove the
+		// unlock path honors a valid certificate.
+		txB := signedTransfer(t, subject, "recipient-B", 200, 1)
+		blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB})
+		cert := &PolkaCertificate{
+			Height:    0,
+			Round:     1,
+			BlockHash: blockB.Hash(),
+			Votes: []Vote{
+				buildVote(t, accts[0], 0, 1, blockB.Hash()),
+				buildVote(t, accts[1], 0, 1, blockB.Hash()),
+				buildVote(t, accts[2], 0, 1, blockB.Hash()),
+			},
+		}
+		if err := cert.Verify(vs); err != nil {
+			t.Fatalf("synthesised certificate should verify: %v", err)
+		}
+
+		// With a valid polka at a round >= its lock, the locked subject releases
+		// the lock and prevotes B.
+		deliverProposal(t, eng, leader1, 1, blockB, cert)
+		if !engHasPrevotedFor(eng, blockB.Hash()) {
+			t.Fatal("subject should prevote B once shown a valid polka certificate at a round >= its lock")
+		}
+	})
+
+	t.Run("a tampered certificate does not", func(t *testing.T) {
+		eng, chain, head := newSubject(t)
+
+		txA := signedTransfer(t, subject, "recipient-A", 100, 0)
+		blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
+		deliverProposal(t, eng, leader0, 0, blockA, nil)
+		others := otherValidators(accts, subject, 2)
+		deliverVote(t, eng, buildVote(t, others[0], 0, 0, blockA.Hash()))
+		deliverVote(t, eng, buildVote(t, others[1], 0, 0, blockA.Hash()))
+		if !engHasPrecommittedFor(eng, blockA.Hash()) {
+			t.Fatal("subject should be locked on A (precommitted) before the unlock is tested")
+		}
+
+		// A certificate with one vote's signature broken must not unlock anything.
+		txC := signedTransfer(t, subject, "recipient-C", 300, 2)
+		blockC := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txC})
+		badVote := buildVote(t, accts[2], 0, 1, blockC.Hash())
+		badVote.Signature[0] ^= 0xFF
+		badCert := &PolkaCertificate{
+			Height:    0,
+			Round:     1,
+			BlockHash: blockC.Hash(),
+			Votes: []Vote{
+				buildVote(t, accts[0], 0, 1, blockC.Hash()),
+				buildVote(t, accts[1], 0, 1, blockC.Hash()),
+				badVote,
+			},
+		}
+		if err := badCert.Verify(vs); err == nil {
+			t.Fatal("tampered certificate should not verify")
+		}
+
+		deliverProposal(t, eng, leader1, 1, blockC, badCert)
+		if engHasPrevotedFor(eng, blockC.Hash()) {
+			t.Fatal("SAFETY VIOLATION: subject prevoted block C waving an invalid certificate")
+		}
+		if l, err := chain.Len(); err != nil || l != 0 {
+			t.Fatalf("chain length = %d (err %v), want 0: nothing may commit on an invalid certificate", l, err)
+		}
+	})
 }
 
 // TestMultiNodeNoDivergenceUnderTightTimeout runs a real N-node cluster over the
@@ -480,9 +530,15 @@ func (noopTransport) Subscribe(ctx context.Context, _ string) (<-chan transport.
 
 func (noopTransport) Publish(_ context.Context, _ string, _ []byte) error { return nil }
 
-func deliverProposal(t *testing.T, e *Engine, b *Block) {
+// deliverProposal wraps a block in an envelope signed by proposer for round and
+// feeds it to the engine's proposal handler, as gossip would.
+func deliverProposal(t *testing.T, e *Engine, proposer *token.Account, round uint64, b *Block, justify *PolkaCertificate) {
 	t.Helper()
-	data, err := json.Marshal(&Proposal{Block: *b})
+	p := &Proposal{Block: *b, Round: round, ProposerID: proposer.AccountID(), Justify: justify}
+	if err := p.Sign(proposer.PrivateKey); err != nil {
+		t.Fatalf("sign proposal: %v", err)
+	}
+	data, err := json.Marshal(p)
 	if err != nil {
 		t.Fatalf("marshal proposal: %v", err)
 	}
@@ -502,13 +558,30 @@ func deliverVote(t *testing.T, e *Engine, v Vote) {
 
 // engHasVotedFor reports whether the engine has tallied its own vote for the
 // given block hash at the current height.
-func engHasVotedFor(e *Engine, blockHash []byte) bool {
+// engHasPrevotedFor reports whether the engine itself prevoted the given block
+// at the current height, in any round.
+func engHasPrevotedFor(e *Engine, blockHash []byte) bool {
+	return engHasVotedForType(e, VoteTypePrevote, blockHash)
+}
+
+// engHasPrecommittedFor reports whether the engine itself precommitted the
+// given block at the current height, in any round.
+func engHasPrecommittedFor(e *Engine, blockHash []byte) bool {
+	return engHasVotedForType(e, VoteTypePrecommit, blockHash)
+}
+
+func engHasVotedForType(e *Engine, typ VoteType, blockHash []byte) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	set := e.votes[fmt.Sprintf("%x", blockHash)]
-	if set == nil {
-		return false
+	byRound := e.prevotes
+	if typ == VoteTypePrecommit {
+		byRound = e.precommits
 	}
-	_, ok := set[e.selfID]
-	return ok
+	hkey := fmt.Sprintf("%x", blockHash)
+	for _, byHash := range byRound {
+		if _, ok := byHash[hkey][e.selfID]; ok {
+			return true
+		}
+	}
+	return false
 }

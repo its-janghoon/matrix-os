@@ -8,15 +8,39 @@
 //     The leader for a round is chosen round-robin by round number.
 //   - Each round the leader batches pending signed token.Transaction values into
 //     a Block{Height, Round, PrevBlockHash, Txs, ProposerID, Signature} and
-//     broadcasts a signed Proposal over a gossip topic.
+//     broadcasts it inside a signed Proposal envelope over a gossip topic. The
+//     envelope is separate from the block so the same value can be re-proposed
+//     at a later round without changing its identity.
 //   - Validators verify the proposal (correct leader for the round, every tx
-//     signature, correct prev-block-hash link) and broadcast a signed Vote.
-//   - Once a node collects a quorum of votes (> 2/3 of the fixed set, i.e.
-//     2f+1 of 3f+1) it commits the block: it extends a hash-linked committed
-//     chain persisted in the Pebble kv.Store under the consensus/* prefix and
-//     deterministically applies the block's ordered transactions to the market
-//     ledger. A single voting round + immediate commit keeps latency low; the
-//     next round is pipelined immediately.
+//     signature, correct prev-block-hash link) and PREVOTE it - or prevote nil,
+//     if a lock forbids supporting it.
+//   - A quorum of prevotes for one block at one round is a POLKA. On seeing one,
+//     a validator PRECOMMITS that block, which also LOCKS it: from then on it
+//     will not prevote a different block at that height unless shown a polka for
+//     that other block at a round >= its lock.
+//   - A quorum of precommits for one block at one round COMMITS it: the node
+//     extends a hash-linked committed chain persisted in the Pebble kv.Store
+//     under the consensus/* prefix, deterministically applies the block's
+//     ordered transactions to the market ledger, and pipelines the next height
+//     immediately.
+//
+// Two voting phases rather than one, because one cannot be both safe and live
+// here. A validator that locks on a block the moment it votes can end up locked
+// on a block no other node ever saw, and only a quorum for that block could
+// release it - so validators locked on different blocks deadlock the height
+// forever, spinning through rounds at full speed. Locking on a precommit, which
+// is only cast after a polka has been observed, means every lock in the network
+// is backed by evidence that some leader can collect and show to the others,
+// which is what lets them converge. A validator that is not locked prevotes
+// whatever the current leader proposes, so a value nobody else saw costs a round
+// rather than the height.
+//
+// A node that misses a committed block obtains it from a peer over the block
+// sync topics, with the precommit quorum that committed it as proof (see
+// BlockSyncRequest). Without that path, a single dropped proposal stalls a node
+// at that height permanently: the votes for the block keep arriving but the body
+// never does, because the network has moved on and no leader re-proposes a
+// committed block.
 //
 // Wire messages (Proposal, Vote) are ed25519-signed using a canonical,
 // length-prefixed encoding in the exact style of token.Transaction.SigningBytes,
@@ -47,19 +71,26 @@ import (
 
 // Gossip topic names, versioned so nodes on compatible protocol versions
 // rendezvous on the same pubsub topics.
+//
+// v2 introduced the two voting phases and the proposal envelope, both of which
+// change the wire format incompatibly: a v1 node's vote carries no type and a
+// v1 proposal carries no envelope signature, so neither can be acted on by a
+// v2 node (nor the reverse). Sharing a topic across that boundary would look
+// like a network fault - messages arriving and being silently discarded - so
+// the topics move with the protocol and the two versions simply do not meet.
 const (
 	// TopicProposal carries Proposal messages (a leader's proposed block).
-	TopicProposal = "matrix.consensus.v1/proposal"
+	TopicProposal = "matrix.consensus.v2/proposal"
 	// TopicVote carries Vote messages (a validator's vote for a block).
-	TopicVote = "matrix.consensus.v1/vote"
+	TopicVote = "matrix.consensus.v2/vote"
 	// TopicSyncRequest carries BlockSyncRequest messages (a lagging node asking
 	// for committed block bodies it never received).
-	TopicSyncRequest = "matrix.consensus.v1/sync-request"
+	TopicSyncRequest = "matrix.consensus.v2/sync-request"
 	// TopicSyncResponse carries BlockSyncResponse messages (a caught-up node
 	// serving committed blocks and the votes that endorsed them).
-	TopicSyncResponse = "matrix.consensus.v1/sync-response"
+	TopicSyncResponse = "matrix.consensus.v2/sync-response"
 	// TopicHead carries HeadAnnounce messages (a node's committed chain length).
-	TopicHead = "matrix.consensus.v1/head"
+	TopicHead = "matrix.consensus.v2/head"
 )
 
 // Block-sync bounds. A response is capped both by block count and by encoded
@@ -112,17 +143,14 @@ var (
 // leader's account ID (hex of its public key). Signature is the leader's ed25519
 // signature over the canonical block bytes.
 //
-// Justify carries the lock/polka certificate that makes a round > 0 proposal
-// safe under leader rotation (see the voting discipline in engine.go). It is nil
-// for a round-0 proposal (no prior round to justify) and MUST be present and
-// valid for a round > 0 proposal that proposes a block conflicting with what
-// honest validators may have locked. The certificate is a quorum of votes for a
-// block at a strictly earlier round of the SAME height; it proves the network
-// reached (or could have reached) a quorum on that block, which is what lets a
-// locked validator safely release its lock and vote for it. Justify is NOT part
-// of the block's signing bytes or hash: a block's identity is its content, so
-// the same block re-proposed at a higher round with a fresh certificate keeps
-// the same hash and votes for it accumulate across rounds.
+// A Block is IMMUTABLE once built, and that is load-bearing. Height, Round,
+// ProposerID and Signature are all part of its identity (see Hash), so a
+// validator that re-proposes a block at a later round must forward these exact
+// bytes rather than re-sign them: re-signing produces a different hash, which
+// means a different block, which every validator locked on the original will
+// correctly refuse to vote for - and the height can then never commit. The
+// round a proposal is being made FOR therefore lives on the Proposal envelope,
+// not here; Round records only the round at which this value first appeared.
 type Block struct {
 	Height        uint64              `json:"height"`
 	Round         uint64              `json:"round"`
@@ -130,10 +158,10 @@ type Block struct {
 	Txs           []token.Transaction `json:"txs"`
 	ProposerID    string              `json:"proposer_id"`
 	Signature     []byte              `json:"signature"`
-	Justify       *PolkaCertificate   `json:"justify,omitempty"`
 }
 
-// PolkaCertificate is a quorum of votes for one block at one (height, round),
+// PolkaCertificate is a quorum of PREVOTES for one block at one (height,
+// round),
 // proving that block gathered (or could gather) enough support to commit at that
 // round. A leader proposing at round r > 0 attaches the certificate for the
 // highest earlier round it knows a block was polka'd at, so a validator that
@@ -218,11 +246,82 @@ func (b *Block) VerifySignature(pub ed25519.PublicKey) error {
 	return nil
 }
 
-// Proposal wraps a Block broadcast by the round leader. The block itself carries
-// the proposer's identity and signature, so no separate envelope signature is
-// required.
+// Proposal is the envelope a round's leader broadcasts to put a block to the
+// vote at that round. It is separate from the Block because the same value has
+// to be proposable more than once.
+//
+// When a round times out after validators have locked on a block but before a
+// quorum of votes reached anyone, the next leader is REQUIRED to re-propose
+// that same locked value - a locked validator will not vote for anything else
+// without a certificate proving the network moved on. If re-proposing meant
+// rewriting the block's round and proposer and re-signing it, the block's hash
+// would change, the locked validators would see a different block, and they
+// would all refuse it: the height would be dead with a valid value that a
+// quorum wanted. The envelope is what makes re-proposal possible - the leader
+// forwards the original block bytes untouched and signs the envelope around
+// them, so the block's identity, and the votes already cast for it, survive
+// rotation.
+//
+// Round is the round this proposal is for and must be >= Block.Round.
+// ProposerID is the validator making it (the leader for Round, which is not
+// necessarily the block's original proposer). Signature is by ProposerID over
+// the block hash, the round and the proposer id.
+//
+// Justify carries the lock/polka certificate that makes a round > 0 proposal
+// safe under leader rotation (see the voting discipline in engine.go). It is
+// nil for a round-0 proposal (no prior round to justify) and MUST be present
+// and valid for a proposal that asks locked validators to switch to a
+// different block. The certificate is a quorum of votes for a block at an
+// earlier round of the SAME height; it proves the network reached (or could
+// have reached) a quorum on that block, which is what lets a locked validator
+// safely release its lock. It rides on the envelope rather than in the block
+// precisely because it must not affect the block's identity.
 type Proposal struct {
-	Block Block `json:"block"`
+	Block      Block             `json:"block"`
+	Round      uint64            `json:"round"`
+	ProposerID string            `json:"proposer_id"`
+	Signature  []byte            `json:"signature"`
+	Justify    *PolkaCertificate `json:"justify,omitempty"`
+}
+
+// signingBytes returns the canonical length-prefixed payload the envelope
+// proposer signs: the hash of the block being proposed, the round it is
+// proposed for, and the proposer's id.
+func (p *Proposal) signingBytes() []byte {
+	hash := p.Block.Hash()
+	buf := make([]byte, 0, 32+len(hash)+len(p.ProposerID))
+	buf = appendLenPrefixed(buf, hash)
+	buf = appendUint64(buf, p.Round)
+	buf = appendLenPrefixed(buf, []byte(p.ProposerID))
+	return buf
+}
+
+// Sign signs the envelope with priv, which must correspond to the public key of
+// ProposerID.
+func (p *Proposal) Sign(priv ed25519.PrivateKey) error {
+	if len(priv) != ed25519.PrivateKeySize {
+		return fmt.Errorf("%w: private key must be %d bytes", ErrInvalidMessage, ed25519.PrivateKeySize)
+	}
+	p.Signature = ed25519.Sign(priv, p.signingBytes())
+	return nil
+}
+
+// VerifySignature validates the envelope signature against pub. It does not
+// check leadership or the block itself; the engine does that around it.
+func (p *Proposal) VerifySignature(pub ed25519.PublicKey) error {
+	if len(pub) != ed25519.PublicKeySize {
+		return fmt.Errorf("%w: public key must be %d bytes", ErrInvalidMessage, ed25519.PublicKeySize)
+	}
+	if p.ProposerID == "" {
+		return fmt.Errorf("%w: proposal proposer must not be empty", ErrInvalidMessage)
+	}
+	if len(p.Signature) == 0 {
+		return ErrUnsignedMessage
+	}
+	if !ed25519.Verify(pub, p.signingBytes(), p.Signature) {
+		return ErrInvalidSignature
+	}
+	return nil
 }
 
 // HeadAnnounce is a node's periodic statement of how much chain it has
@@ -284,12 +383,49 @@ type BlockSyncResponse struct {
 	Blocks []CommittedBlock `json:"blocks"`
 }
 
-// Vote is a validator's signed endorsement of a specific block at a specific
+// VoteType distinguishes the two rounds of voting a block goes through.
+type VoteType uint8
+
+const (
+	// VoteTypePrevote is the first phase: "this is the block I see for this
+	// round". A quorum of prevotes for one block is a POLKA - it proves the
+	// network can see that block, and it is what a validator must be shown before
+	// it will abandon a block it has locked.
+	VoteTypePrevote VoteType = 1
+	// VoteTypePrecommit is the second phase, cast only after seeing a polka:
+	// "this block has quorum support, I am committing to it". A quorum of
+	// precommits for one block COMMITS it, and casting one locks the validator.
+	VoteTypePrecommit VoteType = 2
+)
+
+// String renders the vote type for errors and logs.
+func (t VoteType) String() string {
+	switch t {
+	case VoteTypePrevote:
+		return "prevote"
+	case VoteTypePrecommit:
+		return "precommit"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(t))
+	}
+}
+
+// Vote is a validator's signed statement about a specific block at a specific
 // height/round. VoterID is the validator's account ID (hex of PublicKey).
 // BlockHash is the hash of the block being voted for (which binds the vote to
-// the exact block contents). Signature is by PublicKey over the canonical vote
-// bytes.
+// the exact block contents), or the nil marker to vote for no block at all.
+// Signature is by PublicKey over the canonical vote bytes.
+//
+// Type is what makes the protocol safe under leader rotation. A single voting
+// phase cannot be both safe and live here: a validator that locks on a block
+// the moment it votes can end up locked on a block no one else ever saw, and
+// nothing short of a quorum for that block can release it - so a set of
+// validators locked on different blocks deadlocks the height forever. Locking
+// on a PRECOMMIT, which is only cast after a quorum of prevotes has been seen,
+// means every lock is backed by evidence a proposer can gather and show to the
+// others, which is exactly what lets them converge.
 type Vote struct {
+	Type      VoteType          `json:"type"`
 	Height    uint64            `json:"height"`
 	Round     uint64            `json:"round"`
 	BlockHash []byte            `json:"block_hash"`
@@ -302,6 +438,7 @@ type Vote struct {
 // voter, covering every field except Signature.
 func (v *Vote) signingBytes() []byte {
 	buf := make([]byte, 0, 64+len(v.BlockHash)+len(v.VoterID)+len(v.PublicKey))
+	buf = appendUint64(buf, uint64(v.Type))
 	buf = appendUint64(buf, v.Height)
 	buf = appendUint64(buf, v.Round)
 	buf = appendLenPrefixed(buf, v.BlockHash)
@@ -322,6 +459,9 @@ func (v *Vote) Sign(priv ed25519.PrivateKey) error {
 // Verify validates the vote's signature and structure, confirming VoterID is
 // derived from PublicKey.
 func (v *Vote) Verify() error {
+	if v.Type != VoteTypePrevote && v.Type != VoteTypePrecommit {
+		return fmt.Errorf("%w: vote type %s", ErrInvalidMessage, v.Type)
+	}
 	if len(v.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: public key must be %d bytes", ErrInvalidMessage, ed25519.PublicKeySize)
 	}
@@ -343,6 +483,29 @@ func (v *Vote) Verify() error {
 	return nil
 }
 
+// nilVoteHash is the BlockHash a validator votes with to say "at this round I
+// could not vote for any block". It is HashSize zero bytes, which no real block
+// hash can be: a block hash is a SHA-256 digest over a non-empty preimage.
+//
+// Nil votes exist for liveness. Without them a round in which nothing could be
+// agreed leaves no trace, and a validator locked on a block has no way to learn
+// that the network did not agree on anything - so it holds its lock forever
+// (see RoundCertificate).
+func nilVoteHash() []byte { return make([]byte, HashSize) }
+
+// isNilVoteHash reports whether a block hash is the nil marker.
+func isNilVoteHash(hash []byte) bool {
+	if len(hash) != HashSize {
+		return false
+	}
+	for _, b := range hash {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // Verify validates the certificate against a validator set: it confirms the
 // certificate is structurally sound, every vote individually verifies, is cast
 // by a distinct member of vs for the certificate's exact (height, round,
@@ -356,9 +519,17 @@ func (c *PolkaCertificate) Verify(vs *ValidatorSet) error {
 	if len(c.BlockHash) == 0 {
 		return fmt.Errorf("%w: certificate block hash must not be empty", ErrInvalidMessage)
 	}
+	if isNilVoteHash(c.BlockHash) {
+		return fmt.Errorf("%w: certificate cannot endorse the nil block", ErrInvalidMessage)
+	}
 	seen := make(map[string]struct{}, len(c.Votes))
 	for i := range c.Votes {
 		v := &c.Votes[i]
+		// Only prevotes form a polka. A precommit quorum is a commit, not a
+		// permission to abandon a lock, and must never be read as one.
+		if v.Type != VoteTypePrevote {
+			return fmt.Errorf("%w: certificate vote %d is a %s, not a prevote", ErrInvalidMessage, i, v.Type)
+		}
 		if v.Height != c.Height || v.Round != c.Round {
 			return fmt.Errorf("%w: certificate vote %d height/round mismatch", ErrInvalidMessage, i)
 		}

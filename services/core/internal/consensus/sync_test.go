@@ -127,8 +127,8 @@ func TestAMissedProposalStallsANodeWithoutBlockSync(t *testing.T) {
 		t.Fatalf("victim height = %d, want 0 while the body cannot reach it", h)
 	}
 
-	// Pin the shape of the stall: the victim has a quorum of votes for the block
-	// the network committed, and does not have that block.
+	// Pin the shape of the stall: the victim has a quorum of precommits for the
+	// block the network committed, and does not have that block.
 	committed, err := nodes[0].chain.BlockAt(0)
 	if err != nil {
 		t.Fatalf("block at 0: %v", err)
@@ -137,12 +137,17 @@ func TestAMissedProposalStallsANodeWithoutBlockSync(t *testing.T) {
 	quorum := nodes[0].engine.validators.Quorum()
 
 	victim.engine.mu.Lock()
-	tallied := len(victim.engine.votes[committedKey])
+	tallied := 0
+	for _, byHash := range victim.engine.precommits {
+		if n := len(byHash[committedKey]); n > tallied {
+			tallied = n
+		}
+	}
 	_, hasBody := victim.engine.proposals[committedKey]
 	victim.engine.mu.Unlock()
 
 	if tallied < quorum {
-		t.Fatalf("victim tallied %d votes for the committed block, want at least the quorum of %d",
+		t.Fatalf("victim tallied %d precommits for the committed block, want at least the quorum of %d",
 			tallied, quorum)
 	}
 	if hasBody {
@@ -246,6 +251,9 @@ func TestCommitPersistsEndorsingVotes(t *testing.T) {
 		v := &votes[i]
 		if err := v.Verify(); err != nil {
 			t.Fatalf("stored vote %d does not verify: %v", i, err)
+		}
+		if v.Type != VoteTypePrecommit {
+			t.Fatalf("stored vote %d is a %s; the commit certificate must be precommits", i, v.Type)
 		}
 		if !nodes[0].engine.validators.Contains(v.VoterID) {
 			t.Fatalf("stored vote %d is not from a validator", i)
@@ -429,4 +437,169 @@ func TestAcceptSyncedBlockRejectsBadBodies(t *testing.T) {
 	if cached != 0 {
 		t.Fatalf("%d rejected bodies were cached, want 0", cached)
 	}
+}
+
+// TestHeightSurvivesVoteLoss covers a height that has to be carried across a
+// round because the vote gossip failed mid-flight.
+//
+// The validators all see the round-0 proposal and prevote it, but none of their
+// votes reach each other, so no quorum forms and the round times out with every
+// node having voted for a block and no evidence that anyone else did. When vote
+// gossip comes back, nothing about the cluster has changed: the same
+// transaction is pending, the same nodes are up, the leader keeps rotating. The
+// height must still commit.
+//
+// This used to be fatal. A validator locked on the block it voted for, and the
+// next leader re-proposed that block by rewriting its round and proposer and
+// re-signing it - which changed its hash, so every locked validator saw a
+// different block and refused it, forever. The proposal envelope is what fixed
+// that: a re-proposal now forwards the original block untouched.
+func TestHeightSurvivesVoteLoss(t *testing.T) {
+	nodes, stop := syncCluster(t, 4)
+	defer stop()
+
+	// Every node hears proposals but no votes.
+	nodes[0].bus.setDeliveryFilter(func(_, _ peer.ID, topic string) bool {
+		return topic != TopicVote
+	})
+
+	alice := nodes[0].acct
+	aliceID := alice.AccountID()
+	mintAll(t, nodes, aliceID, 1000)
+
+	tx := signedTransfer(t, alice, "recipient-0", 10, 0)
+	for _, nd := range nodes {
+		if err := nd.engine.Submit(tx); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+	}
+
+	// Wait until a quorum of nodes has prevoted a block and the round has
+	// rotated, so the height is being carried by a re-proposal rather than by the
+	// original one.
+	quorum := nodes[0].engine.validators.Quorum()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		voted, rotated := 0, 0
+		for _, nd := range nodes {
+			nd.engine.mu.Lock()
+			if _, ok := selfPrevotedBlock(nd.engine); ok {
+				voted++
+			}
+			if nd.engine.round > 0 {
+				rotated++
+			}
+			nd.engine.mu.Unlock()
+		}
+		if voted >= quorum && rotated >= quorum {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d nodes prevoted and %d rotated, want a quorum of %d for both",
+				voted, rotated, quorum)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// Restore vote gossip. Nothing else changes.
+	nodes[0].bus.setDeliveryFilter(nil)
+
+	waitForHeight(t, nodes, 1, 8*time.Second)
+	assertConverged(t, nodes, []string{aliceID, "recipient-0"})
+}
+
+// TestCompetingValuesConverge covers the state that used to deadlock a height
+// permanently: every validator holding a different block.
+//
+// With proposal gossip cut between nodes, each validator only ever sees the
+// block it proposed itself, in the round it led, and votes for that one. Four
+// validators, four different values, no quorum anywhere. When proposal gossip
+// returns, the height must commit.
+//
+// Under one-phase voting this was unrecoverable. A validator locked on the block
+// it voted for and would only release that lock for a quorum, so with the votes
+// split four ways no quorum could form, no lock could be released, and the
+// cluster spun through rounds forever - observed at round 265 with three nodes
+// each locked on a block only they held. Locking on a PRECOMMIT, which is only
+// cast after a quorum of prevotes has been seen, makes that state unreachable:
+// a validator holding a value nobody else saw is not locked on anything, so it
+// is free to vote for whatever the next leader proposes.
+func TestCompetingValuesConverge(t *testing.T) {
+	nodes, stop := syncCluster(t, 4)
+	defer stop()
+
+	// Nobody sees anyone else's proposals.
+	nodes[0].bus.setDeliveryFilter(func(from, to peer.ID, topic string) bool {
+		return topic != TopicProposal || from == to
+	})
+
+	alice := nodes[0].acct
+	aliceID := alice.AccountID()
+	mintAll(t, nodes, aliceID, 1000)
+
+	tx := signedTransfer(t, alice, "recipient-0", 10, 0)
+	for _, nd := range nodes {
+		if err := nd.engine.Submit(tx); err != nil {
+			t.Fatalf("submit: %v", err)
+		}
+	}
+
+	// Wait for the split: a quorum of nodes has voted, for at least two different
+	// blocks. No block can reach a quorum from here.
+	quorum := nodes[0].engine.validators.Quorum()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		voted := 0
+		hashes := map[string]struct{}{}
+		for _, nd := range nodes {
+			nd.engine.mu.Lock()
+			if hkey, ok := selfPrevotedBlock(nd.engine); ok {
+				voted++
+				hashes[hkey] = struct{}{}
+			}
+			nd.engine.mu.Unlock()
+		}
+		real := len(hashes)
+		if voted >= quorum && real >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d nodes voted on %d distinct blocks; the split this test needs did not form",
+				voted, real)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	// No validator may be locked in this state: a lock requires a polka, and no
+	// block has one. This is the property that makes the old deadlock impossible.
+	for i, nd := range nodes {
+		nd.engine.mu.Lock()
+		locked, hash := nd.engine.locked, nd.engine.lockedHash
+		nd.engine.mu.Unlock()
+		if locked {
+			t.Fatalf("node %d is locked on %.8s with no quorum in existence", i, hash)
+		}
+	}
+
+	// Restore proposal delivery. Nothing else changes.
+	nodes[0].bus.setDeliveryFilter(nil)
+
+	waitForHeight(t, nodes, 1, 10*time.Second)
+	assertConverged(t, nodes, []string{aliceID, "recipient-0"})
+}
+
+// selfPrevotedBlock reports the block (never the nil marker) this engine itself
+// prevoted at the current height, in any round. Callers must hold e.mu.
+func selfPrevotedBlock(e *Engine) (string, bool) {
+	for _, byHash := range e.prevotes {
+		for hkey, byVoter := range byHash {
+			if isNilVoteHashKey(hkey) {
+				continue
+			}
+			if _, ok := byVoter[e.selfID]; ok {
+				return hkey, true
+			}
+		}
+	}
+	return "", false
 }
