@@ -9,9 +9,22 @@ jobs:
     - uses: actions/setup-go@v5
       with:
         go-version-file: 'services/core/go.mod'
-    - name: go test
-      working-directory: services/core
-      run: go test ./...
+    # The Protocol Buffers Go stubs under proto/gen are gitignored and never
+    # committed, so they have to be generated before any Go package that
+    # imports them can build. buf is what generates them.
+    - uses: bufbuild/buf-setup-action@v1
+      with:
+        version: '1.72.0'
+    # Driven through the Makefile rather than a bare `go test ./...`, because
+    # `test` already declares its dependency on the `proto` target. Spelling the
+    # sequence out in YAML instead is how this job came to run `go test` with no
+    # stubs present, failing every package that imports them with
+    # "module github.com/ecirlabs/matrix-proto ... does not contain package
+    # github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1".
+    - name: make vet
+      run: make vet
+    - name: make test
+      run: make test
 
   proto:
     name: Proto (buf lint)

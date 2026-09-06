@@ -192,5 +192,6 @@ update the component's `FACES` together.
 
 ### Still open
 
-- `public/png/landing-banner.png` is a nautilus-shell image from the same old
-  branding as the deleted `logo.png`. Nothing in `src/` references it either.
+- `apps/web` has no test runner, so `BrandMark` has no component test. Adding
+  jest/vitest to a Next 15 / React 19 / Tailwind v4 project risks the `next lint`
+  and `next build` gates, which is why it was deferred rather than done.
