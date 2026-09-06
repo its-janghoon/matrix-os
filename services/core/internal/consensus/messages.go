@@ -52,6 +52,27 @@ const (
 	TopicProposal = "matrix.consensus.v1/proposal"
 	// TopicVote carries Vote messages (a validator's vote for a block).
 	TopicVote = "matrix.consensus.v1/vote"
+	// TopicSyncRequest carries BlockSyncRequest messages (a lagging node asking
+	// for committed block bodies it never received).
+	TopicSyncRequest = "matrix.consensus.v1/sync-request"
+	// TopicSyncResponse carries BlockSyncResponse messages (a caught-up node
+	// serving committed blocks and the votes that endorsed them).
+	TopicSyncResponse = "matrix.consensus.v1/sync-response"
+	// TopicHead carries HeadAnnounce messages (a node's committed chain length).
+	TopicHead = "matrix.consensus.v1/head"
+)
+
+// Block-sync bounds. A response is capped both by block count and by encoded
+// size so one catch-up message cannot become unboundedly large on a gossip
+// topic; a node further behind than one batch simply asks again after it
+// applies what it got.
+const (
+	// MaxSyncBatch is the greatest number of committed blocks one response
+	// carries.
+	MaxSyncBatch = 8
+	// MaxSyncResponseBytes caps the encoded size of one response. Blocks are
+	// added to a batch until the next one would cross it.
+	MaxSyncResponseBytes = 1 << 20
 )
 
 // HashSize is the length in bytes of a block link hash (SHA-256).
@@ -202,6 +223,65 @@ func (b *Block) VerifySignature(pub ed25519.PublicKey) error {
 // required.
 type Proposal struct {
 	Block Block `json:"block"`
+}
+
+// HeadAnnounce is a node's periodic statement of how much chain it has
+// committed.
+//
+// It is what makes a lagging node's recovery independent of traffic. The other
+// signals that a node is behind - votes and proposals for later heights, a
+// quorum whose body never arrived - all require the network to be busy. A node
+// that was down while blocks were committed, and comes back to an idle network,
+// would see none of them and would sit at its old height indefinitely. Hearing
+// a peer announce a greater height is direct evidence to ask for the
+// difference.
+type HeadAnnounce struct {
+	// Height is the announcing node's committed chain length, i.e. the next
+	// height it expects to commit.
+	Height uint64 `json:"height"`
+	// NodeID identifies the announcing node (informational).
+	NodeID string `json:"node_id,omitempty"`
+}
+
+// BlockSyncRequest asks peers for the committed blocks starting at Height.
+//
+// It exists because gossip is best-effort and a node that misses the ONE
+// proposal that committed at its current height has no other way to obtain that
+// block body. Votes for it keep arriving and can even reach a quorum, but a
+// quorum without the body cannot commit: the rest of the network has moved on
+// to later heights and will never re-propose the block. Before block sync such
+// a node was stalled permanently - it could stash every later proposal as a
+// future height and never apply any of them. The request is broadcast on
+// TopicSyncRequest; every node that has the height answers on
+// TopicSyncResponse.
+type BlockSyncRequest struct {
+	// Height is the first height the requester is missing (its current height).
+	Height uint64 `json:"height"`
+	// RequesterID identifies the asking node. It is informational - responses are
+	// broadcast to the topic, not addressed - and lets an operator see which node
+	// is behind.
+	RequesterID string `json:"requester_id,omitempty"`
+}
+
+// CommittedBlock is a committed block body together with the votes that
+// endorsed it at that height.
+//
+// The votes are what make a synced block safe to act on without trusting the
+// sender: the receiver verifies each one independently (signature, validator
+// membership, matching height and block hash) and feeds them through the same
+// tally that ordinary vote gossip goes through, so a synced block commits under
+// exactly the same quorum rule as one that arrived by proposal. A response with
+// too few valid votes leaves the receiver where it was rather than committing
+// anything.
+type CommittedBlock struct {
+	Block Block  `json:"block"`
+	Votes []Vote `json:"votes"`
+}
+
+// BlockSyncResponse carries committed blocks in ascending height order,
+// starting at the requested height.
+type BlockSyncResponse struct {
+	Blocks []CommittedBlock `json:"blocks"`
 }
 
 // Vote is a validator's signed endorsement of a specific block at a specific

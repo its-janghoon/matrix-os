@@ -20,6 +20,13 @@ import (
 const (
 	blockKeyPrefix = "consensus/block/"
 	headKey        = "consensus/head"
+	// votesKeyPrefix stores, per height, the votes that endorsed the block
+	// committed at that height. They are the evidence a node serves to a peer
+	// that missed the block: without them a lagging node would have to be
+	// trusted to accept a body on the sender's word. Kept in a separate key from
+	// the block so the persisted block encoding - and therefore its link hash -
+	// is unchanged by their presence.
+	votesKeyPrefix = "consensus/votes/"
 )
 
 // BlockChain errors.
@@ -61,9 +68,19 @@ func NewBlockChain(store *kv.Store) *BlockChain {
 
 // blockKey returns the KV key for a block at the given height.
 func blockKey(height uint64) []byte {
-	buf := make([]byte, len(blockKeyPrefix)+8)
-	copy(buf, blockKeyPrefix)
-	binary.BigEndian.PutUint64(buf[len(blockKeyPrefix):], height)
+	return heightKey(blockKeyPrefix, height)
+}
+
+// votesKey returns the KV key for the endorsing votes at the given height.
+func votesKey(height uint64) []byte {
+	return heightKey(votesKeyPrefix, height)
+}
+
+// heightKey builds prefix + big-endian height, so keys sort by height.
+func heightKey(prefix string, height uint64) []byte {
+	buf := make([]byte, len(prefix)+8)
+	copy(buf, prefix)
+	binary.BigEndian.PutUint64(buf[len(prefix):], height)
 	return buf
 }
 
@@ -122,7 +139,15 @@ func (c *BlockChain) Len() (uint64, error) {
 // Commit does NOT re-verify signatures or leadership; those are enforced by the
 // engine before a block reaches quorum. It is the durability + linkage step,
 // exactly analogous to token.Chain.Append's persistence half.
-func (c *BlockChain) Commit(b *Block) ([]byte, error) {
+//
+// endorsements are the votes that carried the block to quorum. They are stored
+// in the same atomic batch as the block so a node can later prove to a lagging
+// peer that this block was committed, rather than asking the peer to take the
+// body on trust. Passing none is allowed (a single-validator set commits on its
+// own vote, and a block restored by sync arrives with the evidence already
+// verified); a peer asking for a height with no stored evidence gets the body
+// and whatever votes it already holds itself.
+func (c *BlockChain) Commit(b *Block, endorsements []Vote) ([]byte, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -154,6 +179,15 @@ func (c *BlockChain) Commit(b *Block) ([]byte, error) {
 	if err := batch.Set(blockKey(b.Height), blockBytes, nil); err != nil {
 		return nil, fmt.Errorf("consensus: failed to stage block: %w", err)
 	}
+	if len(endorsements) > 0 {
+		voteBytes, err := json.Marshal(endorsements)
+		if err != nil {
+			return nil, fmt.Errorf("consensus: failed to encode endorsements: %w", err)
+		}
+		if err := batch.Set(votesKey(b.Height), voteBytes, nil); err != nil {
+			return nil, fmt.Errorf("consensus: failed to stage endorsements: %w", err)
+		}
+	}
 	if err := batch.Set([]byte(headKey), headBytes, nil); err != nil {
 		return nil, fmt.Errorf("consensus: failed to stage head: %w", err)
 	}
@@ -171,6 +205,28 @@ func (c *BlockChain) BlockAt(height uint64) (*Block, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.readBlock(height)
+}
+
+// CommitVotes returns the stored endorsing votes for the block committed at
+// height, or nil when none were stored (an older chain, or a block committed
+// without evidence). A missing set is not an error: it degrades block sync to
+// serving the body alone, which is enough for a peer that already holds the
+// votes.
+func (c *BlockChain) CommitVotes(height uint64) ([]Vote, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	data, err := c.store.Get(votesKey(height))
+	if err != nil {
+		return nil, fmt.Errorf("consensus: failed to read endorsements %d: %w", height, err)
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var votes []Vote
+	if err := json.Unmarshal(data, &votes); err != nil {
+		return nil, fmt.Errorf("consensus: failed to decode endorsements %d: %w", height, err)
+	}
+	return votes, nil
 }
 
 // readBlock loads and decodes the block at height. Callers must hold c.mu.

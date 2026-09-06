@@ -17,9 +17,17 @@ import (
 type memBus struct {
 	mu   sync.Mutex
 	subs map[string][]*memSub
+	// deliver, when non-nil, decides whether a message published by `from`
+	// reaches the subscriber owned by `to` on `topic`. Returning false drops it,
+	// which is how a test models the partial connectivity that gossip really
+	// has: a node that misses one message on one topic, or one that is cut off
+	// entirely for a while. Drops are the reason block sync exists, so a test
+	// that cannot drop a message cannot exercise it.
+	deliver func(from, to peer.ID, topic string) bool
 }
 
 type memSub struct {
+	owner  peer.ID
 	ch     chan transport.Message
 	ctx    context.Context
 	closed bool
@@ -27,6 +35,13 @@ type memSub struct {
 
 func newMemBus() *memBus {
 	return &memBus{subs: make(map[string][]*memSub)}
+}
+
+// setDeliveryFilter installs (or with nil clears) the delivery predicate.
+func (b *memBus) setDeliveryFilter(f func(from, to peer.ID, topic string) bool) {
+	b.mu.Lock()
+	b.deliver = f
+	b.mu.Unlock()
 }
 
 // endpoint is one node's view of the shared bus. Each engine gets its own
@@ -46,7 +61,7 @@ func (b *memBus) endpoint(self peer.ID) *endpoint {
 // to that topic (including this node's own publishes, matching gossipsub, which
 // the engine tolerates). The channel closes when ctx is cancelled.
 func (e *endpoint) Subscribe(ctx context.Context, topic string) (<-chan transport.Message, error) {
-	sub := &memSub{ch: make(chan transport.Message, 1024), ctx: ctx}
+	sub := &memSub{owner: e.self, ch: make(chan transport.Message, 1024), ctx: ctx}
 	e.bus.mu.Lock()
 	e.bus.subs[topic] = append(e.bus.subs[topic], sub)
 	e.bus.mu.Unlock()
@@ -77,6 +92,9 @@ func (e *endpoint) Publish(ctx context.Context, topic string, data []byte) error
 	defer e.bus.mu.Unlock()
 	for _, s := range e.bus.subs[topic] {
 		if s.closed {
+			continue
+		}
+		if e.bus.deliver != nil && !e.bus.deliver(e.self, s.owner, topic) {
 			continue
 		}
 		select {

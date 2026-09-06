@@ -22,6 +22,11 @@ type testNode struct {
 	ledger *market.Ledger
 	chain  *BlockChain
 	store  *kv.Store
+	// peerID is this node's identity on the in-memory bus, which a test needs to
+	// address it in a delivery filter.
+	peerID peer.ID
+	// bus is the shared gossip bus every node in the cluster is wired to.
+	bus *memBus
 }
 
 // newCluster spins up n in-process consensus nodes wired to a shared in-memory
@@ -50,6 +55,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 	bus := newMemBus()
 	nodes := make([]*testNode, n)
 	for i := 0; i < n; i++ {
+		peerID := peer.ID(fmt.Sprintf("node-%d", i))
 		store, err := kv.New(kv.Config{Path: t.TempDir()})
 		if err != nil {
 			t.Fatalf("kv: %v", err)
@@ -57,7 +63,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		ledger := market.NewLedger(store)
 		chain := NewBlockChain(store)
 		cfg := Config{
-			Transport:       bus.endpoint(peer.ID(fmt.Sprintf("node-%d", i))),
+			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
 			Chain:           chain,
 			Ledger:          ledger,
@@ -75,7 +81,15 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		if err := eng.Start(ctx); err != nil {
 			t.Fatalf("start engine: %v", err)
 		}
-		nodes[i] = &testNode{acct: accts[i], engine: eng, ledger: ledger, chain: chain, store: store}
+		nodes[i] = &testNode{
+			acct:   accts[i],
+			engine: eng,
+			ledger: ledger,
+			chain:  chain,
+			store:  store,
+			peerID: peerID,
+			bus:    bus,
+		}
 	}
 
 	stop := func() {

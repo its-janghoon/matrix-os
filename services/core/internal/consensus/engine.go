@@ -39,6 +39,16 @@ const (
 	DefaultRoundTimeout = 150 * time.Millisecond
 	// DefaultMaxBlockTxs bounds how many transactions a single block carries.
 	DefaultMaxBlockTxs = 512
+	// DefaultHeadAnnounceInterval is how often a node announces its committed
+	// chain length so peers that are behind can notice and ask for the
+	// difference. It is far longer than a round: this is a slow background
+	// heartbeat, not part of the commit path.
+	DefaultHeadAnnounceInterval = time.Second
+	// maxRoundTimeoutFactor caps how far the per-round timeout backoff can
+	// stretch the base timeout. Without a cap a height that keeps failing would
+	// eventually stop making progress at all; without a backoff it never settles
+	// (see roundTimeoutForLocked).
+	maxRoundTimeoutFactor = 20
 	// maxFutureStash bounds how many heights ahead a lagging node buffers
 	// proposals/votes for, so a slow node's catch-up buffers cannot grow
 	// unbounded.
@@ -71,6 +81,8 @@ type Config struct {
 	RoundTimeout time.Duration
 	// MaxBlockTxs overrides DefaultMaxBlockTxs when > 0.
 	MaxBlockTxs int
+	// HeadAnnounceInterval overrides DefaultHeadAnnounceInterval when > 0.
+	HeadAnnounceInterval time.Duration
 	// OnCommit, when non-nil, is invoked after each block commits+applies.
 	OnCommit CommitObserver
 }
@@ -89,10 +101,11 @@ type Engine struct {
 	selfID      string
 	isValidator bool
 
-	proposeInterval time.Duration
-	roundTimeout    time.Duration
-	maxBlockTxs     int
-	onCommit        CommitObserver
+	proposeInterval      time.Duration
+	roundTimeout         time.Duration
+	maxBlockTxs          int
+	headAnnounceInterval time.Duration
+	onCommit             CommitObserver
 
 	mu sync.Mutex
 	// mempool holds submitted-but-not-yet-committed transactions in submission
@@ -162,8 +175,21 @@ type Engine struct {
 	// lagging) so we can adopt them on catch-up. Keyed by "height:hash".
 	futureProposals map[string]*Block
 	// futureVotes stashes votes for heights ahead of ours so we can tally them the
-	// moment we reach that height. Keyed by height -> blockHashHex -> voterID set.
-	futureVotes map[uint64]map[string]map[string]struct{}
+	// moment we reach that height. Keyed by height -> blockHashHex -> voterID ->
+	// Vote. The whole signed vote is kept, not just the voter's identity, so a
+	// node that commits a height purely from buffered votes can still hand that
+	// evidence to a peer asking for the same block (see CommittedBlock).
+	futureVotes map[uint64]map[string]map[string]Vote
+	// lastSyncRequest is when this node last broadcast a BlockSyncRequest. It
+	// rate-limits the ask to one per round timeout so a stalled node is
+	// persistent without flooding the topic.
+	lastSyncRequest time.Time
+	// lastHeadAnnounce is when this node last announced its committed height.
+	lastHeadAnnounce time.Time
+	// peerHeight is the greatest committed height any peer has announced. Above
+	// our own height it is direct evidence that we are behind, which the other
+	// signals only reveal while the network is busy.
+	peerHeight uint64
 
 	wg      sync.WaitGroup
 	started bool
@@ -184,24 +210,25 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("consensus: ledger is required")
 	}
 	e := &Engine{
-		transport:       cfg.Transport,
-		validators:      cfg.Validators,
-		chain:           cfg.Chain,
-		ledger:          cfg.Ledger,
-		self:            cfg.Self,
-		proposeInterval: orDurationC(cfg.ProposeInterval, DefaultProposeInterval),
-		roundTimeout:    orDurationC(cfg.RoundTimeout, DefaultRoundTimeout),
-		maxBlockTxs:     orIntC(cfg.MaxBlockTxs, DefaultMaxBlockTxs),
-		onCommit:        cfg.OnCommit,
-		mempoolSet:      make(map[string]struct{}),
-		committedTxs:    make(map[string]struct{}),
-		appliedTxs:      make(map[string]bool),
-		settleWaiters:   make(map[string][]chan struct{}),
-		proposals:       make(map[string]*Block),
-		votes:           make(map[string]map[string]struct{}),
-		roundVotes:      make(map[uint64]map[string]map[string]Vote),
-		futureProposals: make(map[string]*Block),
-		futureVotes:     make(map[uint64]map[string]map[string]struct{}),
+		transport:            cfg.Transport,
+		validators:           cfg.Validators,
+		chain:                cfg.Chain,
+		ledger:               cfg.Ledger,
+		self:                 cfg.Self,
+		proposeInterval:      orDurationC(cfg.ProposeInterval, DefaultProposeInterval),
+		roundTimeout:         orDurationC(cfg.RoundTimeout, DefaultRoundTimeout),
+		maxBlockTxs:          orIntC(cfg.MaxBlockTxs, DefaultMaxBlockTxs),
+		headAnnounceInterval: orDurationC(cfg.HeadAnnounceInterval, DefaultHeadAnnounceInterval),
+		onCommit:             cfg.OnCommit,
+		mempoolSet:           make(map[string]struct{}),
+		committedTxs:         make(map[string]struct{}),
+		appliedTxs:           make(map[string]bool),
+		settleWaiters:        make(map[string][]chan struct{}),
+		proposals:            make(map[string]*Block),
+		votes:                make(map[string]map[string]struct{}),
+		roundVotes:           make(map[uint64]map[string]map[string]Vote),
+		futureProposals:      make(map[string]*Block),
+		futureVotes:          make(map[uint64]map[string]map[string]Vote),
 	}
 	if cfg.Self != nil {
 		e.selfID = cfg.Self.AccountID()
@@ -245,7 +272,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.height = length
 	e.headHash = head
 	e.round = 0
-	e.roundDeadline = time.Now().Add(e.roundTimeout)
+	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 	e.mu.Unlock()
 
 	// Rehydrate the committed-tx dedup set from the persisted chain so a restarted
@@ -270,10 +297,25 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("consensus: subscribe vote: %w", err)
 	}
+	syncReqCh, err := e.transport.Subscribe(ctx, TopicSyncRequest)
+	if err != nil {
+		return fmt.Errorf("consensus: subscribe sync request: %w", err)
+	}
+	syncRespCh, err := e.transport.Subscribe(ctx, TopicSyncResponse)
+	if err != nil {
+		return fmt.Errorf("consensus: subscribe sync response: %w", err)
+	}
+	headCh, err := e.transport.Subscribe(ctx, TopicHead)
+	if err != nil {
+		return fmt.Errorf("consensus: subscribe head: %w", err)
+	}
 
-	e.wg.Add(3)
+	e.wg.Add(6)
 	go e.runLoop(ctx, proposalCh, e.handleProposal)
 	go e.runLoop(ctx, voteCh, e.handleVote)
+	go e.runLoop(ctx, syncReqCh, e.handleSyncRequest)
+	go e.runLoop(ctx, syncRespCh, e.handleSyncResponse)
+	go e.runLoop(ctx, headCh, e.handleHeadAnnounce)
 	go e.driver(ctx)
 	return nil
 }
@@ -351,9 +393,40 @@ func (e *Engine) driver(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			e.maybeAnnounceHead(ctx)
+			e.maybeRequestSync(ctx)
 			e.tick(ctx)
 		}
 	}
+}
+
+// roundTimeoutForLocked returns how long to wait at the given round before
+// rotating the leader: the base timeout plus half of it per round elapsed,
+// capped at maxRoundTimeoutFactor times the base.
+//
+// A FIXED timeout livelocks under load. Every round rotates the leader, and a
+// new leader proposes a new block, so if the timeout is shorter than the time a
+// proposal actually needs to reach a quorum - which is what happens when the
+// machine is loaded, the network is slow, or the block is large - each round is
+// abandoned before it can commit and votes scatter across a succession of
+// competing blocks. The cluster then rotates forever without committing
+// anything, at full speed. Backing the timeout off per round is the standard
+// answer (Tendermint's timeoutPropose + timeoutProposeDelta * round): the
+// rounds keep rotating while the leader is genuinely silent, but as soon as the
+// problem is slowness rather than a dead leader, the window grows past what a
+// commit needs and the height settles.
+//
+// This only ever affects liveness. Safety across rotation is the lock rule's
+// job, and it does not depend on any timing.
+func (e *Engine) roundTimeoutForLocked(round uint64) time.Duration {
+	if round > maxRoundTimeoutFactor {
+		round = maxRoundTimeoutFactor
+	}
+	backoff := e.roundTimeout + time.Duration(round)*(e.roundTimeout/2)
+	if max := maxRoundTimeoutFactor * e.roundTimeout; backoff > max {
+		backoff = max
+	}
+	return backoff
 }
 
 // tick performs one driver step under the lock, then publishes any produced
@@ -367,7 +440,7 @@ func (e *Engine) tick(ctx context.Context) {
 	// still refuses to vote for a conflicting block without a justifying polka.
 	if time.Now().After(e.roundDeadline) {
 		e.round++
-		e.roundDeadline = time.Now().Add(e.roundTimeout)
+		e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 		e.hasVoted = false
 	}
 
@@ -563,8 +636,13 @@ func (e *Engine) stashFutureProposal(ctx context.Context, b *Block, raw []byte) 
 	e.futureProposals[hkey] = &cp
 	e.mu.Unlock()
 
-	// Re-gossip once to help other lagging nodes obtain the body.
-	_ = e.transport.Publish(ctx, TopicProposal, raw)
+	// Re-gossip once to help other lagging nodes obtain the body. A block handed
+	// to us by block sync has no original proposal bytes to echo, and the peer
+	// that served it is already answering requests, so there is nothing to
+	// re-gossip in that case.
+	if len(raw) > 0 {
+		_ = e.transport.Publish(ctx, TopicProposal, raw)
+	}
 }
 
 // drainFutureProposals adopts any stashed proposals that are now for the current
@@ -591,16 +669,20 @@ func (e *Engine) drainFutureProposals(ctx context.Context) {
 	}
 }
 
-// acceptProposal verifies a block for the current height and caches it. It
-// returns an error (which the caller uses to drop the message) when the block is
-// not acceptable. Verification: proposer is a validator, proposer is the correct
-// leader for the block's round, proposer signature verifies, the block links to
-// our committed head, and every transaction is individually validly signed.
-func (e *Engine) acceptProposal(b *Block) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	// Only consider proposals for the height we are currently trying to commit.
+// verifyBlockForHeightLocked checks everything about a block that does not
+// depend on this node's voting state: it is for the height we are trying to
+// commit, it links to our committed head, its proposer is the validator who
+// leads its round, its proposer signature verifies, and every transaction in it
+// is individually valid, unique within the block and not a replay of one
+// already committed.
+//
+// It is shared by the two ways a body can arrive - a leader's proposal and a
+// block-sync response - so both are held to the same standard. What it
+// deliberately does NOT do is touch the lock/justification rules: those govern
+// whether this node may VOTE, which a synced block never asks it to do.
+// Callers must hold e.mu.
+func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
+	// Only consider blocks for the height we are currently trying to commit.
 	if b.Height != e.height {
 		return fmt.Errorf("%w: block height %d != current %d", ErrInvalidMessage, b.Height, e.height)
 	}
@@ -642,6 +724,21 @@ func (e *Engine) acceptProposal(b *Block) error {
 			return fmt.Errorf("%w: tx %d duplicated within block", ErrInvalidMessage, i)
 		}
 		seenInBlock[key] = struct{}{}
+	}
+	return nil
+}
+
+// acceptProposal verifies a block for the current height and caches it. It
+// returns an error (which the caller uses to drop the message) when the block is
+// not acceptable. Verification: proposer is a validator, proposer is the correct
+// leader for the block's round, proposer signature verifies, the block links to
+// our committed head, and every transaction is individually validly signed.
+func (e *Engine) acceptProposal(b *Block) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := e.verifyBlockForHeightLocked(b); err != nil {
+		return err
 	}
 
 	hash := b.Hash()
@@ -700,7 +797,7 @@ func (e *Engine) acceptProposal(b *Block) error {
 	}
 	if b.Round > e.round {
 		e.round = b.Round
-		e.roundDeadline = time.Now().Add(e.roundTimeout)
+		e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 		// A new round permits one fresh vote; clear the per-round guard while
 		// keeping the lock intact.
 		e.hasVoted = false
@@ -855,15 +952,17 @@ func (e *Engine) tallyVote(v *Vote) {
 		// rest of the network commit.
 		byHash := e.futureVotes[v.Height]
 		if byHash == nil {
-			byHash = make(map[string]map[string]struct{})
+			byHash = make(map[string]map[string]Vote)
 			e.futureVotes[v.Height] = byHash
 		}
 		set := byHash[hkey]
 		if set == nil {
-			set = make(map[string]struct{})
+			set = make(map[string]Vote)
 			byHash[hkey] = set
 		}
-		set[v.VoterID] = struct{}{}
+		if _, ok := set[v.VoterID]; !ok {
+			set[v.VoterID] = *v
+		}
 	}
 }
 
@@ -894,18 +993,27 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 		break
 	}
 	if winner == nil {
+		// A quorum for a block whose body we never received is the stall block
+		// sync exists for: the votes will keep arriving but the body never will,
+		// because the rest of the network has moved on and will not re-propose it.
+		// Ask for it.
+		stuck := e.quorumWithoutBodyLocked()
 		e.mu.Unlock()
+		if stuck {
+			e.maybeRequestSync(ctx)
+		}
 		return
 	}
 	e.committing = true
 	block := *winner
+	endorsements := e.endorsementsLocked(fmt.Sprintf("%x", block.Hash()))
 	e.mu.Unlock()
 
 	// Commit to the hash-linked chain and apply to the ledger. Both are done
 	// while NOT holding e.mu (they take their own locks) to avoid lock-ordering
 	// issues, but committing is serialised by the committing flag so no two
 	// commits race at the same height.
-	if err := e.commitAndApply(&block); err != nil {
+	if err := e.commitAndApply(&block, endorsements); err != nil {
 		// A commit failure (e.g. height/prev-hash mismatch because another path
 		// already advanced) simply means this height is already handled; clear the
 		// committing flag and reconcile state to the chain head.
@@ -936,6 +1044,256 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 	e.tick(ctx)
 }
 
+// endorsementsLocked collects the distinct signed votes this node holds for the
+// given block hash at the current height, across every round. They are the
+// evidence that carried the block to quorum here, and are persisted with it so
+// this node can later prove the commit to a peer that missed the body. Callers
+// must hold e.mu.
+func (e *Engine) endorsementsLocked(hkey string) []Vote {
+	seen := make(map[string]struct{})
+	var out []Vote
+	for _, byHash := range e.roundVotes {
+		for _, v := range byHash[hkey] {
+			if _, dup := seen[v.VoterID]; dup {
+				continue
+			}
+			seen[v.VoterID] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
+}
+
+// quorumWithoutBodyLocked reports whether some block at the current height has
+// reached the vote quorum while this node still lacks its body. That is the
+// permanent-stall condition: nothing in the ordinary flow will ever deliver
+// that body again. Callers must hold e.mu.
+func (e *Engine) quorumWithoutBodyLocked() bool {
+	quorum := e.validators.Quorum()
+	for hkey, voters := range e.votes {
+		if len(voters) < quorum {
+			continue
+		}
+		if _, ok := e.proposals[hkey]; !ok {
+			return true
+		}
+	}
+	return false
+}
+
+// maybeRequestSync broadcasts a request for the committed block at this node's
+// height when there is evidence the network has moved past it: votes or
+// proposals buffered for later heights, or a quorum at our own height whose
+// body never arrived. It is rate limited to one request per round timeout, so a
+// stalled node keeps asking until it recovers without flooding the topic.
+//
+// A node that is simply idle (nothing buffered, no quorum outstanding) never
+// asks, so a healthy network carries no sync traffic at all.
+func (e *Engine) maybeRequestSync(ctx context.Context) {
+	e.mu.Lock()
+	behind := e.peerHeight > e.height ||
+		len(e.futureVotes) > 0 ||
+		len(e.futureProposals) > 0 ||
+		e.quorumWithoutBodyLocked()
+	if !behind {
+		e.mu.Unlock()
+		return
+	}
+	if !e.lastSyncRequest.IsZero() && time.Since(e.lastSyncRequest) < e.roundTimeout {
+		e.mu.Unlock()
+		return
+	}
+	e.lastSyncRequest = time.Now()
+	req := BlockSyncRequest{Height: e.height, RequesterID: e.selfID}
+	e.mu.Unlock()
+
+	if data, err := json.Marshal(&req); err == nil {
+		_ = e.transport.Publish(ctx, TopicSyncRequest, data)
+	}
+}
+
+// maybeAnnounceHead publishes this node's committed height once per announce
+// interval, so a peer that is behind on an idle network can tell.
+//
+// Only validators announce. Every node listens and every node answers sync
+// requests, but the announcement is a broadcast heartbeat, so letting the whole
+// network emit one would scale its cost with the number of participants rather
+// than with the fixed validator set. A follower learns it is behind from the
+// validators' announcements, which is the same information.
+func (e *Engine) maybeAnnounceHead(ctx context.Context) {
+	if !e.isValidator {
+		return
+	}
+	e.mu.Lock()
+	if !e.lastHeadAnnounce.IsZero() && time.Since(e.lastHeadAnnounce) < e.headAnnounceInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastHeadAnnounce = time.Now()
+	ann := HeadAnnounce{Height: e.height, NodeID: e.selfID}
+	e.mu.Unlock()
+
+	if data, err := json.Marshal(&ann); err == nil {
+		_ = e.transport.Publish(ctx, TopicHead, data)
+	}
+}
+
+// handleHeadAnnounce records a peer's committed height and, when it is ahead of
+// ours, asks for the blocks we are missing.
+//
+// The announcement is not trusted for anything but the decision to ask: a peer
+// claiming a huge height cannot move this node's chain, because every block it
+// then serves has to verify and reach a quorum on its own merits. The worst a
+// liar achieves is making us send requests, which the rate limit bounds.
+func (e *Engine) handleHeadAnnounce(ctx context.Context, msg transport.Message) {
+	var ann HeadAnnounce
+	if err := json.Unmarshal(msg.Payload, &ann); err != nil {
+		return
+	}
+	e.mu.Lock()
+	if ann.Height > e.peerHeight {
+		e.peerHeight = ann.Height
+	}
+	ahead := ann.Height > e.height
+	e.mu.Unlock()
+
+	if ahead {
+		e.maybeRequestSync(ctx)
+	}
+}
+
+// handleSyncRequest answers a peer asking for committed blocks from a height we
+// have. It serves a batch starting at the requested height, each block with the
+// votes that endorsed it, bounded by MaxSyncBatch and MaxSyncResponseBytes. A
+// node that has nothing to offer stays silent rather than answering emptily.
+//
+// Every node that holds the height answers, which is deliberate: the requester
+// only needs one response to arrive, and on a lossy network the redundancy is
+// what makes recovery reliable. Duplicate responses are cheap to discard - a
+// block below the receiver's height is dropped without work.
+func (e *Engine) handleSyncRequest(ctx context.Context, msg transport.Message) {
+	var req BlockSyncRequest
+	if err := json.Unmarshal(msg.Payload, &req); err != nil {
+		return
+	}
+	// Our own broadcast echoes back to us; there is nothing to serve ourselves.
+	if req.RequesterID != "" && req.RequesterID == e.selfID {
+		return
+	}
+	length, err := e.chain.Len()
+	if err != nil || req.Height >= length {
+		return
+	}
+
+	var resp BlockSyncResponse
+	size := 0
+	for h := req.Height; h < length && len(resp.Blocks) < MaxSyncBatch; h++ {
+		b, err := e.chain.BlockAt(h)
+		if err != nil {
+			break
+		}
+		votes, err := e.chain.CommitVotes(h)
+		if err != nil {
+			// The body alone is still useful to a peer that holds the votes.
+			votes = nil
+		}
+		cb := CommittedBlock{Block: *b, Votes: votes}
+		enc, err := json.Marshal(&cb)
+		if err != nil {
+			break
+		}
+		if len(resp.Blocks) > 0 && size+len(enc) > MaxSyncResponseBytes {
+			break
+		}
+		resp.Blocks = append(resp.Blocks, cb)
+		size += len(enc)
+	}
+	if len(resp.Blocks) == 0 {
+		return
+	}
+	if data, err := json.Marshal(&resp); err == nil {
+		_ = e.transport.Publish(ctx, TopicSyncResponse, data)
+	}
+}
+
+// handleSyncResponse applies a served batch in ascending height order.
+func (e *Engine) handleSyncResponse(ctx context.Context, msg transport.Message) {
+	var resp BlockSyncResponse
+	if err := json.Unmarshal(msg.Payload, &resp); err != nil {
+		return
+	}
+	if len(resp.Blocks) > MaxSyncBatch {
+		return
+	}
+	for i := range resp.Blocks {
+		e.applySyncedBlock(ctx, &resp.Blocks[i])
+	}
+}
+
+// applySyncedBlock ingests one served block: it tallies the accompanying votes
+// through the same verified path ordinary vote gossip takes, caches the body for
+// the current height (or stashes it for a later one), and then re-runs the
+// ordinary commit check.
+//
+// Nothing here is a new commit rule. The block commits only when the tally
+// reaches the same quorum a proposed block needs, over votes that each verified
+// individually against the validator set and endorse this exact body. A
+// response with no votes, too few votes, or votes for a different block leaves
+// this node exactly where it was. Caching a body is not voting for it, so this
+// path cannot make a node contribute to a conflicting block - it can only let a
+// node commit what a quorum has already endorsed.
+func (e *Engine) applySyncedBlock(ctx context.Context, cb *CommittedBlock) {
+	b := &cb.Block
+	hash := b.Hash()
+
+	for i := range cb.Votes {
+		v := &cb.Votes[i]
+		if v.Height != b.Height || !bytesEqual(v.BlockHash, hash) {
+			continue
+		}
+		if !e.validators.Contains(v.VoterID) {
+			continue
+		}
+		if err := v.Verify(); err != nil {
+			continue
+		}
+		e.tallyVote(v)
+	}
+
+	if err := e.acceptSyncedBlock(b); err != nil {
+		// Not for our current height (or not valid against it). If it is ahead of
+		// us, stash it so the catch-up path adopts it once we get there.
+		e.stashFutureProposal(ctx, b, nil)
+		return
+	}
+	e.maybeCommit(ctx)
+}
+
+// acceptSyncedBlock verifies a block served by block sync against the current
+// height and caches its body so a quorum can commit it.
+//
+// It runs the same validation a proposal gets but casts no vote and touches no
+// lock state: a synced block is already-agreed history being backfilled, not a
+// proposal asking for this node's endorsement. In particular a node LOCKED on a
+// different block at this height still accepts the body, because refusing it
+// would be refusing to learn what the network committed - the lock exists to
+// stop this node voting for a conflicting block, which caching never does.
+func (e *Engine) acceptSyncedBlock(b *Block) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if err := e.verifyBlockForHeightLocked(b); err != nil {
+		return err
+	}
+	hkey := fmt.Sprintf("%x", b.Hash())
+	if _, seen := e.proposals[hkey]; !seen {
+		cp := *b
+		cp.Justify = nil
+		e.proposals[hkey] = &cp
+	}
+	return nil
+}
+
 // commitAndApply persists the block to the committed chain and deterministically
 // applies its ordered transactions to the market ledger. Each transaction moves
 // credits from sender to recipient; a transaction whose sender cannot afford it
@@ -943,8 +1301,8 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 // node applies the identical deterministic result. Because the transaction set
 // and order are fixed by the committed block, every honest node computes the
 // same balances.
-func (e *Engine) commitAndApply(b *Block) error {
-	if _, err := e.chain.Commit(b); err != nil {
+func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
+	if _, err := e.chain.Commit(b, endorsements); err != nil {
 		return err
 	}
 	// Apply transfers atomically as one critical section on the ledger, matching
@@ -1076,7 +1434,7 @@ func (e *Engine) advanceHeight(committed *Block) {
 	e.height = committed.Height + 1
 	e.headHash = committed.Hash()
 	e.round = 0
-	e.roundDeadline = time.Now().Add(e.roundTimeout)
+	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 	e.proposals = make(map[string]*Block)
 	// Reset the per-height voting discipline state: a fresh height starts with no
 	// vote cast, no lock, and no round-vote evidence.
@@ -1089,12 +1447,21 @@ func (e *Engine) advanceHeight(committed *Block) {
 	e.locked = false
 	// Seed the new height's vote tally from any votes we buffered while lagging,
 	// so a node that fell behind immediately counts the quorum the rest of the
-	// network already produced for this height.
+	// network already produced for this height. The raw votes are also seeded
+	// into the per-round evidence map, so this node can prove the commit to a
+	// peer even though it never saw the votes arrive at the current height.
+	e.votes = make(map[string]map[string]struct{})
 	if buffered, ok := e.futureVotes[e.height]; ok {
-		e.votes = buffered
+		for hkey, byVoter := range buffered {
+			set := make(map[string]struct{}, len(byVoter))
+			for voter, v := range byVoter {
+				set[voter] = struct{}{}
+				vv := v
+				e.recordRoundVoteLocked(&vv)
+			}
+			e.votes[hkey] = set
+		}
 		delete(e.futureVotes, e.height)
-	} else {
-		e.votes = make(map[string]map[string]struct{})
 	}
 	// Drop any stale buffered votes for heights we have now passed.
 	for h := range e.futureVotes {
@@ -1120,7 +1487,7 @@ func (e *Engine) reconcileToChainHead() {
 		e.height = length
 		e.headHash = head
 		e.round = 0
-		e.roundDeadline = time.Now().Add(e.roundTimeout)
+		e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 		e.proposals = make(map[string]*Block)
 		e.votes = make(map[string]map[string]struct{})
 		e.roundVotes = make(map[uint64]map[string]map[string]Vote)

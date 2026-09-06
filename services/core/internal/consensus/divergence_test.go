@@ -359,28 +359,38 @@ func TestMultiNodeNoDivergenceUnderTightTimeout(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 
-	// Let the cluster churn. Under this adversarial timing a node may lag on
-	// best-effort gossip catch-up, so we require a QUORUM of nodes to make real
-	// progress rather than all of them; the safety property (no divergence) is
-	// asserted over every pair of nodes below regardless of how far each got.
-	const targetHeight = 8
+	// Let the cluster churn until the WORK is done, not until some block count is
+	// reached. How many blocks 40 transfers become is a timing artefact - a loaded
+	// machine batches more of them per block - so a height target here measures
+	// the machine rather than the engine. What has to happen is that every
+	// transfer commits, on at least a quorum of nodes; the safety property (no
+	// divergence) is then asserted over every pair of nodes below, regardless of
+	// how far each one got.
+	const wantBalance = 1_000_000 - 40
 	quorum := nodes[0].engine.ValidatorSet().Quorum()
 	deadline := time.Now().Add(20 * time.Second)
 	for {
-		reached := 0
+		settled := 0
 		for _, nd := range nodes {
-			if nd.engine.Height() >= targetHeight {
-				reached++
+			bal, err := nd.ledger.Balance(aliceID)
+			if err != nil {
+				t.Fatalf("balance: %v", err)
+			}
+			if bal == wantBalance {
+				settled++
 			}
 		}
-		if reached >= quorum {
+		if settled >= quorum {
 			break
 		}
 		if time.Now().After(deadline) {
 			for i, nd := range nodes {
-				t.Logf("node %d height=%d", i, nd.engine.Height())
+				bal, _ := nd.ledger.Balance(aliceID)
+				l, _ := nd.chain.Len()
+				t.Logf("node %d height=%d chain length=%d alice=%d (want %d)",
+					i, nd.engine.Height(), l, bal, wantBalance)
 			}
-			t.Fatalf("fewer than a quorum (%d) of nodes reached height %d", quorum, targetHeight)
+			t.Fatalf("fewer than a quorum (%d) of nodes committed all 40 transfers", quorum)
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
@@ -445,6 +455,9 @@ func TestMultiNodeNoDivergenceUnderTightTimeout(t *testing.T) {
 				t.Fatalf("DIVERGENCE at height %d: node %d committed a different block than node 0", h, i)
 			}
 		}
+	}
+	if minLen < 2 {
+		t.Fatalf("every node committed %d block(s); the test needs at least 2 heights to compare", minLen)
 	}
 	t.Logf("no divergence across %d committed heights under tight round rotation", minLen)
 }
