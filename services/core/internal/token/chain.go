@@ -18,8 +18,9 @@ import (
 // the chain head metadata under token/head. These namespaces are distinct from
 // the market/* prefixes so the two subsystems never collide in the shared store.
 const (
-	txKeyPrefix = "token/tx/"
-	headKey     = "token/head"
+	txKeyPrefix    = "token/tx/"
+	headKey        = "token/head"
+	nonceKeyPrefix = "token/nonce/"
 )
 
 // HashSize is the length in bytes of a chain link hash (SHA-256).
@@ -112,25 +113,35 @@ func (c *Chain) loadHead() (head, error) {
 	return h, nil
 }
 
+// nonceKey returns the KV key holding the per-sender accepted-transaction count.
+func nonceKey(sender string) []byte {
+	buf := make([]byte, 0, len(nonceKeyPrefix)+len(sender))
+	buf = append(buf, nonceKeyPrefix...)
+	buf = append(buf, sender...)
+	return buf
+}
+
 // nextNonce returns the expected next nonce for sender: the number of
 // transactions already accepted from that sender. The first transaction from a
-// sender must therefore carry Nonce 0. Callers must hold c.mu.
+// sender must therefore carry Nonce 0.
+//
+// The count is read in O(1) from a persisted per-sender counter under
+// token/nonce/<sender>, which Append advances in the same atomic batch as the
+// record and head (so the counter can never drift from the log). A missing key
+// means the sender has no accepted transactions yet, i.e. expected nonce 0.
+// Callers must hold c.mu.
 func (c *Chain) nextNonce(sender string) (uint64, error) {
-	var count uint64
-	err := c.store.Iterate([]byte(txKeyPrefix), func(_, value []byte) error {
-		var rec Record
-		if err := json.Unmarshal(value, &rec); err != nil {
-			return fmt.Errorf("token: failed to decode record: %w", err)
-		}
-		if rec.Tx.SenderID() == sender {
-			count++
-		}
-		return nil
-	})
+	data, err := c.store.Get(nonceKey(sender))
 	if err != nil {
-		return 0, err
+		return 0, fmt.Errorf("token: failed to read sender nonce: %w", err)
 	}
-	return count, nil
+	if data == nil {
+		return 0, nil
+	}
+	if len(data) != 8 {
+		return 0, fmt.Errorf("token: corrupt sender nonce for %q: expected 8 bytes, got %d", sender, len(data))
+	}
+	return binary.BigEndian.Uint64(data), nil
 }
 
 // Append validates and appends a transaction to the chain. It (a) verifies the
@@ -182,6 +193,12 @@ func (c *Chain) Append(tx *Transaction) (*Record, error) {
 		return nil, fmt.Errorf("token: failed to encode head: %w", err)
 	}
 
+	// Advance the sender's persisted nonce counter to expectedNonce+1 in the same
+	// batch as the record and head, so the O(1) nonce lookup stays crash
+	// consistent with the log: either all three land or none do.
+	var nonceBuf [8]byte
+	binary.BigEndian.PutUint64(nonceBuf[:], expectedNonce+1)
+
 	batch := c.store.NewBatch()
 	defer batch.Close()
 	if err := batch.Set(txKey(newHeight), recBytes, nil); err != nil {
@@ -189,6 +206,9 @@ func (c *Chain) Append(tx *Transaction) (*Record, error) {
 	}
 	if err := batch.Set([]byte(headKey), headBytes, nil); err != nil {
 		return nil, fmt.Errorf("token: failed to stage head: %w", err)
+	}
+	if err := batch.Set(nonceKey(tx.SenderID()), nonceBuf[:], nil); err != nil {
+		return nil, fmt.Errorf("token: failed to stage sender nonce: %w", err)
 	}
 	if err := batch.Commit(pebble.Sync); err != nil {
 		return nil, fmt.Errorf("token: failed to commit append: %w", err)

@@ -189,6 +189,41 @@ func TestChain_ValidateChainDetectsCorruption(t *testing.T) {
 	}
 }
 
+func TestChain_NonceCounterPersistsAndResumes(t *testing.T) {
+	store := newTestStore(t)
+	alice := mustAccount(t)
+	bob := mustAccount(t)
+
+	chain := NewChain(store)
+	for nonce := uint64(0); nonce < 5; nonce++ {
+		if _, err := appendSigned(t, chain, alice, bob.AccountID(), 1, nonce); err != nil {
+			t.Fatalf("Append() nonce %d error = %v", nonce, err)
+		}
+	}
+
+	// The persisted per-sender counter must equal the next expected nonce (5) and
+	// live under the dedicated nonce key, independent of the O(1) fast path.
+	raw, err := store.Get(nonceKey(alice.AccountID()))
+	if err != nil || raw == nil {
+		t.Fatalf("nonce counter key missing: err=%v raw=%v", err, raw)
+	}
+
+	// A chain reopened over the same store must continue at nonce 5 without a
+	// full log rescan, and reject a replay of an earlier nonce.
+	reopened := NewChain(store)
+	if _, err := appendSigned(t, reopened, alice, bob.AccountID(), 1, 5); err != nil {
+		t.Fatalf("Append() nonce 5 on reopened chain error = %v", err)
+	}
+	prev, _ := reopened.HeadHash()
+	replay := signedTx(t, alice, bob.AccountID(), 1, 3, prev) // stale nonce
+	if _, err := reopened.Append(replay); !errors.Is(err, ErrNonceMismatch) {
+		t.Fatalf("Append() replayed nonce error = %v, want ErrNonceMismatch", err)
+	}
+	if err := reopened.ValidateChain(); err != nil {
+		t.Errorf("ValidateChain() error = %v", err)
+	}
+}
+
 func TestChain_ResumesFromPersistedHead(t *testing.T) {
 	store := newTestStore(t)
 	alice := mustAccount(t)

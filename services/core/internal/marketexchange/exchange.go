@@ -47,6 +47,18 @@ type RemoteProvider struct {
 // publishes signed announcements/job-requests/settlements, and applies received
 // settlements to the local ledger through the signed-settlement path.
 //
+// Settlement semantics (important): each node keeps its OWN independent token
+// chain and ledger. A signed settlement transaction commits to node-local state
+// (the sender's per-node nonce and that node's chain head hash), so a gossiped
+// settlement applies successfully on exactly the one receiving node whose local
+// chain head and sender nonce match the transaction the sender built against it,
+// namely the counterparty (provider) node the buyer settled with. On every other
+// node the SettledLedger.Settle apply fails the nonce or prev-hash check and is
+// dropped. This is deliberately NOT a shared/global ledger or a consensus
+// protocol: there is no network-wide agreement on balances or ordering. It is a
+// signed message bus over independent local ledgers, where settlement is a
+// pairwise fact between a buyer and a specific provider node.
+//
 // The receive loops follow the goroutine + context-cancellation pattern used by
 // internal/transport.Transport.Subscribe: each loop reads from a channel that
 // the transport closes on ctx cancellation, so cancelling the node context stops
@@ -222,12 +234,18 @@ func (e *Exchange) handleJobRequest(msg transport.Message) {
 	// guarantees no unsigned/forged request is ever acted upon.
 }
 
-// handleSettlement decodes and verifies a Settlement and, if valid, applies it
-// to the local ledger through the FEAT-002 signed-settlement path
-// (token.SettledLedger.Settle). Invalid settlements, and settlements that fail
-// to apply (bad nonce, unaffordable, prev-hash mismatch), are dropped: the
-// signed path is authoritative and rejects anything inconsistent with local
-// state, so a bad settlement simply has no effect.
+// handleSettlement decodes and verifies a Settlement and, if valid, attempts to
+// apply it to THIS node's local ledger through the signed-settlement path
+// (token.SettledLedger.Settle). Because the transaction commits to node-local
+// state (the sender's nonce and this node's chain head), the apply succeeds only
+// on the specific counterparty node the transaction was built against; on every
+// other receiving node it fails the nonce or prev-hash check. Invalid
+// settlements and settlements that do not apply to local state (bad nonce,
+// unaffordable, prev-hash mismatch) are dropped silently: the signed path is
+// authoritative and rejects anything inconsistent with local state, so a
+// settlement that is not for this node simply has no effect here. This is not a
+// network-wide balance update; it is the receiving counterparty recording the
+// pairwise settlement on its own chain.
 func (e *Exchange) handleSettlement(msg transport.Message) {
 	var st Settlement
 	if err := json.Unmarshal(msg.Payload, &st); err != nil {
@@ -317,8 +335,12 @@ func (e *Exchange) SubmitRemoteJob(ctx context.Context, buyer *token.Account, pr
 }
 
 // PublishSettlement signs nothing (the transaction is already signed by its
-// sender) and publishes the settlement on the settle topic so remote nodes apply
-// it. The caller is responsible for having produced a valid signed transaction
+// sender) and publishes the settlement on the settle topic. The transaction is
+// built against one specific counterparty node's chain head and the sender's
+// nonce on that node, so it applies on that one receiver and is dropped
+// everywhere else (see handleSettlement); publishing over gossip is how that
+// counterparty receives it, not a broadcast that updates balances network-wide.
+// The caller is responsible for having produced a valid signed transaction
 // (typically via token helpers); PublishSettlement verifies it before publishing
 // so a malformed settlement is never gossiped.
 func (e *Exchange) PublishSettlement(ctx context.Context, st *Settlement) error {

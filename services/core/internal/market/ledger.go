@@ -64,6 +64,46 @@ func NewLedger(store *kv.Store) *Ledger {
 	return &Ledger{store: store}
 }
 
+// LedgerTx is the unlocked view of the ledger handed to an Atomically
+// callback. Its methods assume the caller already holds the ledger write lock
+// (Atomically guarantees this), so they perform no locking of their own. This
+// lets a compound operation (for example: read a balance, decide, then
+// transfer) run as a single critical section that excludes every other ledger
+// writer, including the direct Transfer path used by market.CompleteJob.
+type LedgerTx interface {
+	// Balance returns the current balance for account.
+	Balance(account string) (uint64, error)
+	// Transfer moves amount from one account to another with the same semantics
+	// as Ledger.Transfer, but without taking the write lock (the enclosing
+	// Atomically call already holds it).
+	Transfer(from, to string, amount uint64) error
+}
+
+// lockedLedger is the LedgerTx implementation backed by a Ledger whose write
+// lock is already held by the enclosing Atomically call.
+type lockedLedger struct{ l *Ledger }
+
+func (t lockedLedger) Balance(account string) (uint64, error) {
+	return t.l.readBalance(account)
+}
+
+func (t lockedLedger) Transfer(from, to string, amount uint64) error {
+	return t.l.transferLocked(from, to, amount)
+}
+
+// Atomically runs fn as a single critical section under the ledger write lock,
+// passing a LedgerTx view whose Balance/Transfer operate without re-locking.
+// Because every mutating Ledger method (Credit, Debit, Transfer) takes the same
+// write lock, an Atomically block is mutually exclusive with all of them: a
+// caller can safely read a balance, make a decision, and transfer without a
+// concurrent writer draining the account in between. fn's error is returned
+// unchanged.
+func (l *Ledger) Atomically(fn func(tx LedgerTx) error) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return fn(lockedLedger{l})
+}
+
 // readBalance loads an account balance from the store. A missing key means a
 // zero balance. Callers must hold at least a read lock.
 func (l *Ledger) readBalance(account string) (uint64, error) {
@@ -136,7 +176,13 @@ func (l *Ledger) Debit(account string, amount uint64) error {
 func (l *Ledger) Transfer(from, to string, amount uint64) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.transferLocked(from, to, amount)
+}
 
+// transferLocked is the unlocked body of Transfer. Callers must hold the write
+// lock (either via Transfer or via Atomically). It has the same atomic
+// batch-commit and self-transfer semantics as Transfer.
+func (l *Ledger) transferLocked(from, to string, amount uint64) error {
 	fromBalance, err := l.readBalance(from)
 	if err != nil {
 		return err

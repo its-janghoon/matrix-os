@@ -259,9 +259,18 @@ func (n *Node) Start() error {
 	// the market surface can bind independently. It is backed by the same real
 	// subsystems the node runs: the market order book/ledger, the signed
 	// settlement path over the token chain, and the P2P exchange for remote
-	// providers. When ACLs are enabled it reuses the admin authenticator so the
-	// same API keys gate the market API; otherwise it serves unauthenticated
-	// (guarding on a nil authenticator like the admin services do).
+	// providers.
+	//
+	// Auth policy (deliberate): the market API mirrors the admin server and gates
+	// on the same EnableACLs flag, which defaults to true (see Initialize). When
+	// ACLs are on it reuses the admin authenticator so the same API keys gate
+	// every non-health RPC, including the state-mutating SubmitSignedTransfer.
+	// Disabling ACLs is an explicit operator choice to run the node open (e.g. a
+	// local single-tenant dev node); even then SubmitSignedTransfer is not a theft
+	// vector because every transfer must carry a valid ed25519 signature from the
+	// sender and the sender's correct next nonce, so an unauthenticated client can
+	// only move credits it already holds the signing key for. Operators exposing a
+	// node to untrusted networks should keep ACLs enabled.
 	var marketAuth *admin.Authenticator
 	if n.config.Security.EnableACLs {
 		marketAuth = n.adminServer.GetAuthenticator()

@@ -176,9 +176,11 @@ export default function Home() {
                   transaction.
                 </p>
                 <p className='text-grayscale-300 mt-4'>
-                  Providers sign and announce their capacity and pricing over the libp2p gossip network, remote nodes
-                  discover them into a shared registry, and buyers submit signed jobs whose settlements propagate P2P
-                  and are verified before they are applied locally. An external gRPC API, the
+                  Providers sign and announce their capacity and pricing over the libp2p gossip network, and remote
+                  nodes discover them into a local registry. When a buyer settles with a provider, the signed transfer
+                  is gossiped to and verified by that specific provider node, which records it on its own chain. Each
+                  node keeps its own hash-chained ledger, so settlement is a signed, verified fact between the buyer and
+                  that one provider node rather than a shared network-wide balance. An external gRPC API, the
                   {' '}<span className='text-white font-medium'>matrix.market.v1</span> MarketService, lets buyers and
                   providers register, discover local and remote providers, submit and manage jobs, read balances and
                   transactions, and broadcast signed transfers from outside the node.

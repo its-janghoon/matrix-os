@@ -1,6 +1,7 @@
 package token
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -116,6 +117,121 @@ func TestSettledLedger_InvalidSignatureAppendsNothing(t *testing.T) {
 	}
 	if l, _ := chain.Len(); l != 0 {
 		t.Errorf("chain Len() = %d, want 0", l)
+	}
+}
+
+func TestSettledLedger_RejectsSelfTransfer(t *testing.T) {
+	settled, ledger, chain := newSettledLedger(t)
+	alice := mustAccount(t)
+
+	if err := ledger.Credit(alice.AccountID(), 100); err != nil {
+		t.Fatalf("Credit() error = %v", err)
+	}
+
+	prev, _ := chain.HeadHash()
+	tx := signedTx(t, alice, alice.AccountID(), 30, 0, prev) // From == To
+
+	_, err := settled.Settle(tx)
+	if err == nil {
+		t.Fatal("Settle() self-transfer succeeded, want error")
+	}
+	if !IsSelfTransfer(err) {
+		t.Fatalf("Settle() error = %v, want self-transfer", err)
+	}
+
+	// A self-transfer must not consume a nonce or append an empty record.
+	if l, _ := chain.Len(); l != 0 {
+		t.Errorf("chain Len() = %d, want 0 (no record for self-transfer)", l)
+	}
+	bal, _ := ledger.Balance(alice.AccountID())
+	if bal != 100 {
+		t.Errorf("alice balance = %d, want 100 (unchanged)", bal)
+	}
+}
+
+func TestSettledLedger_RejectsEmptyRecipient(t *testing.T) {
+	settled, ledger, chain := newSettledLedger(t)
+	alice := mustAccount(t)
+
+	if err := ledger.Credit(alice.AccountID(), 100); err != nil {
+		t.Fatalf("Credit() error = %v", err)
+	}
+
+	prev, _ := chain.HeadHash()
+	tx := signedTx(t, alice, "", 30, 0, prev) // empty recipient
+
+	if _, err := settled.Settle(tx); err == nil {
+		t.Fatal("Settle() with empty recipient succeeded, want error")
+	}
+	if l, _ := chain.Len(); l != 0 {
+		t.Errorf("chain Len() = %d, want 0 (no record for empty recipient)", l)
+	}
+}
+
+// TestSettledLedger_ConcurrentCompletionPreservesInvariant is the regression
+// test for the append-then-transfer race: a settlement and a direct ledger
+// transfer (the path market.CompleteJob uses) run concurrently against the same
+// funded sender. Under the old design (affordability pre-check under a separate
+// SettledLedger lock, then a lock-free window before Transfer) the direct
+// transfer could drain the sender between Settle's check and its transfer,
+// persisting a chain record whose transfer failed and breaking chain/ledger
+// consistency. Because Settle now runs the check+append+transfer as one
+// critical section under the ledger write lock, the invariant "chain length
+// equals the number of successful settlements, and every settled amount is
+// backed by a real balance movement" holds. Run under -race.
+func TestSettledLedger_ConcurrentCompletionPreservesInvariant(t *testing.T) {
+	const iterations = 200
+	for i := 0; i < iterations; i++ {
+		settled, ledger, chain := newSettledLedger(t)
+		alice := mustAccount(t)
+		bob := mustAccount(t)
+		carol := mustAccount(t)
+
+		// Fund alice with exactly enough for ONE of the two competing debits.
+		if err := ledger.Credit(alice.AccountID(), 50); err != nil {
+			t.Fatalf("Credit() error = %v", err)
+		}
+
+		prev, _ := chain.HeadHash()
+		tx := signedTx(t, alice, bob.AccountID(), 50, 0, prev)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		var settleErr error
+		go func() {
+			defer wg.Done()
+			_, settleErr = settled.Settle(tx)
+		}()
+		go func() {
+			defer wg.Done()
+			// Direct transfer mirrors market.CompleteJob draining the same account.
+			_ = ledger.Transfer(alice.AccountID(), carol.AccountID(), 50)
+		}()
+		wg.Wait()
+
+		// Invariant: the chain advanced if and only if the settlement succeeded.
+		l, _ := chain.Len()
+		if settleErr == nil && l != 1 {
+			t.Fatalf("iter %d: settle ok but chain Len()=%d, want 1", i, l)
+		}
+		if settleErr != nil && l != 0 {
+			t.Fatalf("iter %d: settle failed (%v) but chain Len()=%d, want 0 (record without transfer)", i, settleErr, l)
+		}
+
+		// Cross-check: total credits conserved (alice started with 50, the two
+		// competitors move 50 to either bob or carol, never both).
+		aliceBal, _ := ledger.Balance(alice.AccountID())
+		bobBal, _ := ledger.Balance(bob.AccountID())
+		carolBal, _ := ledger.Balance(carol.AccountID())
+		if total := aliceBal + bobBal + carolBal; total != 50 {
+			t.Fatalf("iter %d: credits not conserved: alice=%d bob=%d carol=%d total=%d, want 50",
+				i, aliceBal, bobBal, carolBal, total)
+		}
+		// And the chain must remain valid.
+		if err := chain.ValidateChain(); err != nil {
+			t.Fatalf("iter %d: ValidateChain() error = %v", i, err)
+		}
 	}
 }
 
