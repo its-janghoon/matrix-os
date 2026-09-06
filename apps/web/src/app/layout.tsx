@@ -17,7 +17,7 @@ export const metadata: Metadata = {
     template: '%s | ECIR Labs',
   },
   description:
-    'ECIR Labs is building the future of decentralized intelligence with Matrix OS: a peer-to-peer compute marketplace where idle machines earn compute credits and buyers pay for LLM compute and API responses.',
+    'ECIR Labs is building the future of decentralized intelligence with Matrix OS: a peer-to-peer compute marketplace where idle machines announce capacity over libp2p, buyers pay for LLM compute and API responses through cryptographically signed token transfers on a hash-chained transaction log, and an external gRPC API lets buyers and providers interact from outside the node.',
   keywords: [
     'ECIR Labs',
     'Matrix OS',
@@ -25,8 +25,10 @@ export const metadata: Metadata = {
     'decentralized intelligence',
     'distributed computing',
     'compute marketplace',
-    'compute credits',
+    'signed token settlement',
+    'hash-chained transaction log',
     'P2P compute',
+    'gRPC market API',
     'Matrix Protocol',
     'Soul Protocol',
   ],

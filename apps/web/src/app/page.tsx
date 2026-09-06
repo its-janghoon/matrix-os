@@ -112,8 +112,9 @@ export default function Home() {
                 </span>
                 <h2 className='text-4xl font-bold mb-4'>A Peer-to-Peer Market for Compute</h2>
                 <p className='text-xl text-grayscale-300 max-w-3xl mx-auto'>
-                  Idle machines register as compute providers and advertise capacity. Buyers submit paid compute jobs.
-                  A compute-credits ledger settles payment from buyer to provider the moment a job completes.
+                  Idle machines announce capacity and pricing across the P2P network, and buyers discover them and submit
+                  signed compute jobs. Payment settles from buyer to provider through cryptographically signed token
+                  transfers recorded on an append-only, hash-chained transaction log.
                 </p>
               </div>
 
@@ -127,13 +128,14 @@ export default function Home() {
                     <h3 className='text-2xl font-semibold'>Providers earn</h3>
                   </div>
                   <p className='text-grayscale-300 mb-6'>
-                    Leave a machine running and register it as a provider. It advertises available capacity and a price
-                    per compute unit, then earns compute credits each time a job it served completes.
+                    Leave a machine running and register it as a provider. It signs and announces available capacity and
+                    a price per compute unit across the P2P gossip network, then receives signed token transfers each
+                    time a job it served completes.
                   </p>
                   <ul className='space-y-4'>
-                    <CheckItem>Register idle capacity and set a price per unit</CheckItem>
+                    <CheckItem>Sign and announce idle capacity and a price per unit over P2P gossip</CheckItem>
                     <CheckItem>Capacity is reserved when a buyer&apos;s job is accepted</CheckItem>
-                    <CheckItem>Credits land in your ledger balance on job completion</CheckItem>
+                    <CheckItem>Signed token transfers settle to your account balance on job completion</CheckItem>
                   </ul>
                 </div>
 
@@ -146,13 +148,15 @@ export default function Home() {
                     <h3 className='text-2xl font-semibold'>Buyers pay for compute</h3>
                   </div>
                   <p className='text-grayscale-300 mb-6'>
-                    Submit a paid job for the LLM compute and API responses you need. The price is quoted up front from
-                    the provider&apos;s rate, and credits only move once the work is done.
+                    Discover providers across the P2P network and submit a signed job for the LLM compute and API
+                    responses you need. The price is quoted up front from the provider&apos;s rate, and tokens only move
+                    through a verified signed transfer once the work is done.
                   </p>
                   <ul className='space-y-4'>
-                    <CheckItem>Submit jobs priced as units &times; provider rate</CheckItem>
-                    <CheckItem>Balance is checked up front; you are charged on completion</CheckItem>
-                    <CheckItem>Cancel a pending job to release the reserved capacity</CheckItem>
+                    <CheckItem>Discover local and remote providers over the P2P network</CheckItem>
+                    <CheckItem>Submit signed jobs priced as units &times; provider rate</CheckItem>
+                    <CheckItem>Balance is checked up front; a signed transfer charges you on completion</CheckItem>
+                    <CheckItem>Interact from outside the node through the matrix.market.v1 gRPC API</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -164,26 +168,25 @@ export default function Home() {
                   <h3 className='text-xl font-semibold'>How settlement works today</h3>
                 </div>
                 <p className='text-grayscale-300'>
-                  The compute-credits ledger is implemented and shipped in the Matrix core: balances are persisted in
-                  the node&apos;s embedded key-value store, jobs move through pending, running, and completed states,
-                  and each completed job transfers credits atomically from buyer to provider. Registered providers and
-                  their open jobs are rehydrated from disk when a node restarts, so reserved capacity and pending work
-                  survive downtime.
+                  Settlement is cryptographic and shipped in the Matrix core. Each account is an ed25519 keypair, and
+                  tokens move only through transfers that are signed by the sender and recorded on an append-only,
+                  SHA-256 hash-chained transaction log persisted in the node&apos;s embedded key-value store. Every
+                  transfer is verified and chained before it is applied, nonces prevent replay, and the chain can be
+                  validated end to end to detect tampering, so a balance can change only through a valid signed
+                  transaction.
                 </p>
-              </div>
-
-              {/* Roadmap callout */}
-              <div className='mt-6 p-6 rounded-2xl border border-secondary-300/30 bg-secondary/5'>
-                <div className='flex items-center gap-2 mb-2'>
-                  <span className='px-2.5 py-0.5 text-xs font-semibold bg-secondary/20 text-secondary-300 rounded-full uppercase tracking-wide'>
-                    Roadmap
-                  </span>
-                  <span className='text-sm text-grayscale-400'>Not yet implemented</span>
-                </div>
-                <p className='text-grayscale-300'>
-                  Settlement runs on <span className='text-white font-medium'>internal compute credits</span> today.
-                  A live cryptocurrency token and on-chain payment for cross-network settlement are planned roadmap
-                  items&mdash;there is no live token yet.
+                <p className='text-grayscale-300 mt-4'>
+                  Providers sign and announce their capacity and pricing over the libp2p gossip network, remote nodes
+                  discover them into a shared registry, and buyers submit signed jobs whose settlements propagate P2P
+                  and are verified before they are applied locally. An external gRPC API, the
+                  {' '}<span className='text-white font-medium'>matrix.market.v1</span> MarketService, lets buyers and
+                  providers register, discover local and remote providers, submit and manage jobs, read balances and
+                  transactions, and broadcast signed transfers from outside the node.
+                </p>
+                <p className='text-grayscale-400 mt-4 text-sm'>
+                  Settlement is on-node and peer-to-peer between participating Matrix nodes. There is no public mainnet
+                  or exchange listing; the signed token, hash-chained transaction log, and P2P exchange described here
+                  are what runs in the node today.
                 </p>
               </div>
             </div>
