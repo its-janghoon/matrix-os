@@ -38,6 +38,9 @@ jobs:
     - name: Install dependencies
       working-directory: apps/web
       run: corepack yarn install --frozen-lockfile
+    - name: Lint
+      working-directory: apps/web
+      run: corepack yarn lint
     - name: Build
       working-directory: apps/web
       run: corepack yarn build
