@@ -14,7 +14,7 @@ document describes the layout and how to build and test each piece.
 - [`services/core`](services/core/README.md) — Matrix Core, the Go P2P daemon that turns any machine into a Matrix node.
 - [`proto`](proto/README.md) — Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
 - [`apps/web`](apps/web) — the Next.js marketing website (ecirlabs-web).
-- [`apps/console`](apps/console/README.md) — Matrix Console, the docs and future Tauri desktop app.
+- [`apps/console`](apps/console/README.md) — Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
 - [`contracts`](contracts/README.md) — the Hardhat project for MATRIX, the ERC-20 settlement and earning token of the compute marketplace.
 
 ## Repository tooling
@@ -51,6 +51,21 @@ corepack yarn install --frozen-lockfile
 corepack yarn lint
 corepack yarn build
 ```
+
+### Console — `apps/console`
+
+```sh
+cd apps/console
+corepack yarn install
+corepack yarn build   # tsc --noEmit && vite build -> dist/
+corepack yarn dev     # Vite dev server on http://localhost:5173
+```
+
+The console is a Tauri + React + Vite desktop app. The web frontend builds and
+runs everywhere; the native desktop bundle (`corepack yarn tauri build`)
+additionally needs the WebKitGTK/libsoup system libraries. See the
+[console README](apps/console/README.md) for the connection configuration and
+the documented native-build limitation.
 
 ### Contracts — `contracts`
 

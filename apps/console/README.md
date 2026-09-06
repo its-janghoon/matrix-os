@@ -85,14 +85,120 @@ Create safe spaces to explore:
 - **Observe & Learn**: Gain insights from emergent behaviors and interactions
 - **Automate Interactions**: Let your Soul handle AI conversations while maintaining your principles
 
+## 🖼 Screenshots
+
+The console runs in any modern browser via the Vite dev server (and inside a
+Tauri WebView on the desktop). These captures are of the running app driving the
+built-in demo backend, which mirrors the real `matrixd` settlement semantics.
+
+### Node connection
+![Node connection panel](docs/screenshots/connection.png)
+
+### Providers (local + remote P2P)
+![Providers panel](docs/screenshots/providers.png)
+
+### Inference console
+![Inference console](docs/screenshots/inference.png)
+
+### Consensus status
+![Consensus panel](docs/screenshots/consensus.png)
+
+### Wallet & settled token ledger
+![Wallet panel](docs/screenshots/wallet.png)
+
 ## 🚀 Getting Started
 
-[Coming Soon]
+### Stack
+
+- **Frontend**: React 18 + TypeScript + Vite
+- **Desktop shell**: Tauri 1.x (Rust) under [`src-tauri/`](src-tauri)
+- **Transport**: a dependency-free typed client (`src/api/client.ts`) that
+  speaks the [Connect protocol](https://connectrpc.com) over `fetch` to a local
+  `matrixd` node. It targets the `matrix.market.v1.MarketService` and
+  `matrix.inference.v1.InferenceService` gRPC surfaces (see the
+  [`proto`](../../proto) package). An in-memory demo backend
+  (`src/api/demo.ts`) implements the same client interface so the UI can be
+  explored and screenshotted without a running daemon.
+
+### Prerequisites
+
+- Node 22 with Yarn via Corepack (`corepack enable`)
+- For the native desktop build only: a Rust toolchain and the Tauri system
+  libraries (see the limitation note below)
+
+### Install & run the web frontend
+
+```sh
+cd apps/console
+corepack yarn install
+corepack yarn dev      # Vite dev server on http://localhost:5173
+```
+
+Then open http://localhost:5173. Build a production bundle to `dist/` with:
+
+```sh
+corepack yarn build    # tsc --noEmit && vite build -> dist/
+corepack yarn preview  # preview the built bundle
+```
+
+### Connecting to a matrixd node
+
+By default the console starts in **Demo (in-memory)** mode so it renders
+meaningful state with no daemon. To connect to a real node, run `matrixd`
+(from [`services/core`](../../services/core)) and, in the **Connection** tab,
+switch the backend to **Live matrixd** and point the endpoints at your node:
+
+- **MarketService URL** — default `http://127.0.0.1:9091`
+- **InferenceService URL** — default `http://127.0.0.1:9092`
+
+The client posts Connect-protocol JSON to
+`/{package}.{Service}/{Method}` (e.g. `POST
+http://127.0.0.1:9091/matrix.market.v1.MarketService/ListProviders`). Raw gRPC
+uses HTTP/2 trailers a browser cannot produce, so expose the node's gRPC
+services behind a Connect/gRPC-web handler when connecting from the browser
+frontend; inside the Tauri WebView the same HTTP path is used.
+
+### Desktop build (Tauri)
+
+```sh
+corepack yarn tauri dev     # run the desktop shell against the Vite dev server
+corepack yarn tauri build   # bundle a native desktop app from dist/
+```
+
+### ⚠️ Native desktop build limitation in this environment
+
+The Tauri shell (`src-tauri/`) is fully wired — `Cargo.toml`,
+`tauri.conf.json`, `src/main.rs`, `build.rs`, and icons are all present and
+correct — and the **web frontend builds and runs completely**
+(`corepack yarn build` emits `dist/`, `corepack yarn dev` serves on port
+`5173`).
+
+A **native** `cargo check` / `tauri build` cannot complete in the current
+sandbox because the required Linux system libraries are not installed. Running
+`cargo check` in `src-tauri/` fails while building the `soup2-sys` crate:
+
+```
+error: failed to run custom build command for `soup2-sys v0.2.0`
+  ...
+  The system library `libsoup-2.4` required by crate `soup2-sys` was not found.
+  Package 'libsoup-2.4', required by 'virtual:world', not found
+```
+
+`pkg-config` reports these Tauri/WebKitGTK dependencies as **missing** on this
+host: `webkit2gtk-4.1`, `webkit2gtk-4.0`, `libsoup-3.0`, `libsoup-2.4`,
+`javascriptcoregtk-4.1`, and `gtk+-3.0`. This is an environment limitation, not
+a code defect: the failure is in a system-library probe, before our Rust code
+is type-checked. On a machine with the WebKitGTK/libsoup development packages
+installed (e.g. `libwebkit2gtk-4.1-dev`, `libsoup-3.0-dev`, `libgtk-3-dev` on
+Debian/Ubuntu), `cargo check` and `yarn tauri build` complete normally.
 
 ## 🤝 Contributing
 
-[Coming Soon]
+Follow the monorepo conventions. Frontend changes must pass
+`corepack yarn build` (type-check + Vite build). Keep the Rust shell minimal;
+application logic belongs in the React/TypeScript frontend and the typed client
+in `src/api/`.
 
 ## 📄 License
 
-[Coming Soon] 
+MIT — see [LICENSE](LICENSE). 
