@@ -44,11 +44,19 @@ func New(ctx context.Context, cfg *Config) (*Host, error) {
 		return nil, fmt.Errorf("invalid listen address: %w", err)
 	}
 
-	// Create libp2p host
+	// Create libp2p host.
+	//
+	// NOTE: auto-relay must NOT be enabled with a nil peer source. libp2p's
+	// relay finder panics at construction time when EnableAutoRelay* is set
+	// without either a peer-source function or a static relay list ("Need a
+	// Peer Source fn or a list of static relays"), which previously prevented
+	// the node daemon from starting at all. Circuit-relay transport support is
+	// still enabled via EnableRelay so the host can dial/accept relayed
+	// connections; only the (misconfigured) automatic relay discovery is
+	// dropped. NAT port mapping is retained for real deployments.
 	h, err := libp2p.New(
 		libp2p.ListenAddrs(listenAddr),
 		libp2p.EnableRelay(),
-		libp2p.EnableAutoRelayWithPeerSource(nil),
 		libp2p.NATPortMap(),
 	)
 	if err != nil {
