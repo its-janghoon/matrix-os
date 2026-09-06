@@ -6,20 +6,32 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /**
- * @title Matrix Compute Token (MATRIX)
- * @notice The settlement and earning currency of the Matrix OS compute
- *         marketplace. Buyers pay for LLM compute and API responses in MATRIX,
- *         and providers who contribute compute earn MATRIX.
+ * @title Matrix Compute Token (MATRIX) - a wrapped mirror of native MATRIX
+ * @notice A standards-compliant ERC-20 MIRROR of native MATRIX for Ethereum.
+ *         MATRIX is native-first: the canonical coin lives on the Matrix OS
+ *         consensus L1 (9 decimals) and is the single source of truth for
+ *         balances and supply. All marketplace compute and LLM inference
+ *         settlement happens in NATIVE MATRIX on the L1 via consensus, NOT in
+ *         this ERC-20. This token is a wrapped/bridged representation intended
+ *         for a future exchange listing, not the primary settlement currency.
  *
  * @dev Inherits OpenZeppelin's audited ERC20 implementation for the full
  *      standard interface (name, symbol, decimals, totalSupply, balanceOf,
  *      transfer, approve, transferFrom, allowance) and the Transfer/Approval
  *      events. ERC20Permit adds EIP-2612 gasless approvals. Ownable gates the
- *      mint function so new supply (used to back marketplace earnings) can only
- *      be created by the controlled owner, and never beyond MAX_SUPPLY.
+ *      mint function so wrapped supply is created only by the controlled owner,
+ *      and never beyond MAX_SUPPLY.
  *
  *      Decimals are 18 (the ERC20 default), matching common exchange
  *      expectations so the token can later be listed.
+ *
+ *      Relationship to WrappedMatrix.sol: this MatrixToken is the original,
+ *      owner-minted ERC-20 mirror (kept for its existing deploy/test surface and
+ *      EIP-2612 permit support). The lock-and-mint BRIDGE uses WrappedMatrix.sol
+ *      (wMATRIX) instead, whose supply is minted/burned ONLY through verified
+ *      validator attestations of native locks/burns so it stays backed 1:1 by
+ *      locked native MATRIX. Both tell the same native-first, wrapped-mirror
+ *      monetary story; WrappedMatrix is the bridge-enforced variant.
  */
 contract MatrixToken is ERC20, ERC20Permit, Ownable {
     /// @notice Hard cap on total supply. Minting can never exceed this amount.
@@ -57,7 +69,9 @@ contract MatrixToken is ERC20, ERC20Permit, Ownable {
     }
 
     /**
-     * @notice Owner-only mint used to back marketplace earnings for providers.
+     * @notice Owner-only mint for this wrapped mirror. Native MATRIX earnings
+     *         are settled on the L1; minting here only issues the wrapped ERC-20
+     *         representation.
      * @dev Reverts if the new total supply would exceed MAX_SUPPLY.
      * @param to Recipient of the newly minted tokens.
      * @param amount Amount to mint (scaled by 10**18).
