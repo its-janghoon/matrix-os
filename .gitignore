@@ -61,3 +61,8 @@ Thumbs.db
 .idea/
 *.swp
 *.swo
+
+# ---- Agent scratch ----
+# Task handoffs, transcripts and review notes. Working artifacts of whoever ran
+# the task, not part of the project, so they stay local.
+.agents/
