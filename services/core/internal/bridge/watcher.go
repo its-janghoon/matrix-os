@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"sync"
@@ -21,16 +22,47 @@ import (
 // ultimately be agreed by consensus; running a Watcher on a single node is the
 // correct model for a solo/dev node or an operator-run relayer, and is what the
 // hardhat-backed test exercises. The operator supplies the endpoint URL, the
-// WrappedMatrix contract address, and the start block (see cmd/matrixd wiring or
-// an operator script); the Watcher does the rest.
+// WrappedMatrix contract address, and the start block (via the matrixd
+// bridge.watch config section, which constructs and runs this Watcher against
+// the node's own ledger, or via cmd/bridge-watch out of process); the Watcher
+// does the rest.
 
-// RESUME BEHAVIOR (honest): the Watcher does NOT persist its cursor. On start it
-// always resumes from StartBlock and re-scans the range from there. That re-scan
-// is harmless: ProcessBurn is replay-protected per burn id, so a re-observed burn
-// returns ErrBurnAlreadyProcessed and applyLog treats it as a benign no-op. A
-// persisted cursor (to skip redundant work across restarts) is not wired in here;
-// WatcherConfig exposes no Store field, and correctness never depends on one.
+// RESUME BEHAVIOR: where the watcher resumes depends on whether a cursor Store
+// is supplied.
 //
+//	Store == nil: the cursor lives in memory only. On start the watcher scans
+//	from StartBlock and a restart re-scans that whole range. Harmless but
+//	wasteful, and unbounded for a contract deployed far behind head.
+//
+//	Store != nil: the cursor is persisted (CursorKey, default
+//	bridge/watch_cursor) after each scanned span, so a restart resumes at the
+//	next unscanned block instead of re-scanning. The persisted cursor never
+//	rewinds the watcher behind StartBlock, so raising StartBlock in config can
+//	skip ahead but a stale cursor can never pull it back.
+//
+// Either way correctness does not depend on the cursor: it is written AFTER the
+// span's burns are applied, so a crash between apply and write re-observes those
+// burns, and ProcessBurn's per-id replay guard makes a re-observed burn return
+// ErrBurnAlreadyProcessed, which applyLog treats as a benign no-op. The cursor
+// is a redundant-work optimization, never the thing that prevents a double
+// unlock.
+
+// watcherCursorKey is the default KV key the Watcher persists its scan cursor
+// under when a Store is supplied. It lives in the same bridge/* namespace as the
+// rest of the bridge's bookkeeping (see bridge.go).
+const watcherCursorKey = "bridge/watch_cursor"
+
+// CursorStore is the minimal key/value surface the Watcher needs to persist its
+// scan cursor across restarts. *kv.Store satisfies it; keeping it an interface
+// means the bridge does not import internal/kv for this and the persistence path
+// is unit-testable with an in-memory map.
+type CursorStore interface {
+	// Get returns the value for key, or nil if the key is absent.
+	Get(key []byte) ([]byte, error)
+	// Put stores value under key.
+	Put(key, value []byte) error
+}
+
 // Applier is the subset of *Bridge the Watcher needs to apply a decoded burn. It
 // is an interface so the Watcher can be unit-tested with a recording fake and so
 // the dependency is explicit.
@@ -48,10 +80,20 @@ type WatcherConfig struct {
 	// Contract is the WrappedMatrix contract address whose Burned events are
 	// watched (required).
 	Contract Address
-	// StartBlock is the first block to scan. Scanning always begins here on
-	// start; the watcher does not persist a cursor, so a restart re-scans from
-	// StartBlock (harmless, since ProcessBurn dedups by burn id).
+	// StartBlock is the earliest block to scan. Scanning begins here unless a
+	// Store holds a persisted cursor further ahead, in which case it resumes
+	// there (the cursor never rewinds the watcher behind StartBlock).
 	StartBlock uint64
+	// Store, when non-nil, persists the scan cursor so a restart resumes at the
+	// next unscanned block instead of re-scanning from StartBlock. It is a
+	// redundant-work optimization, never a correctness requirement: ProcessBurn
+	// dedups by burn id, so a re-scan is a benign no-op. When nil the cursor is
+	// in-memory only. See RESUME BEHAVIOR above.
+	Store CursorStore
+	// CursorKey overrides the KV key the cursor is persisted under. Empty uses
+	// watcherCursorKey. Set it when one store hosts watchers for more than one
+	// contract, so their cursors do not overwrite each other.
+	CursorKey string
 	// Confirmations is how many blocks behind head the watcher stays before
 	// treating a block as final, to avoid acting on a reorged burn. Zero means
 	// act on the latest block (fine for a local hardhat chain with instant
@@ -84,6 +126,8 @@ type Watcher struct {
 	maxBlockSpan  uint64
 	onBurn        func(DecodedBurn)
 	onError       func(error)
+	store         CursorStore
+	cursorKey     string
 
 	mu   sync.Mutex
 	next uint64 // next block to scan
@@ -105,6 +149,24 @@ func NewWatcher(cfg WatcherConfig) (*Watcher, error) {
 	if span == 0 {
 		span = 2000
 	}
+	cursorKey := cfg.CursorKey
+	if cursorKey == "" {
+		cursorKey = watcherCursorKey
+	}
+	// Resume from the persisted cursor when one is available and ahead of
+	// StartBlock. A cursor behind StartBlock is ignored rather than honoured, so
+	// an operator who raises StartBlock in config always skips forward and a
+	// stale cursor can never drag the scan back to a range they excluded.
+	next := cfg.StartBlock
+	if cfg.Store != nil {
+		saved, err := loadWatcherCursor(cfg.Store, cursorKey)
+		if err != nil {
+			return nil, err
+		}
+		if saved > next {
+			next = saved
+		}
+	}
 	return &Watcher{
 		client:        cfg.Client,
 		bridge:        cfg.Bridge,
@@ -114,8 +176,40 @@ func NewWatcher(cfg WatcherConfig) (*Watcher, error) {
 		maxBlockSpan:  span,
 		onBurn:        cfg.OnBurn,
 		onError:       cfg.OnError,
-		next:          cfg.StartBlock,
+		store:         cfg.Store,
+		cursorKey:     cursorKey,
+		next:          next,
 	}, nil
+}
+
+// loadWatcherCursor reads the persisted next-block-to-scan cursor, treating an
+// absent key as zero (no cursor recorded yet).
+func loadWatcherCursor(store CursorStore, key string) (uint64, error) {
+	data, err := store.Get([]byte(key))
+	if err != nil {
+		return 0, fmt.Errorf("bridge: read watcher cursor %q: %w", key, err)
+	}
+	if data == nil {
+		return 0, nil
+	}
+	if len(data) != 8 {
+		return 0, fmt.Errorf("bridge: corrupt watcher cursor %q: expected 8 bytes, got %d", key, len(data))
+	}
+	return binary.BigEndian.Uint64(data), nil
+}
+
+// saveCursor persists the next block to scan. It is a no-op when no Store was
+// configured.
+func (w *Watcher) saveCursor(next uint64) error {
+	if w.store == nil {
+		return nil
+	}
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, next)
+	if err := w.store.Put([]byte(w.cursorKey), buf); err != nil {
+		return fmt.Errorf("bridge: persist watcher cursor %q: %w", w.cursorKey, err)
+	}
+	return nil
 }
 
 // Cursor returns the next block the watcher will scan from.
@@ -199,12 +293,19 @@ func (w *Watcher) Poll(ctx context.Context) (int, error) {
 			}
 			applied += n
 		}
-		// Advance the in-memory cursor past the scanned range so the next poll in
-		// this process continues forward. It is not persisted: a fresh process
-		// starts again from StartBlock (see RESUME BEHAVIOR above).
+		// Advance the cursor past the scanned range so the next poll continues
+		// forward, then persist it if a Store was configured. Persisting AFTER the
+		// span's burns are applied keeps the failure mode at-least-once (a crash
+		// here re-scans the span, which ProcessBurn dedups) rather than
+		// at-most-once (which could skip an unapplied burn). A failed cursor write
+		// is reported but never stops the relay: the in-memory cursor has already
+		// advanced and the worst outcome is a re-scan after restart.
 		w.mu.Lock()
 		w.next = to + 1
 		w.mu.Unlock()
+		if err := w.saveCursor(to + 1); err != nil {
+			w.reportError(err)
+		}
 		from = to + 1
 	}
 	return applied, nil

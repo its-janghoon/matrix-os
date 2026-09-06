@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync"
 	"testing"
@@ -232,5 +233,222 @@ func TestParseHexUint(t *testing.T) {
 	}
 	if _, err := parseHexUint("0xzz"); err == nil {
 		t.Fatalf("expected error for invalid hex")
+	}
+}
+
+// memCursorStore is an in-memory CursorStore for exercising the Watcher's
+// persistence path without a pebble store.
+type memCursorStore struct {
+	mu   sync.Mutex
+	data map[string][]byte
+	// putErr, when set, fails every Put so the "cursor write failure must not
+	// stop the relay" behavior can be asserted.
+	putErr error
+}
+
+func newMemCursorStore() *memCursorStore {
+	return &memCursorStore{data: map[string][]byte{}}
+}
+
+func (m *memCursorStore) Get(key []byte) ([]byte, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.data[string(key)]
+	if !ok {
+		return nil, nil
+	}
+	return v, nil
+}
+
+func (m *memCursorStore) Put(key, value []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.putErr != nil {
+		return m.putErr
+	}
+	m.data[string(key)] = append([]byte(nil), value...)
+	return nil
+}
+
+// TestWatcher_PersistsCursorAndResumesWithoutRescanning proves the persisted
+// cursor does the job it exists for: a fresh Watcher over the same store starts
+// at the next unscanned block, so a restart does NOT re-request the already
+// scanned range. Asserting on the fake client's getLogs call count (and on the
+// range it is asked for) is what makes this a real test of the optimization
+// rather than just of the stored number.
+func TestWatcher_PersistsCursorAndResumesWithoutRescanning(t *testing.T) {
+	br, ledger := newWatcherTestBridge(t, 100)
+	recipient, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	recipientID := recipient.AccountID()
+
+	var burner Address
+	burner[19] = 0xcd
+	fake := &fakeEthClient{
+		head: 5,
+		logsByBlock: map[uint64][]EthLog{
+			3: {makeBurnedLog(t, burner, recipientID, token.NativeToERC20(7), "0xfeed", 0)},
+		},
+	}
+	store := newMemCursorStore()
+
+	// First process: scan [0,5], apply the burn, persist the cursor at 6.
+	first, err := NewWatcher(WatcherConfig{
+		Client:     fake,
+		Bridge:     br,
+		StartBlock: 0,
+		Store:      store,
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher (first): %v", err)
+	}
+	if applied, err := first.Poll(context.Background()); err != nil || applied != 1 {
+		t.Fatalf("first Poll = (%d, %v), want (1, nil)", applied, err)
+	}
+	if first.Cursor() != 6 {
+		t.Fatalf("first cursor = %d, want 6", first.Cursor())
+	}
+	if bal, _ := ledger.Balance(recipientID); bal != 7 {
+		t.Fatalf("recipient balance = %d, want 7", bal)
+	}
+
+	// A restart: a brand new Watcher over the same store, still configured with
+	// StartBlock 0. Without persistence it would resume at 0 and re-scan.
+	second, err := NewWatcher(WatcherConfig{
+		Client:     fake,
+		Bridge:     br,
+		StartBlock: 0,
+		Store:      store,
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher (second): %v", err)
+	}
+	if second.Cursor() != 6 {
+		t.Fatalf("resumed cursor = %d, want 6 (persisted), not 0 (StartBlock)", second.Cursor())
+	}
+
+	// Nothing final is left to scan (head is 5, cursor is 6), so the resumed
+	// watcher issues no getLogs call at all: the re-scan is genuinely skipped.
+	callsBefore := fake.getLogsCall
+	if applied, err := second.Poll(context.Background()); err != nil || applied != 0 {
+		t.Fatalf("resumed Poll = (%d, %v), want (0, nil)", applied, err)
+	}
+	if fake.getLogsCall != callsBefore {
+		t.Fatalf("resumed watcher issued %d getLogs call(s); want 0 (nothing to re-scan)",
+			fake.getLogsCall-callsBefore)
+	}
+
+	// New blocks arrive: the resumed watcher scans forward from 6, never back
+	// over the already-applied range.
+	fake.mu.Lock()
+	fake.head = 8
+	fake.logsByBlock[7] = []EthLog{makeBurnedLog(t, burner, recipientID, token.NativeToERC20(3), "0xbeef", 0)}
+	fake.mu.Unlock()
+
+	if applied, err := second.Poll(context.Background()); err != nil || applied != 1 {
+		t.Fatalf("forward Poll = (%d, %v), want (1, nil)", applied, err)
+	}
+	if bal, _ := ledger.Balance(recipientID); bal != 10 {
+		t.Fatalf("recipient balance = %d, want 10 (7 + 3, each burn applied once)", bal)
+	}
+	if second.Cursor() != 9 {
+		t.Fatalf("cursor after forward scan = %d, want 9", second.Cursor())
+	}
+}
+
+// TestWatcher_PersistedCursorNeverRewindsBehindStartBlock asserts a stale cursor
+// cannot drag the scan back into a range the operator deliberately excluded by
+// raising start_block: the watcher takes whichever is further ahead.
+func TestWatcher_PersistedCursorNeverRewindsBehindStartBlock(t *testing.T) {
+	br, _ := newWatcherTestBridge(t, 100)
+	fake := &fakeEthClient{head: 100}
+	store := newMemCursorStore()
+	if err := store.Put([]byte(watcherCursorKey), encodeU64(10)); err != nil {
+		t.Fatalf("seed cursor: %v", err)
+	}
+
+	// Operator raised start_block past the stale cursor: start_block wins.
+	ahead, err := NewWatcher(WatcherConfig{Client: fake, Bridge: br, StartBlock: 50, Store: store})
+	if err != nil {
+		t.Fatalf("NewWatcher (ahead): %v", err)
+	}
+	if ahead.Cursor() != 50 {
+		t.Fatalf("cursor = %d, want 50 (StartBlock ahead of stale cursor)", ahead.Cursor())
+	}
+
+	// Cursor ahead of start_block: the cursor wins (normal resume).
+	behind, err := NewWatcher(WatcherConfig{Client: fake, Bridge: br, StartBlock: 5, Store: store})
+	if err != nil {
+		t.Fatalf("NewWatcher (behind): %v", err)
+	}
+	if behind.Cursor() != 10 {
+		t.Fatalf("cursor = %d, want 10 (persisted cursor ahead of StartBlock)", behind.Cursor())
+	}
+}
+
+// TestWatcher_CorruptPersistedCursorIsRejected asserts a truncated cursor value
+// fails construction loudly rather than being silently read as some other block
+// height, which would silently skip or re-scan an arbitrary range.
+func TestWatcher_CorruptPersistedCursorIsRejected(t *testing.T) {
+	br, _ := newWatcherTestBridge(t, 0)
+	store := newMemCursorStore()
+	if err := store.Put([]byte(watcherCursorKey), []byte{0x01, 0x02}); err != nil {
+		t.Fatalf("seed corrupt cursor: %v", err)
+	}
+	if _, err := NewWatcher(WatcherConfig{Client: &fakeEthClient{}, Bridge: br, Store: store}); err == nil {
+		t.Fatal("expected NewWatcher to reject a corrupt persisted cursor")
+	}
+}
+
+// TestWatcher_CursorWriteFailureDoesNotStopRelay asserts the relay keeps
+// applying burns when the cursor cannot be persisted. The cursor is an
+// optimization, so losing it must degrade to "re-scan after restart", never to
+// "stop relaying" or "skip a burn".
+func TestWatcher_CursorWriteFailureDoesNotStopRelay(t *testing.T) {
+	br, ledger := newWatcherTestBridge(t, 100)
+	recipient, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	recipientID := recipient.AccountID()
+
+	var burner Address
+	fake := &fakeEthClient{
+		head: 4,
+		logsByBlock: map[uint64][]EthLog{
+			2: {makeBurnedLog(t, burner, recipientID, token.NativeToERC20(6), "0x0bad", 0)},
+		},
+	}
+	store := newMemCursorStore()
+	store.putErr = errors.New("disk full")
+
+	var reported []error
+	w, err := NewWatcher(WatcherConfig{
+		Client:  fake,
+		Bridge:  br,
+		Store:   store,
+		OnError: func(e error) { reported = append(reported, e) },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+	applied, err := w.Poll(context.Background())
+	if err != nil {
+		t.Fatalf("Poll must not fail on a cursor write error: %v", err)
+	}
+	if applied != 1 {
+		t.Fatalf("applied = %d, want 1 (burn applied despite cursor write failure)", applied)
+	}
+	if bal, _ := ledger.Balance(recipientID); bal != 6 {
+		t.Fatalf("recipient balance = %d, want 6", bal)
+	}
+	if len(reported) == 0 {
+		t.Fatal("expected the cursor write failure to be reported via OnError")
+	}
+	// In-memory cursor still advanced, so this process does not re-scan.
+	if w.Cursor() != 5 {
+		t.Fatalf("cursor = %d, want 5 (in-memory advance survives a failed write)", w.Cursor())
 	}
 }
