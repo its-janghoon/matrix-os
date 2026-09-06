@@ -10,27 +10,15 @@
     "lint": "next lint"
   },
   "dependencies": {
-    "@react-three/drei": "^10.0.6",
     "@react-three/fiber": "^9.1.2",
-    "@react-three/postprocessing": "^3.0.4",
-    "@types/marked": "^5.0.2",
     "clsx": "^2.1.1",
     "framer-motion": "^12.7.3",
-    "github-markdown-css": "^5.8.1",
-    "gray-matter": "^4.0.3",
-    "gsap": "^3.12.7",
     "lucide-react": "^0.501.0",
-    "marked": "^15.0.11",
-    "next": "^15.3.1",
+    "next": "^15.5.25",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-icons": "^5.5.0",
-    "remark": "^15.0.1",
-    "remark-breaks": "^4.0.0",
-    "remark-gfm": "^4.0.1",
-    "remark-html": "^16.0.1",
     "sonner": "^2.0.3",
-    "swiper": "^11.2.6",
     "three": "^0.175.0"
   },
   "devDependencies": {
@@ -42,9 +30,12 @@
     "@types/react-dom": "^19",
     "autoprefixer": "^10.4.21",
     "eslint": "^9",
-    "eslint-config-next": "15.3.0",
+    "eslint-config-next": "15.5.25",
     "postcss": "^8.5.3",
     "tailwindcss": "^4.1.5",
     "typescript": "^5"
+  },
+  "resolutions": {
+    "postcss": "^8.5.28"
   }
 }
