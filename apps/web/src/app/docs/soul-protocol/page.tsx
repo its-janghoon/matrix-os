@@ -16,11 +16,11 @@ export default function SoulProtocol() {
       <Navigation />
       <div className='min-h-screen bg-black'>
         <div className='pt-16'>
-          <div className='flex'>
+          <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
             {/* Main Content */}
-            <main className='flex-1 ml-64 p-8'>
+            <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
               <div className='max-w-4xl mx-auto'>
                 <article className='text-gray-100'>
                   {/* Hero Section */}

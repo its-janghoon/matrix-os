@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from 'react';
 import { FiChevronDown } from 'react-icons/fi';
 import { Button } from './Button';
 import { BrandMark } from '@/components/BrandMark';
+import { GITHUB_URL } from '@/lib/releases';
 
 type NavLink = { label: string; href: string; description?: string; external?: boolean };
 type NavMenu = { label: string; href?: string; links?: NavLink[] };
@@ -31,7 +32,7 @@ const resourceLinks: NavLink[] = [
   { label: 'Matrix Protocol', href: '/docs/matrix-protocol' },
   { label: 'Soul Protocol', href: '/docs/soul-protocol' },
   { label: 'Download', href: '/download' },
-  { label: 'GitHub', href: 'https://github.com/ecirlabs/matrix-core', external: true },
+  { label: 'GitHub', href: GITHUB_URL, external: true },
 ];
 
 const menus: NavMenu[] = [
@@ -191,7 +192,7 @@ export default function Navigation() {
           {/* Secondary Nav */}
           <div className='flex items-center gap-3'>
             <a
-              href='https://github.com/ecirlabs/matrix-core'
+              href={GITHUB_URL}
               className='hidden sm:inline-flex text-grayscale-300 hover:text-white transition-colors'
               target='_blank'
               rel='noopener noreferrer'
@@ -267,7 +268,7 @@ export default function Navigation() {
 
               <div className='mt-3 flex items-center gap-4 border-t border-white/10 pt-4'>
                 <a
-                  href='https://github.com/ecirlabs/matrix-core'
+                  href={GITHUB_URL}
                   className='text-grayscale-300 hover:text-white transition-colors'
                   target='_blank'
                   rel='noopener noreferrer'

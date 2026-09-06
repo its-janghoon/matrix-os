@@ -1,5 +1,8 @@
 import Link from 'next/link';
 
+import { BrandMark } from '@/components/BrandMark';
+import { GITHUB_URL } from '@/lib/releases';
+
 const columns: { title: string; links: { label: string; href: string; external?: boolean }[] }[] = [
   {
     title: 'Products',
@@ -30,7 +33,7 @@ const columns: { title: string; links: { label: string; href: string; external?:
       { label: 'Matrix Protocol', href: '/docs/matrix-protocol' },
       { label: 'Soul Protocol', href: '/docs/soul-protocol' },
       { label: 'Download', href: '/download' },
-      { label: 'GitHub', href: 'https://github.com/ecirlabs/matrix-core', external: true },
+      { label: 'GitHub', href: GITHUB_URL, external: true },
     ],
   },
 ];
@@ -42,19 +45,23 @@ export function Footer() {
       <div className='mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 py-16'>
         <div className='grid grid-cols-2 gap-10 md:grid-cols-5'>
           <div className='col-span-2'>
-            <div className='flex items-center'>
-              <div className='h-10 w-10 rounded-xl bg-decorative-1 flex items-center justify-center shadow-glow'>
-                <span className='text-[11px] font-bold text-white tracking-wider'>ECIR</span>
-              </div>
-              <span className='ml-3 text-lg font-semibold text-white tracking-tight'>Matrix</span>
-            </div>
+            {/* The same mark and wordmark as the header. This used to be a
+                rounded square with the letters ECIR in it - a placeholder that
+                outlived the brand and left the footer showing something the
+                rest of the site had stopped using. */}
+            <Link href='/' className='flex items-center gap-2.5' aria-label='Matrix OS, home'>
+              <BrandMark size={36} className='shrink-0' />
+              <span className='text-lg font-semibold tracking-tight text-white'>
+                Matrix <span className='text-secondary-400'>OS</span>
+              </span>
+            </Link>
             <p className='mt-4 max-w-sm text-sm leading-relaxed text-grayscale-400'>
               A peer-to-peer marketplace for compute and LLM inference, settled in native MATRIX on a fast
               leader-based BFT Layer 1. Own your execution, keep data local, and transact in one coin end to end.
             </p>
             <div className='mt-6 flex items-center gap-4'>
               <a
-                href='https://github.com/ecirlabs/matrix-core'
+                href={GITHUB_URL}
                 target='_blank'
                 rel='noopener noreferrer'
                 className='text-grayscale-400 hover:text-white transition-colors'

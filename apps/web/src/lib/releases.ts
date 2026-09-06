@@ -11,6 +11,18 @@
  */
 export const REPO = 'savagemanage/matrix-os';
 
+/**
+ * The repository's web URL, used by every link on the site that points at the
+ * source.
+ *
+ * It is one constant because it used to be thirteen literals pointing at
+ * github.com/ecirlabs/matrix-core - a different repository from the one this
+ * page reads releases from, and from the one the install commands clone. A
+ * reader who followed a "GitHub" link landed somewhere that could not produce
+ * the binaries the site was offering.
+ */
+export const GITHUB_URL = `https://github.com/${REPO}`;
+
 /** Platforms the release workflow builds for, in display order. */
 export const TARGETS = [
   { goos: 'linux', goarch: 'amd64', os: 'Linux', arch: 'x64' },

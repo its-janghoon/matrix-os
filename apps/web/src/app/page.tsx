@@ -17,6 +17,7 @@ import {
   FiShoppingCart,
   FiTerminal,
 } from 'react-icons/fi';
+import { GITHUB_URL } from '@/lib/releases';
 
 // The copy-paste quickstart: build the daemon + CLI, boot a local dev node, and
 // run the one-command zero-to-first-job loop. These commands match exactly what
@@ -89,7 +90,7 @@ export default function Home() {
               <div className='mb-6 flex flex-wrap items-center justify-center gap-2'>
                 <Eyebrow>v0.1.0-alpha</Eyebrow>
                 <a
-                  href='https://github.com/ecirlabs/matrix-core'
+                  href={GITHUB_URL}
                   className='inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-grayscale-300 transition-colors hover:border-white/20 hover:text-white'
                 >
                   Star on GitHub

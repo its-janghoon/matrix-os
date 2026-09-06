@@ -10,7 +10,8 @@
     "lint": "eslint",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "responsive": "node scripts/responsive-check.mjs"
   },
   "dependencies": {
     "clsx": "^2.1.1",

@@ -10,11 +10,11 @@ export default function Docs() {
       <div className='min-h-screen bg-black'>
         <div className='pt-16'>
           {/* Documentation Layout */}
-          <div className='flex'>
+          <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
             {/* Main Content Area */}
-            <main className='flex-1 ml-64 p-8'>
+            <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
               <div className='max-w-4xl mx-auto'>
                 <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-8 border border-blue-500/20'>
                   <h1 className='text-4xl font-bold text-white mb-4'>Matrix OS Documentation</h1>

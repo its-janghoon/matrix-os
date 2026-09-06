@@ -4,6 +4,7 @@ import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
 import { FiCopy } from 'react-icons/fi';
 import { toast } from 'sonner';
+import { GITHUB_URL } from '@/lib/releases';
 
 const copyCode = (code: string) => {
   navigator.clipboard.writeText(code);
@@ -33,11 +34,11 @@ export default function MatrixCliDocs() {
       <Navigation />
       <div className='min-h-screen bg-black'>
         <div className='pt-16'>
-          <div className='flex'>
+          <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
             {/* Main Content */}
-            <main className='flex-1 ml-64 p-8'>
+            <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
               <div className='max-w-4xl mx-auto'>
                 <article className='text-gray-100'>
                   {/* Hero */}
@@ -174,7 +175,7 @@ matrix wallet transfer --to <recipient-account-id> --amount 200`}
                     </li>
                     <li>
                       <a
-                        href='https://github.com/ecirlabs/matrix-core/blob/main/services/core/cmd/matrix/README.md'
+                        href={`${GITHUB_URL}/blob/main/services/core/cmd/matrix/README.md`}
                         target='_blank'
                         rel='noopener noreferrer'
                         className='text-blue-400 hover:text-blue-300 underline'

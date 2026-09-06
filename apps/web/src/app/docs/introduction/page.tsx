@@ -4,6 +4,7 @@ import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
 import { FiCopy } from 'react-icons/fi';
 import { Toaster, toast } from 'sonner';
+import { GITHUB_URL } from '@/lib/releases';
 
 export default function MatrixOsIntroduction() {
   const copyCode = (code: string) => {
@@ -17,11 +18,11 @@ export default function MatrixOsIntroduction() {
       <Toaster position='top-right' />
       <div className='min-h-screen bg-black'>
         <div className='pt-16'>
-          <div className='flex'>
+          <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
             {/* Main Content */}
-            <main className='flex-1 ml-64 p-8'>
+            <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
               <div className='max-w-4xl mx-auto'>
                 <article className='text-gray-100'>
                   {/* Hero Section */}
@@ -170,7 +171,7 @@ export class DataNode {
                     <ul className='text-gray-100 space-y-2 list-disc pl-6 mb-0'>
                       <li>
                         <a
-                          href='https://github.com/ecirlabs/matrix-core'
+                          href={GITHUB_URL}
                           className='text-blue-400 hover:text-blue-300 underline'
                         >
                           Contribute on GitHub

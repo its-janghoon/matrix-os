@@ -2,6 +2,7 @@
 
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
+import { GITHUB_URL } from '@/lib/releases';
 
 export default function Error({ reset }: { error: Error; reset: () => void }) {
   const [showRetry, setShowRetry] = useState(false);
@@ -93,7 +94,7 @@ Root cause: Probably cosmic rays. Or a missing semicolon. We're still investigat
               Return Home
             </Link>
             <Link
-              href='https://github.com/ecirlabs/matrix-core/issues'
+              href={`${GITHUB_URL}/issues`}
               className='px-6 py-3 border border-gray-700 text-gray-300 rounded-lg hover:bg-white/5 transition-colors'
             >
               Report Issue

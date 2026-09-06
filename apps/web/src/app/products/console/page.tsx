@@ -5,6 +5,7 @@ import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiGithub, FiMonitor, FiZap } from 'react-icons/fi';
+import { GITHUB_URL } from '@/lib/releases';
 
 export default function ConsolePage() {
   return (
@@ -56,7 +57,7 @@ export default function ConsolePage() {
             </p>
             <div className='mt-6'>
               <Button
-                href='https://github.com/ecirlabs/matrix-core/tree/main/apps/console'
+                href={`${GITHUB_URL}/tree/main/apps/console`}
                 variant='secondary'
                 size='md'
               >
