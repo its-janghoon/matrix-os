@@ -79,9 +79,12 @@ export default function MatrixOsInstallation() {
                         <h3 className='text-xl font-bold text-white mb-4'>Software Requirements</h3>
                         <ul className='text-gray-100 space-y-3 list-disc pl-6'>
                           <li>OS: Linux, macOS, or Windows 10/11</li>
-                          <li>Python: 3.8 or higher</li>
-                          <li>Node.js: 16.x or higher</li>
-                          <li>Git: 2.x or higher</li>
+                          <li>
+                            A release archive needs nothing else - both binaries are statically
+                            linked
+                          </li>
+                          <li>To build from source: Go 1.24.2 or newer, and buf</li>
+                          <li>Git, to clone the repository</li>
                         </ul>
                       </div>
                     </div>
