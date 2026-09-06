@@ -279,3 +279,32 @@ func (s *Service) SubmitSignedTransfer(ctx context.Context, req *marketv1.Submit
 	}
 	return &marketv1.SubmitSignedTransferResponse{Transaction: recordToProto(rec)}, nil
 }
+
+// FundAccount moves native MATRIX from the genesis-allocated reward pool to the
+// requested account through the treasury (Funder.FundFromRewardPool), then
+// returns the account's new balance. It never mints new coins: the coins already
+// exist in the reward pool, so the native supply cap is respected. Requests that
+// exceed the reward-pool balance map to FailedPrecondition, as do supply-cap
+// violations; a node wired without a treasury returns Unimplemented.
+func (s *Service) FundAccount(ctx context.Context, req *marketv1.FundAccountRequest) (*marketv1.FundAccountResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if s.funder == nil {
+		return nil, status.Error(codes.Unimplemented, "reward-pool funding is not enabled on this node")
+	}
+	if req.GetAccount() == "" {
+		return nil, status.Error(codes.InvalidArgument, "account is required")
+	}
+	if req.GetAmount() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "amount must be greater than 0")
+	}
+	if err := s.funder.FundFromRewardPool(req.GetAccount(), req.GetAmount()); err != nil {
+		return nil, mapMarketError(err)
+	}
+	bal, err := s.market.Ledger().Balance(req.GetAccount())
+	if err != nil {
+		return nil, mapMarketError(err)
+	}
+	return &marketv1.FundAccountResponse{Account: req.GetAccount(), Balance: bal}, nil
+}

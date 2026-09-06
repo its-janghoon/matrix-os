@@ -261,6 +261,29 @@ message SubmitSignedTransferResponse {
     Transaction transaction = 1;
 }
 
+// FundAccountRequest moves native MATRIX out of the genesis-allocated reward
+// pool into an account. It is the sanctioned bootstrap-funding path: it never
+// mints new coins, it only transfers coins that already exist in the reward
+// pool, so the native supply cap is respected. Operators/users call it to seed a
+// buyer account with spendable MATRIX before submitting paid compute jobs.
+message FundAccountRequest {
+    // Recipient account ID to credit from the reward pool. Must be non-empty and
+    // must not be the reward pool account itself.
+    string account = 1;
+    // Amount to move from the reward pool, in native base units. Must be > 0 and
+    // must not exceed the current reward-pool balance.
+    uint64 amount = 2;
+}
+
+// FundAccountResponse returns the recipient account and its new balance after
+// the reward-pool transfer.
+message FundAccountResponse {
+    // Account ID that was funded.
+    string account = 1;
+    // The account's balance in native base units after funding.
+    uint64 balance = 2;
+}
+
 // MarketService is the external gRPC surface of the Matrix OS compute
 // marketplace. It exposes the local order book, remote P2P providers, the
 // compute-credit ledger, signed settlement, and the token chain so external
@@ -324,4 +347,13 @@ service MarketService {
     // rejects invalid signatures, wrong nonces, prev-hash mismatches, and
     // unaffordable transfers without mutating any state.
     rpc SubmitSignedTransfer(SubmitSignedTransferRequest) returns (SubmitSignedTransferResponse) {}
+
+    // FundAccount moves native MATRIX from the genesis-allocated reward pool to
+    // an account. Input: recipient account ID and amount (> 0). Output: the
+    // account and its new balance. Side effects: transfers reward-pool MATRIX to
+    // the account through the treasury (conserving supply; no minting). Rejects
+    // requests that exceed the reward-pool balance or the native supply cap with
+    // FailedPrecondition, and is gated behind the same auth as other
+    // state-mutating RPCs.
+    rpc FundAccount(FundAccountRequest) returns (FundAccountResponse) {}
 }

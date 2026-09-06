@@ -38,6 +38,18 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
+// Funder is the narrow reward-pool funding capability the market API needs to
+// implement FundAccount. It is satisfied by *token.Treasury and moves native
+// MATRIX out of the genesis-allocated reward pool into a recipient account
+// without minting new coins. It is declared here (consumer side) so marketapi
+// does not depend on the whole Treasury surface and tests can substitute a fake.
+type Funder interface {
+	// FundFromRewardPool moves amount native base units from the reserved reward
+	// pool to recipient, returning an error (e.g. market.ErrInsufficientFunds)
+	// without mutating balances when the pool cannot cover the amount.
+	FundFromRewardPool(recipient string, amount uint64) error
+}
+
 // Service implements marketv1.MarketServiceServer over the node's marketplace
 // subsystems. The generated stubs are built with require_unimplemented_servers
 // disabled, so no embedding is required; every RPC is implemented explicitly.
@@ -46,13 +58,16 @@ type Service struct {
 	settled  *token.SettledLedger
 	chain    *token.Chain
 	exchange *marketexchange.Exchange
+	funder   Funder
 }
 
 // NewService constructs a Service. market, settled and chain are required;
 // exchange may be nil, in which case ListProviders simply omits remote
 // providers (a node running without the P2P exchange still serves its local
-// order book).
-func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Chain, exchange *marketexchange.Exchange) (*Service, error) {
+// order book). funder may be nil, in which case FundAccount returns
+// codes.Unimplemented (a node wired without a treasury does not expose
+// reward-pool funding).
+func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Chain, exchange *marketexchange.Exchange, funder Funder) (*Service, error) {
 	if m == nil {
 		return nil, fmt.Errorf("marketapi: market is required")
 	}
@@ -62,7 +77,7 @@ func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Cha
 	if chain == nil {
 		return nil, fmt.Errorf("marketapi: token chain is required")
 	}
-	return &Service{market: m, settled: settled, chain: chain, exchange: exchange}, nil
+	return &Service{market: m, settled: settled, chain: chain, exchange: exchange, funder: funder}, nil
 }
 
 // Server hosts the market gRPC service on its own listener, following the
@@ -91,13 +106,16 @@ type Config struct {
 	Settled  *token.SettledLedger
 	Chain    *token.Chain
 	Exchange *marketexchange.Exchange
+	// Funder backs the FundAccount RPC (optional). When nil, FundAccount returns
+	// codes.Unimplemented. It is satisfied by *token.Treasury.
+	Funder Funder
 }
 
 // NewServer builds a market gRPC server. It installs the admin auth
 // interceptors when cfg.Auth is non-nil, registers the health service, and
 // registers the MarketService implementation.
 func NewServer(cfg Config) (*Server, error) {
-	svc, err := NewService(cfg.Market, cfg.Settled, cfg.Chain, cfg.Exchange)
+	svc, err := NewService(cfg.Market, cfg.Settled, cfg.Chain, cfg.Exchange, cfg.Funder)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +224,10 @@ func mapMarketError(err error) error {
 	case errors.Is(err, market.ErrJobNotFound):
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, market.ErrInsufficientFunds):
-		// Covers token.ErrUnaffordable, which wraps market.ErrInsufficientFunds.
+		// Covers token.ErrUnaffordable, which wraps market.ErrInsufficientFunds,
+		// and reward-pool funding requests that exceed the pool balance.
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, token.ErrSupplyCapExceeded):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, market.ErrInsufficientCapacity):
 		return status.Error(codes.FailedPrecondition, err.Error())

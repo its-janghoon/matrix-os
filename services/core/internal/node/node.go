@@ -51,6 +51,33 @@ type Config struct {
 		// same list derives the identical round-robin leader schedule.
 		Validators []string `yaml:"validators"`
 	} `yaml:"consensus"`
+	Genesis GenesisConfig `yaml:"genesis"`
+}
+
+// GenesisConfig describes the one-time native MATRIX genesis this node applies
+// on first Start. It seeds the initial supply honestly: named allocations credit
+// fixed accounts and reward_pool seeds the reserved reward pool
+// (token.RewardPoolAccount) that later funds buyer/provider balances via
+// FundFromRewardPool. Genesis is applied exactly once and persisted in the KV
+// store (see Treasury.ApplyGenesis), so it is idempotent across restarts. The
+// sum of allocations plus reward_pool must not exceed NativeMaxSupply (1e18
+// native base units).
+type GenesisConfig struct {
+	// Allocations assigns fixed initial balances (native base units) to named
+	// accounts at genesis.
+	Allocations []GenesisAllocationConfig `yaml:"allocations"`
+	// RewardPool is the amount, in native base units, allocated to the reserved
+	// reward pool at genesis. Zero allocates no reward pool.
+	RewardPool uint64 `yaml:"reward_pool"`
+}
+
+// GenesisAllocationConfig is a single named genesis allocation: Amount native
+// base units credited to Account.
+type GenesisAllocationConfig struct {
+	// Account is the account ID to credit at genesis.
+	Account string `yaml:"account"`
+	// Amount is the balance to credit, in native base units.
+	Amount uint64 `yaml:"amount"`
 }
 
 // Node represents a Matrix node instance
@@ -64,6 +91,7 @@ type Node struct {
 	kvStore          *kv.Store
 	market           *market.Market
 	tokenChain       *token.Chain
+	treasury         *token.Treasury
 	exchange         *marketexchange.Exchange
 	consensus        *consensus.Engine
 	consensusAccount *token.Account
@@ -89,6 +117,15 @@ func Initialize(configPath string) error {
 	config.Security.AllowUnsignedAgents = false
 	config.Admin.Addr = "0.0.0.0:9090"
 	config.Market.Addr = "0.0.0.0:9091"
+	// Seed a default genesis so a freshly-initialized node establishes real
+	// native MATRIX supply on first start. The reward pool holds the full native
+	// cap (1e18 base units == 1,000,000,000 whole MATRIX at 9 decimals) so
+	// operators can fund buyer/provider accounts out of it via `matrix fund`
+	// without any coins being minted past the cap. No named allocations by
+	// default (operators add their own). This stays at/under the cap: reward pool
+	// == NativeMaxSupply and allocations are empty.
+	config.Genesis.RewardPool = token.NativeMaxSupply
+	config.Genesis.Allocations = nil
 
 	// Create config directory if it doesn't exist
 	configDir := filepath.Dir(configPath)
@@ -183,6 +220,38 @@ func (n *Node) Start() error {
 	// It provides the verified, signed, hash-chained settlement path that the
 	// marketplace and remote layers use to move compute credits.
 	n.tokenChain = token.NewChain(n.kvStore)
+
+	// Initialize the native MATRIX treasury over the market ledger and shared KV
+	// store, exactly as the compute-settlement tests do. The treasury owns the
+	// honest issuance path: a one-time, cap-enforced genesis allocation plus the
+	// reward pool that later funds buyer/provider balances. It is constructed
+	// here (right after market + tokenChain) so genesis is applied before any
+	// settlement or funding can occur, and so GetTreasury() is available to the
+	// market API funding RPC below.
+	n.treasury = token.NewTreasury(n.market.Ledger(), n.kvStore)
+
+	// Apply genesis exactly once. ApplyGenesis is idempotent (it records a
+	// persisted marker in the KV store via GenesisApplied and is a no-op on a
+	// store that already has genesis), so calling it unconditionally on every
+	// Start cannot double-credit across restarts. It enforces NativeMaxSupply and
+	// writes nothing if the requested supply would exceed the cap.
+	allocations := make([]token.GenesisAllocation, 0, len(n.config.Genesis.Allocations))
+	for _, a := range n.config.Genesis.Allocations {
+		allocations = append(allocations, token.GenesisAllocation{Account: a.Account, Amount: a.Amount})
+	}
+	alreadyApplied, err := n.treasury.GenesisApplied()
+	if err != nil {
+		return fmt.Errorf("failed to read genesis state: %w", err)
+	}
+	if err := n.treasury.ApplyGenesis(allocations, n.config.Genesis.RewardPool); err != nil {
+		return fmt.Errorf("failed to apply genesis: %w", err)
+	}
+	if alreadyApplied {
+		fmt.Printf("Genesis already applied; skipping (idempotent).\n")
+	} else {
+		fmt.Printf("Genesis applied: %d named allocation(s), reward pool %d native base units.\n",
+			len(allocations), n.config.Genesis.RewardPool)
+	}
 
 	// Initialize P2P host
 	p2pHost, err := p2p.New(n.ctx, &p2p.Config{
@@ -352,6 +421,7 @@ func (n *Node) Start() error {
 		Settled:  marketSettled,
 		Chain:    n.tokenChain,
 		Exchange: n.exchange,
+		Funder:   n.treasury,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)
@@ -487,6 +557,14 @@ func (n *Node) GetMarket() *market.Market {
 // log of ed25519-signed transactions backing signed compute-credit settlement.
 func (n *Node) GetTokenChain() *token.Chain {
 	return n.tokenChain
+}
+
+// GetTreasury returns the native MATRIX treasury: the honest issuance path that
+// owns the one-time, cap-enforced genesis allocation and the reward pool that
+// funds buyer/provider balances via FundFromRewardPool. It is constructed and
+// has genesis applied during Start.
+func (n *Node) GetTreasury() *token.Treasury {
+	return n.treasury
 }
 
 // GetExchange returns the P2P marketplace exchange, which announces local
