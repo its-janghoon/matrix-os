@@ -135,6 +135,136 @@ go run ./cmd/bridge-attest \
 The `-seed` flag derives the local test attestor keys deterministically via
 sha256; it is **not** a secret and must never be used for real funds.
 
+## Mainnet Release Harness
+
+This section is the **operator runbook** for releasing the Ethereum-side wrapped
+token + bridge. **This repository never performs the real mainnet deploy and
+holds no keys.** It ships a complete, runnable harness so **you** run the deploy
+yourself with **your** funded key. Everything is keys-from-env; `.env` is
+gitignored and only `.env.example` (placeholders) is committed.
+
+### What actually gets deployed (native-vs-wrapped)
+
+MATRIX is **native-first**: the canonical coin lives on the Matrix OS consensus
+L1 and is the single source of truth for balances and supply. What this harness
+deploys to Ethereum is the **WRAPPED ERC-20 (`WrappedMatrix` / wMATRIX) + the
+validator-attestation bridge** — a 1:1 mirror backed by native MATRIX locked in
+L1 escrow. You are **not** deploying "the" token; you are deploying its wrapped
+Ethereum representation.
+
+### Environment variables
+
+Copy `.env.example` to `.env` and fill in your values (see that file for the
+full annotated list):
+
+| Var                   | Purpose                                              | Required for            |
+| --------------------- | ---------------------------------------------------- | ----------------------- |
+| `MAINNET_RPC_URL`     | Ethereum mainnet RPC endpoint                        | mainnet deploy/verify   |
+| `SEPOLIA_RPC_URL`     | Sepolia testnet RPC endpoint                         | sepolia dress rehearsal |
+| `MAINNET_FORK_RPC_URL`| Mainnet RPC used to fork state for the local sim     | fork simulation         |
+| `PRIVATE_KEY`         | Deployer key (hex, `0x`). Env only — never hardcoded | mainnet/sepolia deploy  |
+| `ETHERSCAN_API_KEY`   | Etherscan source verification                        | verify                  |
+| `ATTESTORS`           | Comma-separated secp256k1 attestor addresses (`n`)   | mainnet/sepolia deploy  |
+| `THRESHOLD`           | Distinct signatures required to mint (`m`), 1..n     | deploy                  |
+
+Real-network RPC URLs and the deployer key are read from env only and default to
+undefined/empty when unset. Nothing credential-bearing is hardcoded in
+`hardhat.config.ts`.
+
+### 1. Local dry-run (no secrets, always runnable)
+
+The dry-run simulation lives in `test/DeployHarness.test.ts`. It imports and
+runs the **real** deploy function (`deployWrappedMatrix` from
+`scripts/deploy-mainnet.ts`), asserts the deployed token's
+name/symbol/decimals/attestorCount/threshold/`ERC20_PER_NATIVE_UNIT`/initial
+supply, drives a representative attestation-mint path, and reports the
+deployment gas.
+
+```sh
+cd contracts
+npx hardhat compile
+npx hardhat test            # includes the DeployHarness dry-run (must be green)
+```
+
+### 2. Mainnet-fork simulation (optional, against real chain state)
+
+Set `MAINNET_FORK_RPC_URL` to a mainnet RPC; `hardhat.config.ts` then forks
+mainnet state for the in-process `hardhat` network, so the same harness runs
+against real chain state **without broadcasting anything**:
+
+```sh
+cd contracts
+MAINNET_FORK_RPC_URL="https://your-mainnet-rpc" npx hardhat test
+```
+
+### 3. Pre-deploy SAFETY + GAS checklist
+
+Do **all** of these before a real deploy:
+
+- [ ] **Fund the deployer.** The `PRIVATE_KEY` account has enough ETH for the
+      deploy gas (see the gas the dry-run reports) plus margin.
+- [ ] **Confirm the attestor set.** `ATTESTORS` exactly matches the secp256k1
+      attestor keys the Go validators sign with (`internal/bridge`). A mismatch
+      means Go-produced attestations will never verify on-chain.
+- [ ] **Confirm the threshold.** `THRESHOLD` is the intended m-of-n (1..n).
+- [ ] **Verify gas price.** Check current mainnet base fee; do not deploy into a
+      fee spike unless intended.
+- [ ] **Double-check the network.** `--network mainnet` vs `sepolia` is correct.
+- [ ] **Dry-run passed.** `npx hardhat test` (and, ideally, the mainnet-fork
+      simulation) is green on the exact commit you are deploying.
+- [ ] **No secrets committed.** `git check-ignore .env` succeeds; no key or
+      credential-bearing URL is in tracked files.
+
+### 4. Go-live (run by YOU, with YOUR key)
+
+The harness refuses unsafe real-network runs: it errors if `PRIVATE_KEY` is
+unset or if `ATTESTORS` is not explicitly provided on mainnet/sepolia (it will
+**not** silently fall back to local hardhat accounts on a real chain).
+
+Dress-rehearse on Sepolia first:
+
+```sh
+cd contracts
+PRIVATE_KEY=... ATTESTORS=0x...,0x...,0x... THRESHOLD=2 \
+  npx hardhat run scripts/deploy-mainnet.ts --network sepolia
+```
+
+Then mainnet:
+
+```sh
+cd contracts
+PRIVATE_KEY=... ATTESTORS=0x...,0x...,0x... THRESHOLD=2 \
+  npx hardhat run scripts/deploy-mainnet.ts --network mainnet
+```
+
+`deploy-mainnet.ts` prints the deployed address, constructor args, attestor set,
+threshold, chainId, block, and gas used, and writes a JSON deployment record to
+the gitignored `deployments/wrapped-matrix.<network>.json`.
+
+### 5. Verify on Etherscan
+
+Using the recorded deployment (reads `ETHERSCAN_API_KEY` from env):
+
+```sh
+cd contracts
+ETHERSCAN_API_KEY=... npx hardhat run scripts/verify-mainnet.ts --network mainnet
+```
+
+Or directly with the recorded constructor args:
+
+```sh
+npx hardhat verify --network mainnet <address> '["0x..","0x.."]' <threshold>
+```
+
+### 6. Post-deploy
+
+Register the deployed contract address with the Go bridge and confirm the
+attestor addresses match, so Go-produced attestations mint on-chain. The wrapped
+supply must always equal the outstanding native locked in L1 escrow.
+
+> **Reminder:** this repository holds no private keys and never executes a real
+> mainnet deploy. The commands above are run by the operator with their own key.
+
 ## Toolchain notes
 
 - Hardhat v2 (`hardhat@^2.22`) with `@nomicfoundation/hardhat-toolbox@^5` and
