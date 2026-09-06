@@ -57,7 +57,9 @@ export default function ComputeMarketplaceDocs() {
                       <li>All nodes apply the same ordered ledger, so a balance is a network-wide fact</li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
-                      This replaces the earlier per-node pairwise settlement with a single, globally agreed ledger.
+                      Consensus is the authoritative, globally agreed ledger for settlement that flows through it, such
+                      as the inference marketplace. It runs alongside the earlier per-node pairwise settlement rather
+                      than replacing it yet, so drive settlement through consensus when a single agreed ledger matters.
                     </p>
                   </div>
 
@@ -79,8 +81,10 @@ export default function ComputeMarketplaceDocs() {
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
                       Jobs are submitted over the <code>matrix.inference.v1</code> InferenceService, capacity is
-                      reserved with an up-front affordability check, the backend runs the request, and the job settles
-                      buyer-to-provider in MATRIX through the consensus ledger for the units actually reported.
+                      reserved with an up-front affordability check on the reserved price, the backend runs the request,
+                      and the job settles buyer-to-provider in MATRIX through the consensus ledger. The charge is scaled
+                      by the provider&apos;s price per unit and capped at the reserved amount, and the job is reported
+                      COMPLETED only once that settlement commits and applies on the ledger.
                     </p>
                   </div>
 

@@ -180,11 +180,11 @@ export default function Home() {
                 <p className='text-grayscale-300'>
                   Settlement is cryptographic and shipped in the Matrix core. Each account is an ed25519 keypair, and
                   the earning currency is <span className='text-white font-medium'>MATRIX</span>, a standards-compliant
-                  ERC-20 token. Tokens move only through transfers that are signed by the sender, and every transfer is
-                  verified, ordered, and applied through the network&apos;s fast consensus chain before a balance can
-                  change. Nonces prevent replay and the committed chain can be validated end to end to detect
-                  tampering, so a balance changes only through a valid signed transaction that the validator set has
-                  agreed on.
+                  ERC-20 token. Tokens move only through transfers that are signed by the sender. Settlement routed
+                  through the fast consensus chain is verified, ordered, and applied in one globally agreed ledger
+                  before a balance can change. Nonces prevent replay and the committed chain can be validated end to end
+                  to detect tampering, so a balance changes only through a valid signed transaction that the validator
+                  set has agreed on.
                 </p>
                 <p className='text-grayscale-300 mt-4'>
                   Providers sign and announce their capacity and pricing over the libp2p gossip network, and remote
@@ -312,7 +312,7 @@ export default function Home() {
                   <ul className='space-y-4'>
                     <CheckItem>Hash-linked committed block chain shared by every node</CheckItem>
                     <CheckItem>Deterministic ledger application, so all honest nodes converge</CheckItem>
-                    <CheckItem>Replaces per-node pairwise settlement with one agreed ledger</CheckItem>
+                    <CheckItem>Authoritative agreed ledger for settlement that runs through it, alongside the pairwise path</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -334,7 +334,8 @@ export default function Home() {
                 <h2 className='text-4xl font-bold mb-4'>Two Ways to Contribute Real LLM Compute</h2>
                 <p className='text-xl text-grayscale-300 max-w-3xl mx-auto'>
                   Inference is a pluggable backend. Contribute by running a model locally, or by proxying requests to a
-                  provider API you hold a key for. Either way the job settles in MATRIX for the units actually used.
+                  provider API you hold a key for. Either way the job settles in MATRIX, priced per unit and capped at
+                  the amount reserved up front.
                 </p>
               </div>
 
@@ -373,7 +374,7 @@ export default function Home() {
                   <ul className='space-y-4'>
                     <CheckItem>OpenAI-compatible chat completions backend</CheckItem>
                     <CheckItem>API key read from an environment variable, never stored in code</CheckItem>
-                    <CheckItem>Jobs settle in MATRIX through consensus for the units reported</CheckItem>
+                    <CheckItem>Jobs settle in MATRIX through consensus, priced per unit and capped at the reservation</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -385,10 +386,11 @@ export default function Home() {
                 </div>
                 <p className='text-grayscale-300'>
                   A buyer submits a job over the <span className='text-white font-medium'>matrix.inference.v1</span>{' '}
-                  InferenceService, capacity is reserved with an up-front affordability check, and the selected backend
-                  runs the request. The job is then billed for the units actually reported and the buyer-to-provider
-                  transfer is settled in MATRIX through the consensus ledger, so a buyer is charged exactly once for
-                  work that really happened.
+                  InferenceService, capacity is reserved with an up-front affordability check on the reserved price, and
+                  the selected backend runs the request. The buyer-to-provider transfer is then settled in MATRIX
+                  through the consensus ledger, scaled by the provider&apos;s price per unit and capped at the reserved
+                  amount, and the job is reported complete only once that settlement commits and applies, so a buyer is
+                  charged exactly once for work that really happened and never more than it reserved.
                 </p>
               </div>
             </div>

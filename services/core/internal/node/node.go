@@ -223,16 +223,31 @@ func (n *Node) Start() error {
 	}
 	n.exchange = exchange
 
-	// Initialize the global consensus engine over the same gossip transport. This
-	// is the authoritative, fast leader-based BFT ledger that REPLACES the
-	// deliberately per-node pairwise settlement path as the network's agreed
-	// ordered ledger: the leader for each round batches signed transfers into a
-	// block, validators vote, and on a >2/3 quorum every node commits the block to
-	// a hash-linked chain (persisted under consensus/*) and deterministically
-	// applies its ordered transactions to the shared market ledger, so all nodes
-	// converge to the identical balances. The node's stable consensus identity is
-	// persisted so its place in the fixed validator set / round-robin leader
-	// schedule survives restarts.
+	// Initialize the global consensus engine over the same gossip transport. It is
+	// a fast leader-based BFT ledger: the leader for each round batches signed
+	// transfers into a block, validators vote, and on a >2/3 quorum every node
+	// commits the block to a hash-linked chain (persisted under consensus/*) and
+	// deterministically applies its ordered transactions to the shared market
+	// ledger, so all nodes converge to the identical balances. The node's stable
+	// consensus identity is persisted so its place in the fixed validator set /
+	// round-robin leader schedule survives restarts.
+	//
+	// SETTLEMENT AUTHORITY (accurate as shipped): consensus does NOT yet REPLACE
+	// the other two settlement paths that write to the same market ledger. Three
+	// writers currently coexist on n.market.Ledger():
+	//   1. marketexchange (below) applies signed settlements received over gossip
+	//      via token.SettledLedger — the deliberately per-node PAIRWISE path.
+	//   2. marketapi.SubmitSignedTransfer (below) settles directly through
+	//      token.SettledLedger / the token chain.
+	//   3. this consensus engine applies committed blocks.
+	// Consensus is the authoritative, globally-agreed ledger ONLY for the flows
+	// that submit through it (currently the inference marketplace via
+	// SettleThroughConsensus). The pairwise/token-chain paths are not routed
+	// through consensus and are not reconciled against it; a transfer settled on
+	// one path is invisible to the others' dedup/ordering. Routing (1) and (2)
+	// through consensus is planned but intentionally deferred here rather than
+	// done unsafely. Until then, deployments that require a single authoritative
+	// ledger should drive settlement exclusively through consensus.
 	consensusAccount, err := consensus.LoadOrCreateValidatorAccount(n.kvStore)
 	if err != nil {
 		return fmt.Errorf("failed to load consensus identity: %w", err)
@@ -473,8 +488,11 @@ func (n *Node) GetExchange() *marketexchange.Exchange {
 }
 
 // GetConsensus returns the global consensus engine: the fast leader-based BFT
-// ledger that gives every node an agreed-upon ordered log of settlements and is
-// the authoritative path marketplace settlement now flows through.
+// ledger that gives every node an agreed-upon ordered log of settlements. It is
+// the authoritative path for settlement flows that submit through it (e.g. the
+// inference marketplace). Note it coexists with the marketexchange pairwise path
+// and the marketapi token-chain path on the same ledger; see the wiring notes in
+// Start for the current authority model.
 func (n *Node) GetConsensus() *consensus.Engine {
 	return n.consensus
 }
@@ -483,9 +501,11 @@ func (n *Node) GetConsensus() *consensus.Engine {
 // submits a signed transfer of amount credits from the given account to
 // recipient into the global consensus engine; when a committed block includes
 // the transaction, every node deterministically reflects it on the market
-// ledger. This replaces the per-node pairwise settlement as the authoritative
-// way marketplace credits move across the network. It returns the submitted
-// signed transaction so callers can correlate it with the committed block.
+// ledger. This is the authoritative settlement path for callers that use it;
+// however it does NOT currently disable or reconcile the per-node pairwise
+// (marketexchange) or token-chain (marketapi.SubmitSignedTransfer) paths, which
+// still write to the same ledger. It returns the submitted signed transaction so
+// callers can correlate it with the committed block.
 func (n *Node) SettleThroughConsensus(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {
 	if n.consensus == nil {
 		return nil, fmt.Errorf("consensus engine is not running")
