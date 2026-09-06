@@ -10,6 +10,8 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
 	"github.com/ecirlabs/matrix-core/internal/consensus"
+	"github.com/ecirlabs/matrix-core/internal/inference"
+	"github.com/ecirlabs/matrix-core/internal/inferenceapi"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/marketapi"
@@ -43,6 +45,20 @@ type Config struct {
 	Market struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"market"`
+	Inference struct {
+		// Addr is the TCP listen address for the inference gRPC API
+		// (matrix.inference.v1.InferenceService). It runs as a parallel gRPC
+		// server to the market API, gated by the same EnableACLs auth. Default
+		// 0.0.0.0:9092.
+		Addr string `yaml:"addr"`
+		// EchoProvider, when non-empty, registers the GPU-free deterministic echo
+		// backend for this provider ID at startup so a fresh node can fulfill
+		// inference jobs locally without a GPU or a model server. It is the local
+		// demo provider; a real deployment registers a local-http or provider-API
+		// backend instead. When empty, no backend is auto-registered and providers
+		// must be registered out of band via GetInference().Registry().
+		EchoProvider string `yaml:"echo_provider"`
+	} `yaml:"inference"`
 	Consensus struct {
 		// Validators is the fixed validator set as hex-encoded account IDs
 		// (ed25519 public keys). This node's own consensus identity is always
@@ -98,6 +114,9 @@ type Node struct {
 	metrics          *metrics.Collector
 	adminServer      *admin.Server
 	marketServer     *marketapi.Server
+	inferenceSvc     *inference.Service
+	inferenceServer  *inferenceapi.Server
+	inferenceAccts   *walletAccounts
 	agents           map[string]*agent.Agent
 	agentsMu         sync.RWMutex
 	souls            map[string]*soul.Soul
@@ -122,6 +141,12 @@ func Initialize(configPath string) error {
 	config.Security.AllowUnsignedAgents = false
 	config.Admin.Addr = "0.0.0.0:9090"
 	config.Market.Addr = "0.0.0.0:9091"
+	config.Inference.Addr = "0.0.0.0:9092"
+	// Register the GPU-free deterministic echo backend for a demo provider so a
+	// freshly-initialized node can fulfill inference jobs locally without a GPU
+	// or a model server. Operators swap this for a local-http / provider-API
+	// backend in production; see internal/inference/registry.go.
+	config.Inference.EchoProvider = "demo-inference-provider"
 	// Seed a default genesis so a freshly-initialized node establishes real
 	// native MATRIX supply on first start. The reward pool holds the full native
 	// cap (1e18 base units == 1,000,000,000 whole MATRIX at 9 decimals) so
@@ -173,6 +198,9 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	}
 	if config.Market.Addr == "" {
 		config.Market.Addr = "0.0.0.0:9091"
+	}
+	if config.Inference.Addr == "" {
+		config.Inference.Addr = "0.0.0.0:9092"
 	}
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
@@ -436,6 +464,68 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start market API server: %w", err)
 	}
 
+	// Initialize and start the inference gRPC API (matrix.inference.v1). It is
+	// the LLM-inference counterpart to the market API and runs as a third
+	// parallel gRPC server on its own configurable address. It is backed by the
+	// same real subsystems the node runs: inference jobs reserve capacity through
+	// n.market, run on a provider's registered inference Backend, and settle
+	// buyer -> provider through the SAME consensus engine the compute marketplace
+	// uses (n.consensus satisfies inference.Settler via SubmitAccountTransfer +
+	// WaitForSettlement), so there is one authoritative native-MATRIX ledger for
+	// both compute and inference.
+	//
+	// ACCOUNTS RESOLVER (honest choice): settling an inference job requires the
+	// buyer's private key to sign the consensus transfer, so the Service is given
+	// an Accounts resolver rather than assuming custody. For a dev/local node the
+	// node resolves buyer signing keys from the local wallet directory
+	// (~/.matrix by default): a node fulfilling inference on behalf of a buyer it
+	// holds the key for. This is exactly the single-operator model the quickstart
+	// uses. A multi-tenant deployment supplies its own custodial resolver via
+	// GetInference() before serving; the wallet resolver only knows keys that
+	// exist as wallet files under its directory, so it never fabricates custody.
+	n.inferenceAccts = newWalletAccounts()
+	inferenceRegistry := inference.NewRegistry()
+	inferenceSvc, err := inference.NewService(inference.Config{
+		Market:   n.market,
+		Registry: inferenceRegistry,
+		Settler:  n.consensus,
+		Accounts: n.inferenceAccts,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create inference service: %w", err)
+	}
+	n.inferenceSvc = inferenceSvc
+
+	// Register the GPU-free echo backend for the configured demo provider so the
+	// node can fulfill inference jobs locally out of the box. This mirrors what
+	// the compute marketplace exposes: a provider must also be registered on the
+	// order book (via the market API / `matrix provider register`) to reserve
+	// capacity; registering the backend here only says "this provider fulfills
+	// inference with the echo backend".
+	if n.config.Inference.EchoProvider != "" {
+		if err := inferenceRegistry.Register(n.config.Inference.EchoProvider, inference.NewEchoBackend()); err != nil {
+			return fmt.Errorf("failed to register echo inference backend: %w", err)
+		}
+		fmt.Printf("Inference: registered echo backend for demo provider %q.\n", n.config.Inference.EchoProvider)
+	}
+
+	var inferenceAuth *admin.Authenticator
+	if n.config.Security.EnableACLs {
+		inferenceAuth = n.adminServer.GetAuthenticator()
+	}
+	inferenceServer, err := inferenceapi.NewServer(inferenceapi.Config{
+		Addr:      n.config.Inference.Addr,
+		Auth:      inferenceAuth,
+		Inference: n.inferenceSvc,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create inference API server: %w", err)
+	}
+	n.inferenceServer = inferenceServer
+	if err := n.inferenceServer.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start inference API server: %w", err)
+	}
+
 	// Update metrics
 	n.metrics.RecordPeerCount(len(n.p2pHost.GetHost().Network().Peers()))
 
@@ -454,6 +544,13 @@ func (n *Node) Stop() error {
 		}
 	}
 	n.agentsMu.Unlock()
+
+	// Stop inference API server
+	if n.inferenceServer != nil {
+		if err := n.inferenceServer.Stop(n.ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to stop inference API server: %w", err))
+		}
+	}
 
 	// Stop market API server
 	if n.marketServer != nil {
@@ -628,4 +725,32 @@ func (n *Node) SettleThroughConsensus(from *token.Account, recipient string, amo
 // external buyers and providers over gRPC.
 func (n *Node) GetMarketAPI() *marketapi.Server {
 	return n.marketServer
+}
+
+// GetInference returns the inference service the node runs: it reserves capacity
+// through the compute marketplace, fulfills jobs on a provider's registered
+// inference Backend (a GPU-free echo backend is registered by default for the
+// configured demo provider), and settles buyer -> provider through the same
+// consensus engine the compute marketplace uses. Register additional provider
+// backends via GetInference().Registry().
+func (n *Node) GetInference() *inference.Service {
+	return n.inferenceSvc
+}
+
+// GetInferenceAPI returns the external inference gRPC server
+// (matrix.inference.v1.InferenceService), served on the node's Inference.Addr.
+func (n *Node) GetInferenceAPI() *inferenceapi.Server {
+	return n.inferenceServer
+}
+
+// RegisterInferenceAccount makes acct's signing key available to the inference
+// Service so the node can sign consensus settlement transfers on behalf of that
+// buyer. It complements the on-disk wallet resolver for in-process/test callers
+// that hold an account in memory rather than as a wallet file. A nil account is
+// a no-op.
+func (n *Node) RegisterInferenceAccount(acct *token.Account) {
+	if n.inferenceAccts == nil || acct == nil {
+		return
+	}
+	n.inferenceAccts.Add(acct)
 }

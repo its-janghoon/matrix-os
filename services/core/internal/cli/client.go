@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
@@ -68,6 +69,37 @@ func dial(opts *globalOptions) (*clientConn, error) {
 		conn:   conn,
 		market: marketv1.NewMarketServiceClient(conn),
 		health: healthpb.NewHealthClient(conn),
+	}, nil
+}
+
+// inferenceConn is the gRPC client the `matrix inference` commands use against a
+// node's inference gRPC API (matrix.inference.v1.InferenceService), which the
+// node serves on its own address (default 127.0.0.1:9092), distinct from the
+// market API. It carries the same API-key auth as the market client.
+type inferenceConn struct {
+	conn      *grpc.ClientConn
+	inference inferencev1.InferenceServiceClient
+}
+
+// Close closes the underlying gRPC connection.
+func (c *inferenceConn) Close() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+// dialInference establishes a gRPC connection to the inference endpoint. It uses
+// the inference-specific address (opts derived) so the inference commands reach
+// the node's inference server rather than its market server.
+func dialInference(addr string, apiKey string) (*inferenceConn, error) {
+	conn, err := grpc.NewClient(addr, dialOptions(apiKey)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	return &inferenceConn{
+		conn:      conn,
+		inference: inferencev1.NewInferenceServiceClient(conn),
 	}, nil
 }
 
