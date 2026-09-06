@@ -10,12 +10,18 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # Lets a maintainer produce artifacts for an existing tag without re-tagging.
+  # Dispatch can create the tag itself, so a release does not require anyone to
+  # push a tag from a laptop. This matters because tag pushes are not always
+  # permitted by the credentials a given clone has, while the Actions token
+  # always has contents: write on its own repository.
   workflow_dispatch:
     inputs:
-      tag:
-        description: 'Existing tag to build and publish'
+      version:
+        description: 'Version to release, e.g. v0.1.0'
         required: true
+      ref:
+        description: 'Commit or branch to tag (default: the default branch)'
+        required: false
 
 permissions:
   contents: write
@@ -27,7 +33,27 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
-        ref: ${{ github.event.inputs.tag || github.ref }}
+        ref: ${{ github.event.inputs.ref || github.event.inputs.version || github.ref }}
+        # Full history so the tag can be created here and so `gh` can resolve it.
+        fetch-depth: 0
+
+    # On a dispatch, create the tag at the checked-out commit if it does not
+    # already exist. On a tag push this is a no-op.
+    - name: Ensure the tag exists
+      env:
+        GH_TOKEN: ${{ github.token }}
+        VERSION: ${{ github.event.inputs.version || github.ref_name }}
+      run: |
+        set -euo pipefail
+        if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$VERSION" >/dev/null 2>&1; then
+          echo "Tag $VERSION already exists."
+          exit 0
+        fi
+        sha="$(git rev-parse HEAD)"
+        echo "Creating tag $VERSION at $sha"
+        gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+          -f "ref=refs/tags/$VERSION" \
+          -f "sha=$sha" >/dev/null
     - uses: actions/setup-go@v5
       with:
         go-version-file: 'services/core/go.mod'
@@ -43,7 +69,7 @@ jobs:
       id: build
       working-directory: services/core
       env:
-        VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+        VERSION: ${{ github.event.inputs.version || github.ref_name }}
       run: |
         set -euo pipefail
         DIST="$GITHUB_WORKSPACE/dist"
@@ -86,7 +112,7 @@ jobs:
     - name: Publish
       env:
         GH_TOKEN: ${{ github.token }}
-        VERSION: ${{ github.event.inputs.tag || github.ref_name }}
+        VERSION: ${{ github.event.inputs.version || github.ref_name }}
       run: |
         set -euo pipefail
         gh release create "$VERSION" \
