@@ -177,6 +177,42 @@ func waitForConvergedLength(t *testing.T, nodes []*testNode, timeout time.Durati
 	t.Fatalf("timeout waiting for chain length convergence")
 }
 
+// waitForBalances waits until every node's ledger reports `want` for `account`,
+// which is how a test knows the cluster has quiesced: with no empty blocks
+// proposed, a fully applied transaction set means nothing further will commit.
+//
+// assertConverged needs that. It reads node 0's balance as the expected value
+// and then compares the other nodes against it, so on a cluster that is still
+// committing, a block landing between those two reads fails the assertion with
+// two legitimate balances from different moments in time.
+func waitForBalances(t *testing.T, nodes []*testNode, account string, want uint64, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		settled := true
+		for _, nd := range nodes {
+			got, err := nd.ledger.Balance(account)
+			if err != nil {
+				t.Fatalf("balance: %v", err)
+			}
+			if got != want {
+				settled = false
+				break
+			}
+		}
+		if settled {
+			return
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+	for i, nd := range nodes {
+		got, _ := nd.ledger.Balance(account)
+		l, _ := nd.chain.Len()
+		t.Logf("node %d balance for %s = %d (chain length %d)", i, account, got, l)
+	}
+	t.Fatalf("timeout waiting for every node to report %d for %s", want, account)
+}
+
 // assertConverged asserts every node has the identical committed block sequence
 // (same hashes, same ordered transactions) and identical balances for the given
 // accounts.
@@ -348,6 +384,10 @@ func TestMultiNodeConsensus(t *testing.T) {
 		}
 
 		waitForHeight(t, nodes, 3, 8*time.Second)
+		// Every transfer applied everywhere means the cluster has stopped
+		// committing, without which the balance comparison below races the next
+		// commit.
+		waitForBalances(t, nodes, aliceID, 100000-12*10, 8*time.Second)
 		waitForConvergedLength(t, nodes, 8*time.Second)
 
 		// Collect the set of distinct proposers across committed blocks; leader
