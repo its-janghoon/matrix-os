@@ -1,0 +1,142 @@
+syntax = "proto3";
+
+package matrix.inference.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1;inference";
+
+// InferenceJobStatus mirrors the marketplace inference-job lifecycle, tracking a
+// job from submission through fulfillment and token settlement.
+enum InferenceJobStatus {
+    // Unset/unknown status.
+    INFERENCE_JOB_STATUS_UNSPECIFIED = 0;
+    // Job is submitted and provider capacity is reserved, but not yet run.
+    INFERENCE_JOB_STATUS_PENDING = 1;
+    // Job is actively running on the provider's backend.
+    INFERENCE_JOB_STATUS_RUNNING = 2;
+    // Job completed: the completion was produced and units settled buyer ->
+    // provider through the consensus-backed token settlement.
+    INFERENCE_JOB_STATUS_COMPLETED = 3;
+    // Job failed to run or settle; reserved capacity was returned.
+    INFERENCE_JOB_STATUS_FAILED = 4;
+}
+
+// ChatRole enumerates the standard chat message roles for chat-style inference.
+enum ChatRole {
+    // Unset/unknown role.
+    CHAT_ROLE_UNSPECIFIED = 0;
+    // A system instruction message.
+    CHAT_ROLE_SYSTEM = 1;
+    // A user/buyer message.
+    CHAT_ROLE_USER = 2;
+    // An assistant/model message.
+    CHAT_ROLE_ASSISTANT = 3;
+}
+
+// ChatMessage is a single turn in a chat conversation.
+message ChatMessage {
+    // The speaker role for this message.
+    ChatRole role = 1;
+    // The message text content.
+    string content = 2;
+}
+
+// InferenceJob describes an inference job submitted by a buyer against an
+// inference-capable provider, and its result once fulfilled.
+message InferenceJob {
+    // Stable inference job identifier (equal to the underlying market job ID).
+    string id = 1;
+    // Account ID of the buyer who submitted the job.
+    string buyer = 2;
+    // Provider ID that fulfills the inference.
+    string provider = 3;
+    // Model identifier requested.
+    string model = 4;
+    // Current lifecycle status.
+    InferenceJobStatus status = 5;
+    // Generated completion text (empty until COMPLETED).
+    string completion = 6;
+    // Billed units, equal to the token amount settled buyer -> provider.
+    uint64 units = 7;
+    // When the job was submitted.
+    google.protobuf.Timestamp created_at = 8;
+    // When the job's status last changed.
+    google.protobuf.Timestamp updated_at = 9;
+}
+
+// SubmitInferenceJobRequest submits an inference job to a provider. Capacity is
+// reserved at submit time; the token settles on fulfillment. Provide either
+// prompt or messages; messages takes precedence when both are set.
+message SubmitInferenceJobRequest {
+    // Buyer account ID.
+    string buyer = 1;
+    // Target inference-capable provider ID.
+    string provider = 2;
+    // Model identifier to run.
+    string model = 3;
+    // Single user prompt. Used when messages is empty.
+    string prompt = 4;
+    // Full chat transcript. Takes precedence over prompt.
+    repeated ChatMessage messages = 5;
+    // Optional maximum completion length in tokens. Zero means backend default.
+    uint32 max_tokens = 6;
+    // Optional sampling temperature. Zero means backend default.
+    double temperature = 7;
+    // Upfront estimate of the compute units to reserve. Zero defaults to one.
+    uint64 units_estimate = 8;
+}
+
+// SubmitInferenceJobResponse returns the newly-created PENDING inference job.
+message SubmitInferenceJobResponse {
+    // The created job in PENDING state.
+    InferenceJob job = 1;
+}
+
+// FulfillInferenceJobRequest runs and settles a pending inference job.
+message FulfillInferenceJobRequest {
+    // Inference job ID to fulfill.
+    string id = 1;
+}
+
+// FulfillInferenceJobResponse returns the fulfilled, settled inference job.
+message FulfillInferenceJobResponse {
+    // The job in COMPLETED state with its completion and settled units.
+    InferenceJob job = 1;
+}
+
+// GetInferenceJobRequest looks up a single inference job by ID.
+message GetInferenceJobRequest {
+    // Inference job ID to fetch.
+    string id = 1;
+}
+
+// GetInferenceJobResponse returns the requested inference job and its result.
+message GetInferenceJobResponse {
+    // The requested inference job.
+    InferenceJob job = 1;
+}
+
+// InferenceService is the external gRPC surface for LLM inference in the Matrix
+// OS compute marketplace. Buyers submit inference jobs to inference-capable
+// providers (which contribute either a local model runner or a proxied
+// provider-API backend); providers fulfill them; and the computed units settle
+// buyer -> provider in the token through the consensus-backed settlement path.
+service InferenceService {
+    // SubmitInferenceJob submits an inference job to a provider, reserving
+    // capacity. Input: buyer, provider, model, prompt or messages, and optional
+    // params. Output: the created PENDING job. Side effects: reserves provider
+    // capacity and performs the buyer affordability check. No token moves yet.
+    rpc SubmitInferenceJob(SubmitInferenceJobRequest) returns (SubmitInferenceJobResponse) {}
+
+    // FulfillInferenceJob runs a pending job on the provider's backend and
+    // settles it. Input: job ID. Output: the COMPLETED job with completion and
+    // settled units. Side effects: runs inference, settles units buyer ->
+    // provider through the consensus token settlement, and releases reserved
+    // capacity.
+    rpc FulfillInferenceJob(FulfillInferenceJobRequest) returns (FulfillInferenceJobResponse) {}
+
+    // GetInferenceJob fetches a single inference job and its result by ID. Input:
+    // job ID. Output: the job. No side effects.
+    rpc GetInferenceJob(GetInferenceJobRequest) returns (GetInferenceJobResponse) {}
+}

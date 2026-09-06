@@ -21,6 +21,8 @@ Matrix Core follows a modular architecture with clear separation of concerns:
 | Token Settlement | `internal/token` | ed25519-signed transfers recorded in a SHA-256 hash-chained, Pebble-backed log; the signed entrypoint (`SettledLedger`) credits move through |
 | P2P Marketplace Exchange | `internal/marketexchange` | libp2p gossip layer for provider discovery and signed job/settlement messages |
 | Global Consensus | `internal/consensus` | Fast leader-based BFT over a fixed validator set: the network-wide, agreed, ordered ledger that settlement flows through (see below) |
+| LLM Inference | `internal/inference` | Pluggable LLM inference backends (local runner / provider-API proxy) wired into the marketplace: buyers submit inference jobs, providers fulfill them, and usage settles in the token through consensus (see below) |
+| Inference API | `internal/inferenceapi` | `matrix.inference.v1.InferenceService` gRPC surface for submitting, fulfilling, and reading inference jobs |
 | Metrics | `internal/metrics` | Prometheus metrics collection |
 
 ### Directory Structure
@@ -40,6 +42,8 @@ matrix-core/
 │   ├── token/           # ed25519-signed, hash-chained token settlement
 │   ├── marketexchange/  # libp2p gossip provider discovery + signed messages
 │   ├── consensus/       # Fast leader-based BFT global consensus ledger
+│   ├── inference/       # Pluggable LLM inference backends + marketplace wiring
+│   ├── inferenceapi/    # matrix.inference.v1 gRPC service
 │   ├── metrics/         # Prometheus metrics collection
 │   └── node/            # Node lifecycle and configuration
 ├── .github/             # GitHub Actions and configs
@@ -170,6 +174,70 @@ abstraction lets the multi-node test wire N engines to an in-memory gossip bus;
 that test asserts all nodes commit an identical ordered log, converge to
 identical balances, make progress across leader rotation, and reject
 badly-signed/replayed transactions — and it passes under `go test -race`.
+
+## 🧠 LLM Inference (`internal/inference`)
+
+Matrix Core turns idle machines into an LLM inference marketplace. A provider
+node contributes inference capacity in one of **two modes**, and both settle in
+the token through the same consensus path:
+
+- **Local contribution.** The node runs a model itself. `LocalHTTPBackend`
+  speaks an Ollama/llama.cpp-style HTTP runner (`POST /api/chat`, non-streaming),
+  mapping the runner's `prompt_eval_count`/`eval_count` onto billing units. In a
+  GPU-less environment the built-in **`EchoBackend`** is a concrete local stub
+  runner that returns a deterministic completion and deterministic token usage,
+  so the whole path is real and testable without a GPU.
+- **Provider-API contribution.** The node contributes by proxying to an external
+  OpenAI-compatible API. `OpenAIBackend` POSTs to a configurable base URL's
+  `/v1/chat/completions` with an `Authorization: Bearer <key>` header. **The API
+  key is read from an environment variable (default `OPENAI_API_KEY`) and is
+  never hardcoded, logged, or carried in config.**
+
+### Pluggable backend interface
+
+```go
+type Backend interface {
+    Infer(ctx context.Context, req InferenceRequest) (InferenceResponse, error)
+    Name() string
+}
+```
+
+`InferenceRequest` carries the model, a `prompt` or a chat `messages` transcript,
+and optional params; `InferenceResponse` carries the completion text plus a
+`Usage`/`Units` count used for pricing. `UnitsFor` derives the billable units
+deterministically from token usage (per total token, floored at one), so pricing
+is identical regardless of which backend served the request. A config-driven
+`NewBackend` factory selects a backend by `Kind` (`echo`, `openai`,
+`local-http`), and a `Registry` maps each provider ID to the backend it fulfills
+with, so one node can host several providers with different backends.
+
+### Marketplace wiring and settlement
+
+`inference.Service` ties inference into the existing market job lifecycle:
+
+1. A provider advertises an inference-capable service by registering capacity on
+   the market (`market.RegisterProvider`) and a backend in the `Registry`.
+2. A buyer calls `SubmitInferenceJob`, which reserves capacity through
+   `market.SubmitJob` (running the affordability check) and records a PENDING
+   inference job. No token moves yet.
+3. `FulfillJob` runs the request through the provider's `Backend`, then settles
+   the **actual** units the backend reported buyer → provider by submitting a
+   signed transfer into consensus (`Settler.SubmitAccountTransfer`, satisfied by
+   `consensus.Engine`). When the committed block applies, every node reflects the
+   transfer on its market ledger. The reserved capacity is then released so the
+   buyer is charged exactly once, for real usage, through the globally-agreed
+   consensus ledger.
+
+The `matrix.inference.v1.InferenceService` gRPC surface
+(`internal/inferenceapi`) exposes `SubmitInferenceJob`, `FulfillInferenceJob`,
+and `GetInferenceJob`, mirroring the `marketapi` server/handler pattern with
+optional admin auth. Tests cover the echo backend's determinism, the
+OpenAI-compatible backend against an `httptest.Server` (asserting the request
+shape including the `Bearer` auth header and response parsing), the local-runner
+backend against an `httptest.Server`, and an end-to-end marketplace test where a
+buyer submits an inference job, a provider fulfills it via a stub backend, and
+the token amount settles through the consensus ledger (balances move and the job
+completes).
 
 ## 🔧 Configuration
 
