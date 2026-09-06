@@ -19,49 +19,36 @@ document describes the layout and how to build and test each piece.
 
 ## Screenshots
 
-The marketing site now uses a multi-page information architecture: a concise landing page
-routes out to dedicated product pages. Together with the desktop app, the screenshots below
-tell the accurate native-first story. Native MATRIX is the coin of the Go consensus L1 and
-the single source of truth for balances, capped at 1,000,000,000 whole MATRIX at 9 decimals.
-wMATRIX is the bridged ERC-20 mirror that lets the asset list on exchanges (it is not the
-settlement token). The network runs fast leader-based BFT consensus that agrees one global
-ledger, offers LLM inference through a local runner and a provider-API proxy, ships the
-`matrix` CLI, and the Matrix Console desktop app. Images live in
+Five screenshots, one per distinct claim: what the network is, the two sides of its market,
+what makes balances agreed rather than local, and the desktop app actually running. Native
+MATRIX is the coin of the Go consensus L1 and the single source of truth for balances,
+capped at 1,000,000,000 whole MATRIX at 9 decimals; wMATRIX is the bridged ERC-20 mirror
+that lets the asset list on exchanges, and is not the settlement token. Images live in
 [`docs/screenshots`](docs/screenshots).
 
 ### Marketing site (`apps/web`)
 
 ![Matrix OS home hero](docs/screenshots/web-home.png)
-*The Matrix OS home page: a concise landing that routes visitors to the product pages.*
+*The home page: the peer-to-peer market for compute and inference, routing out to the
+product pages.*
 
 ![Compute Marketplace product page](docs/screenshots/web-marketplace.png)
-*Compute Marketplace: peer-to-peer capacity announce and discovery with signed jobs that settle in native MATRIX.*
-
-![MATRIX Token product page](docs/screenshots/web-token.png)
-*MATRIX Token: native coin cards (name, symbol, decimals, and 1,000,000,000 max-supply cap) plus the bridged wrapped ERC-20 mirror panel for exchange listing.*
-
-![Consensus product page](docs/screenshots/web-consensus.png)
-*Consensus: fast leader-based BFT that agrees one global ledger.*
+*Compute Marketplace: peer-to-peer capacity announce and discovery over libp2p, with signed
+jobs that settle in native MATRIX.*
 
 ![LLM Inference product page](docs/screenshots/web-inference.png)
-*LLM Inference: two ways to contribute compute, a local runner and a provider-API proxy.*
+*LLM Inference: the other half of the market, fulfilled by a local runner or a provider-API
+proxy and settled through the same consensus path as compute.*
 
-![Console product page](docs/screenshots/web-console.png)
-*Console: the product page for the Matrix Console desktop app.*
-
-![How It Works page](docs/screenshots/web-how-it-works.png)
-*How It Works: the end-to-end walkthrough of the network.*
-
-![matrix CLI product page](docs/screenshots/web-cli.png)
-*The `matrix` CLI product and reference page.*
-
-![Docs page](docs/screenshots/web-docs.png)
-*The documentation page.*
+![Consensus product page](docs/screenshots/web-consensus.png)
+*Consensus: fast leader-based BFT, so a balance is one globally agreed fact rather than a
+private per-node number.*
 
 ### Console (`apps/console`)
 
 ![Matrix Console desktop app](docs/screenshots/console-app.png)
-*Matrix Console: providers, jobs, native MATRIX wallet, consensus, and inference tabs in one window.*
+*Matrix Console: providers, jobs, native MATRIX wallet, consensus and inference tabs in one
+window &mdash; the whole thing running.*
 
 ## Repository tooling
 

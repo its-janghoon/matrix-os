@@ -1,62 +1,40 @@
 # Screenshots
 
-This directory holds the screenshots embedded in the repository READMEs. The files are
-captured against the running apps and dropped in here; the image tags that reference them
-already live in the root [`README.md`](../../README.md).
+The five images embedded in the root [`README.md`](../../README.md). Five, not ten: one per
+distinct claim, so nothing here duplicates another shot. Five earlier captures were removed
+along with their README entries - `web-token`, `web-console`, `web-how-it-works`, `web-cli`
+and `web-docs` - because token economics are covered in prose, `web-console` showed the
+product *page* for an app that `console-app.png` shows running, and the rest were
+navigational rather than claims.
 
-## Web theme (re-themed)
+## Files
 
-The marketing site (`apps/web`) has been fully re-themed with an **original, Chainlink-style
-crypto-infrastructure design** (blue-forward palette, gradient/mesh hero, polished feature
-cards and bands, modern sticky nav and multi-column footer). All accurate native-first
-content is preserved (native MATRIX on the Go L1, unified settlement, the bridged wrapped
-ERC-20 for exchange listing, fast BFT consensus, and local + provider-API LLM inference).
-Every web screenshot below is visually changed by this re-theme and must be re-captured;
-`console-app.png` is unaffected.
-
-## Expected files
-
-| File | What it should show | Route / anchor |
+| File | What it shows | Route |
 | --- | --- | --- |
-| `web-home.png` | The re-themed marketing hero (`/`) — gradient/mesh hero with the headline, primary/secondary CTAs and the hero stat strip. | `/` (top of page) |
-| `web-token.png` | The MATRIX Token section — native coin cards (name/symbol/decimals/max-supply) and the wrapped ERC-20 bridge panel. | `/#token` |
-| `web-consensus.png` | The Global Consensus section — speed-first BFT and globally-agreed-order cards. | `/#consensus` |
-| `web-inference.png` | The LLM Inference section — local runner and provider-API proxy cards. | `/#inference` |
-| `web-docs.png` | A docs page under the new theme. | `/docs` (or `/docs/cli` for the new CLI reference) |
-| `web-cli.png` _(optional, new)_ | The new `matrix` CLI documentation page. | `/docs/cli` |
-| `console-app.png` | The Matrix Console desktop app with its tabs (Node Connection, Providers, Jobs, Wallet & Token, Consensus, Inference). **Unchanged by the web re-theme.** | `apps/console` on `http://localhost:5173` |
+| `web-home.png` | The hero: the peer-to-peer market for compute and inference. | `/` |
+| `web-marketplace.png` | Compute Marketplace: capacity announce and discovery, signed jobs settling in native MATRIX. | `/products/marketplace` |
+| `web-inference.png` | LLM Inference: local runner and provider-API proxy, settled through the same consensus path. | `/products/inference` |
+| `web-consensus.png` | Consensus: leader-based BFT, one globally agreed ledger. | `/products/consensus` |
+| `console-app.png` | Matrix Console with its tabs: Node Connection, Providers, Jobs, Wallet & Token, Consensus, Inference. | `apps/console` on `http://localhost:5173` |
 
-## How to re-capture the web screenshots
+The web routes are real pages. An earlier version of this file pointed at `/#token`,
+`/#consensus` and `/#inference`, anchors on a single-page site that no longer exists.
 
-The site runs on **port 3000**.
-
-> **Dev-server caveat:** `corepack yarn dev` uses Next's `--turbopack` and the sandbox exec
-> tool blocks the literal `yarn start` / `next dev` command strings. The reliable path is a
-> production build followed by starting the Next binary directly.
+## Re-capturing the web screenshots
 
 ```sh
 cd apps/web
-corepack yarn install            # if node_modules is missing
-corepack yarn build              # production build (also validates lint/types)
-# Start on port 3000. Prefer `corepack yarn start`; if the exec tool blocks that
-# literal string, run the Next binary directly (equivalent):
-node node_modules/next/dist/bin/next start -p 3000
+corepack yarn install
+corepack yarn build     # Turbopack is the default in Next 16; no --turbopack flag
+corepack yarn start -p 3000
 ```
 
-Then capture each of the following routes/anchors on `http://localhost:3000`:
+Then capture `http://localhost:3000` at each route in the table. Note that the hero uses a
+`fade-up` entry animation, so a capture taken too early catches the headline mid-fade and
+renders it almost invisible - let the page settle before shooting.
 
-- `/` → `web-home.png` (hero, top of page)
-- `/#token` → `web-token.png`
-- `/#consensus` → `web-consensus.png`
-- `/#inference` → `web-inference.png`
-- `/#console` → (console section on the home page; part of the home scroll)
-- `/docs` → `web-docs.png`
-- `/docs/cli` → `web-cli.png` (optional, new CLI reference page)
+## Re-capturing the console screenshot
 
-The orchestrator performs the actual screenshot capture and drops the PNGs into this
-directory.
-
-## Console screenshot
-
-`console-app.png` is unchanged. Capture the `apps/console` dev server on
-`http://localhost:5173` as before.
+Run the `apps/console` dev server and capture `http://localhost:5173`. The Tauri desktop
+bundle needs system libraries (webkit2gtk, gtk) that a plain container will not have; the
+dev server in a browser is enough for this shot.
