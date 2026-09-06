@@ -379,6 +379,13 @@ func (m *Market) CompleteJob(jobID string) error {
 // its provider. No credits are transferred.
 func (m *Market) CancelJob(jobID string) error {
 	if err := func() error {
+		// Acquire providersMu before jobsMu to match SubmitJob's global lock
+		// order. Both paths take providersMu then jobsMu, so a concurrent
+		// SubmitJob/CancelJob pair can no longer deadlock by grabbing the two
+		// mutexes in opposite orders.
+		m.providersMu.Lock()
+		defer m.providersMu.Unlock()
+
 		m.jobsMu.Lock()
 		defer m.jobsMu.Unlock()
 
@@ -389,9 +396,6 @@ func (m *Market) CancelJob(jobID string) error {
 		if job.Status != JobPending && job.Status != JobRunning {
 			return fmt.Errorf("cancel job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
 		}
-
-		m.providersMu.Lock()
-		defer m.providersMu.Unlock()
 
 		if provider, ok := m.providers[job.Provider]; ok {
 			restored := provider

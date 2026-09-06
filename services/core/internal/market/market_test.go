@@ -2,6 +2,7 @@ package market
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -459,6 +460,65 @@ func TestMarket_JobTimestampsAndOrdering(t *testing.T) {
 	}
 	if !done.UpdatedAt.After(first.UpdatedAt) {
 		t.Errorf("UpdatedAt should advance on completion: got %v, was %v", done.UpdatedAt, first.UpdatedAt)
+	}
+}
+
+func TestMarket_ConcurrentSubmitCancelNoDeadlock(t *testing.T) {
+	// Regression test for the lock-order inversion between SubmitJob (providersMu
+	// -> jobsMu) and CancelJob (previously jobsMu -> providersMu). Under the old
+	// ordering, concurrent SubmitJob/CancelJob calls could each hold one mutex
+	// and block forever on the other, so this test would hang (and time out).
+	// With both paths taking providersMu before jobsMu it completes.
+	//
+	// Run with `go test -race` for data-race coverage; the primary value is
+	// driving both paths concurrently from many goroutines with enough
+	// interleaving to reliably schedule the AB/BA hazard.
+	m := setupMarket(t, 1_000_000, 1, 1_000_000)
+
+	const (
+		workers   = 16
+		perWorker = 200
+	)
+
+	done := make(chan struct{})
+	go func() {
+		var wg sync.WaitGroup
+		for w := 0; w < workers; w++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for i := 0; i < perWorker; i++ {
+					job, err := m.SubmitJob("buyer", "prov", 1)
+					if err != nil {
+						// Capacity/funds are sized generously; any error here is
+						// unexpected and worth surfacing.
+						t.Errorf("SubmitJob() error = %v", err)
+						return
+					}
+					// Cancel the job we just submitted so SubmitJob and CancelJob
+					// run concurrently across workers against the same provider.
+					if err := m.CancelJob(job.ID); err != nil {
+						t.Errorf("CancelJob() error = %v", err)
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		// Completed without deadlocking.
+	case <-time.After(30 * time.Second):
+		t.Fatal("concurrent SubmitJob/CancelJob did not complete: likely lock-order deadlock")
+	}
+
+	// Every submitted job was cancelled, so all reserved capacity is restored.
+	prov, _ := m.GetProvider("prov")
+	if prov.Available != prov.Capacity {
+		t.Errorf("provider Available = %d, want %d (all capacity restored)", prov.Available, prov.Capacity)
 	}
 }
 
