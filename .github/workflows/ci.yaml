@@ -61,6 +61,9 @@ jobs:
     - name: Typecheck
       working-directory: apps/web
       run: corepack yarn typecheck
+    - name: Test
+      working-directory: apps/web
+      run: corepack yarn test
     - name: Build
       working-directory: apps/web
       run: corepack yarn build
