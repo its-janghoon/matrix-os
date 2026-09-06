@@ -1,5 +1,6 @@
-// Wallet panel: read compute-credit / MATRIX token balances and view the
-// settled transaction chain from MarketService.
+// Wallet panel: read native MATRIX balances and view the settled transaction
+// chain from MarketService. Native MATRIX is the source of truth; the ERC-20
+// (wMATRIX) is only a bridged wrapped mirror.
 
 import { useCallback, useEffect, useState } from "react";
 import { useConnection } from "../state/connection";
@@ -44,8 +45,10 @@ export function WalletPanel() {
     <div className="panel">
       <h2>Wallet &amp; Token</h2>
       <p className="hint">
-        MATRIX compute-credit balances and the hash-chained settlement ledger. Balances change as
-        jobs settle buyer → provider.
+        Native MATRIX balances and the hash-chained settlement ledger. Native MATRIX is the coin of
+        the Matrix L1 and the single source of truth for balances; the ERC-20 (wMATRIX) is a bridged
+        wrapped mirror for exchange listing, backed 1:1 by locked native. Balances change as jobs
+        settle buyer → provider in native MATRIX through consensus.
       </p>
 
       <div className="row" style={{ marginBottom: 16 }}>
@@ -77,7 +80,7 @@ export function WalletPanel() {
       </div>
 
       {txs.length === 0 ? (
-        <Empty>No settled transactions yet. Complete a job to move credits.</Empty>
+        <Empty>No settled transactions yet. Complete a job to move native MATRIX.</Empty>
       ) : (
         <table>
           <thead>

@@ -179,8 +179,8 @@ export default function Home() {
                 </div>
                 <p className='text-grayscale-300'>
                   Settlement is cryptographic and shipped in the Matrix core. Each account is an ed25519 keypair, and
-                  the earning currency is <span className='text-white font-medium'>MATRIX</span>, a standards-compliant
-                  ERC-20 token. Tokens move only through transfers that are signed by the sender. Settlement routed
+                  the earning currency is native <span className='text-white font-medium'>MATRIX</span>, the coin of the
+                  Matrix L1 consensus chain. Tokens move only through transfers that are signed by the sender. Settlement routed
                   through the fast consensus chain is verified, ordered, and applied in one globally agreed ledger
                   before a balance can change. Nonces prevent replay and the committed chain can be validated end to end
                   to detect tampering, so a balance changes only through a valid signed transaction that the validator
@@ -208,25 +208,26 @@ export default function Home() {
                 <span className='inline-block px-3 py-1 text-xs font-medium bg-accent-200/10 text-accent-200 rounded-full border border-accent-200/20 mb-4'>
                   MATRIX Token
                 </span>
-                <h2 className='text-4xl font-bold mb-4'>The Currency You Earn and Spend for Compute</h2>
+                <h2 className='text-4xl font-bold mb-4'>The Native Coin You Earn and Spend for Compute</h2>
                 <p className='text-xl text-grayscale-300 max-w-3xl mx-auto'>
-                  MATRIX is a standards-compliant ERC-20 token: the settlement and earning currency of the compute
-                  marketplace. Buyers pay in it, providers earn it, and because it implements the full ERC-20 standard
-                  it can later be listed on an exchange.
+                  MATRIX is the native coin of the Matrix L1 consensus chain, and the single source of truth for
+                  balances and supply. Every compute job and every LLM inference request settles in native MATRIX
+                  through consensus. A bridged wrapped ERC-20 mirror (wMATRIX) lets the same coin be represented on
+                  Ethereum for a future exchange listing, backed 1:1 by native MATRIX locked on the L1.
                 </p>
               </div>
 
               <div className='grid grid-cols-2 md:grid-cols-4 gap-4 mb-8'>
                 <div className='p-6 rounded-2xl border border-grayscale-800 bg-black text-center'>
-                  <div className='text-sm text-grayscale-500 mb-1'>Name</div>
-                  <div className='text-lg font-semibold'>Matrix Compute Token</div>
-                </div>
-                <div className='p-6 rounded-2xl border border-grayscale-800 bg-black text-center'>
                   <div className='text-sm text-grayscale-500 mb-1'>Symbol</div>
                   <div className='text-lg font-semibold'>MATRIX</div>
                 </div>
                 <div className='p-6 rounded-2xl border border-grayscale-800 bg-black text-center'>
-                  <div className='text-sm text-grayscale-500 mb-1'>Decimals</div>
+                  <div className='text-sm text-grayscale-500 mb-1'>Native decimals</div>
+                  <div className='text-lg font-semibold'>9</div>
+                </div>
+                <div className='p-6 rounded-2xl border border-grayscale-800 bg-black text-center'>
+                  <div className='text-sm text-grayscale-500 mb-1'>Wrapped decimals</div>
                   <div className='text-lg font-semibold'>18</div>
                 </div>
                 <div className='p-6 rounded-2xl border border-grayscale-800 bg-black text-center'>
@@ -240,19 +241,44 @@ export default function Home() {
                   <div className='h-11 w-11 rounded-xl bg-accent-200/10 border border-accent-200/20 flex items-center justify-center'>
                     <FiLayers className='w-5 h-5 text-accent-200' />
                   </div>
-                  <h3 className='text-2xl font-semibold'>Built on audited standards</h3>
+                  <h3 className='text-2xl font-semibold'>Native first, one currency end to end</h3>
                 </div>
                 <p className='text-grayscale-300 mb-6'>
-                  The token inherits OpenZeppelin&apos;s audited ERC20 implementation, adds ERC20Permit for gasless
-                  approvals, and uses an owner-controlled, supply-capped mint so the network can back marketplace
-                  earnings without exceeding a fixed maximum supply. It ships as a Hardhat project with a full test
-                  suite and a local deploy script.
+                  Native MATRIX lives on our own fast leader-based BFT L1. It has 9 decimals, and its supply is capped
+                  at 1,000,000,000 whole MATRIX. A genesis allocation plus a genesis-funded reward pool back provider
+                  earnings as capped, supply-tracked issuance, not unlimited minting. Every balance change is a
+                  committed consensus fact, so buyers and providers transact in one coin from end to end.
                 </p>
                 <ul className='space-y-4'>
-                  <CheckItem>Full ERC-20 interface and Transfer/Approval events via OpenZeppelin</CheckItem>
-                  <CheckItem>ERC20Permit (EIP-2612) for signature-based, gasless approvals</CheckItem>
-                  <CheckItem>Owner-only mint capped at a fixed max supply, so earnings are backed but bounded</CheckItem>
-                  <CheckItem>Exchange-listable: a standard ERC-20 any wallet or exchange can integrate</CheckItem>
+                  <CheckItem>Native coin of the Matrix L1: the single source of truth for balances and supply</CheckItem>
+                  <CheckItem>9 native decimals, capped at 1,000,000,000 whole MATRIX (no unlimited minting)</CheckItem>
+                  <CheckItem>All compute and inference settlement is native MATRIX applied through consensus</CheckItem>
+                  <CheckItem>The same 1,000,000,000 MATRIX maps to the 18-decimal wrapped mirror by an exact 1e9 factor</CheckItem>
+                </ul>
+              </div>
+
+              {/* Bridge subsection */}
+              <div className='mt-6 p-8 rounded-2xl border border-grayscale-800 bg-black'>
+                <div className='flex items-center gap-3 mb-4'>
+                  <div className='h-11 w-11 rounded-xl bg-accent-200/10 border border-accent-200/20 flex items-center justify-center'>
+                    <FiLayers className='w-5 h-5 text-accent-200' />
+                  </div>
+                  <h3 className='text-2xl font-semibold'>The bridge: a wrapped mirror for listing</h3>
+                </div>
+                <p className='text-grayscale-300 mb-6'>
+                  The ERC-20 is not the settlement token. It is wMATRIX, a wrapped mirror produced by a lock-and-mint
+                  bridge so native MATRIX can be represented on Ethereum, for example for a future exchange listing.
+                  Outstanding wrapped supply always equals the native MATRIX locked on the L1, so the mirror stays
+                  backed 1:1. Native has 9 decimals and the wrapped token has 18, so one native base unit equals 1e9
+                  wrapped base units, and the native cap of 1,000,000,000 MATRIX maps to the same amount on the wrapped
+                  side. The bridge runs against local and test networks only. It is NOT deployed to any public Ethereum
+                  network.
+                </p>
+                <ul className='space-y-4'>
+                  <CheckItem>Native lock to wrapped mint: minting requires a threshold of validator secp256k1 attestations that native was locked</CheckItem>
+                  <CheckItem>Wrapped burn to native unlock: burning wMATRIX authorizes releasing the escrowed native MATRIX</CheckItem>
+                  <CheckItem>Backed 1:1 by locked native, reconciled through the exact 1e9 conversion factor</CheckItem>
+                  <CheckItem>Local and test networks only, not deployed to a public Ethereum network</CheckItem>
                 </ul>
               </div>
             </div>
@@ -334,8 +360,8 @@ export default function Home() {
                 <h2 className='text-4xl font-bold mb-4'>Two Ways to Contribute Real LLM Compute</h2>
                 <p className='text-xl text-grayscale-300 max-w-3xl mx-auto'>
                   Inference is a pluggable backend. Contribute by running a model locally, or by proxying requests to a
-                  provider API you hold a key for. Either way the job settles in MATRIX, priced per unit and capped at
-                  the amount reserved up front.
+                  provider API you hold a key for. Either way the job settles in native MATRIX through consensus, priced
+                  per unit and capped at the amount reserved up front.
                 </p>
               </div>
 
@@ -355,7 +381,7 @@ export default function Home() {
                   <ul className='space-y-4'>
                     <CheckItem>Ollama-style local HTTP backend for on-device models</CheckItem>
                     <CheckItem>GPU-free echo backend for development and testing</CheckItem>
-                    <CheckItem>Earn MATRIX for the tokens your machine actually serves</CheckItem>
+                    <CheckItem>Earn native MATRIX for the tokens your machine actually serves</CheckItem>
                   </ul>
                 </div>
 
@@ -374,7 +400,7 @@ export default function Home() {
                   <ul className='space-y-4'>
                     <CheckItem>OpenAI-compatible chat completions backend</CheckItem>
                     <CheckItem>API key read from an environment variable, never stored in code</CheckItem>
-                    <CheckItem>Jobs settle in MATRIX through consensus, priced per unit and capped at the reservation</CheckItem>
+                    <CheckItem>Jobs settle in native MATRIX through consensus, priced per unit and capped at the reservation</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -387,8 +413,8 @@ export default function Home() {
                 <p className='text-grayscale-300'>
                   A buyer submits a job over the <span className='text-white font-medium'>matrix.inference.v1</span>{' '}
                   InferenceService, capacity is reserved with an up-front affordability check on the reserved price, and
-                  the selected backend runs the request. The buyer-to-provider transfer is then settled in MATRIX
-                  through the consensus ledger, scaled by the provider&apos;s price per unit and capped at the reserved
+                  the selected backend runs the request. The buyer-to-provider transfer is then settled in native
+                  MATRIX through the consensus ledger, scaled by the provider&apos;s price per unit and capped at the reserved
                   amount, and the job is reported complete only once that settlement commits and applies, so a buyer is
                   charged exactly once for work that really happened and never more than it reserved.
                 </p>
