@@ -57,6 +57,46 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * Headers for the releases request.
+ *
+ * The User-Agent is not optional: GitHub rejects API requests without one. The
+ * token is - an unauthenticated caller gets 60 requests per hour per IP, which
+ * a shared build IP can exhaust, so a build environment that has a token in
+ * GITHUB_TOKEN or GH_TOKEN gets the far larger authenticated bucket instead.
+ */
+function releaseRequestHeaders(token?: string): Record<string, string> {
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'ecirlabs-web',
+    'X-GitHub-Api-Version': '2022-11-28',
+  };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  return headers;
+}
+
+/**
+ * Fetches the release list, retrying anonymously if a token was rejected.
+ *
+ * The retry matters because the token is picked up from the environment rather
+ * than configured for this purpose: a CI image or a proxy can leave a
+ * GITHUB_TOKEN in the environment that api.github.com will not accept, and
+ * sending it turns a request that would have worked into a 401. Falling back to
+ * an anonymous request keeps a bad token from being worse than no token.
+ */
+async function fetchReleases(): Promise<Response> {
+  const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN;
+  const url = `https://api.github.com/repos/${REPO}/releases?per_page=10`;
+  // Re-checked hourly, so a new release appears without a redeploy.
+  const next = { revalidate: 3600 } as const;
+
+  if (token) {
+    const authed = await fetch(url, { headers: releaseRequestHeaders(token), next });
+    if (authed.ok || (authed.status !== 401 && authed.status !== 403)) return authed;
+  }
+  return fetch(url, { headers: releaseRequestHeaders(), next });
+}
+
+/**
  * The latest non-draft, non-prerelease release, or null when there is none.
  *
  * Returns null on any failure rather than throwing. This runs at build time, so
@@ -66,11 +106,7 @@ export function formatBytes(bytes: number): string {
 export async function getLatestRelease(): Promise<Release | null> {
   let releases: GhRelease[];
   try {
-    const res = await fetch(`https://api.github.com/repos/${REPO}/releases?per_page=10`, {
-      headers: { Accept: 'application/vnd.github+json' },
-      // Re-checked hourly, so a new release appears without a redeploy.
-      next: { revalidate: 3600 },
-    });
+    const res = await fetchReleases();
     if (!res.ok) return null;
     releases = (await res.json()) as GhRelease[];
   } catch {
