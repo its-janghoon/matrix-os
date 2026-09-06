@@ -11,10 +11,12 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/agent"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/marketexchange"
 	"github.com/ecirlabs/matrix-core/internal/matrix"
 	"github.com/ecirlabs/matrix-core/internal/metrics"
 	"github.com/ecirlabs/matrix-core/internal/p2p"
 	"github.com/ecirlabs/matrix-core/internal/soul"
+	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/transport"
 	"gopkg.in/yaml.v3"
 )
@@ -48,6 +50,8 @@ type Node struct {
 	eventBus    *transport.EventBus
 	kvStore     *kv.Store
 	market      *market.Market
+	tokenChain  *token.Chain
+	exchange    *marketexchange.Exchange
 	metrics     *metrics.Collector
 	adminServer *admin.Server
 	agents      map[string]*agent.Agent
@@ -153,6 +157,13 @@ func (n *Node) Start() error {
 	n.market.SetObserver(newMarketMetricsObserver(n.metrics))
 	n.market.SyncMetrics()
 
+	// Initialize the token settlement chain over the same shared KV store. Like
+	// the market it is pure persistence/logic with no goroutines or sockets of
+	// its own; it persists under the token/* key prefix, disjoint from market/*.
+	// It provides the verified, signed, hash-chained settlement path that the
+	// marketplace and remote layers use to move compute credits.
+	n.tokenChain = token.NewChain(n.kvStore)
+
 	// Initialize P2P host
 	p2pHost, err := p2p.New(n.ctx, &p2p.Config{
 		ListenAddr: n.config.Network.ListenAddr,
@@ -170,6 +181,27 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to initialize transport: %w", err)
 	}
 	n.transport = trans
+
+	// Initialize the P2P marketplace exchange on top of the gossip transport and
+	// the signed-settlement path. The exchange announces local provider capacity
+	// over gossip, discovers remote providers from received announcements, and
+	// applies received signed settlements into the local ledger through the token
+	// chain (the same verified path SettledLedger enforces for local settlement).
+	// It owns background receive loops that terminate when n.ctx is cancelled, so
+	// no explicit stop is required beyond cancelling the node context in Stop().
+	settled := token.NewSettledLedger(n.market.Ledger(), n.tokenChain)
+	exchange, err := marketexchange.New(marketexchange.Config{
+		Transport: n.transport,
+		Settled:   settled,
+		PeerID:    n.p2pHost.GetPeerID().String(),
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
+	}
+	if err := exchange.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start marketplace exchange: %w", err)
+	}
+	n.exchange = exchange
 
 	// Connect to bootstrap peers
 	for _, peerAddr := range n.config.Network.BootstrapPeers {
@@ -237,6 +269,15 @@ func (n *Node) Stop() error {
 		if err := n.adminServer.Stop(n.ctx); err != nil {
 			errs = append(errs, fmt.Errorf("failed to stop admin server: %w", err))
 		}
+	}
+
+	// Stop the marketplace exchange before tearing down the transport it reads
+	// from. Cancelling the node context (below) closes the transport's
+	// subscription channels, which ends the exchange's receive loops; we cancel
+	// first, then Wait, so the loops observe cancellation and exit cleanly.
+	if n.exchange != nil {
+		n.cancel()
+		n.exchange.Wait()
 	}
 
 	// Close transport
@@ -308,4 +349,17 @@ func (n *Node) GetMetrics() *metrics.Collector {
 // GetMarket returns the compute marketplace
 func (n *Node) GetMarket() *market.Market {
 	return n.market
+}
+
+// GetTokenChain returns the token settlement chain: the append-only, hash-chained
+// log of ed25519-signed transactions backing signed compute-credit settlement.
+func (n *Node) GetTokenChain() *token.Chain {
+	return n.tokenChain
+}
+
+// GetExchange returns the P2P marketplace exchange, which announces local
+// capacity over gossip, discovers remote providers, and applies signed
+// settlements received from the network into the local ledger.
+func (n *Node) GetExchange() *marketexchange.Exchange {
+	return n.exchange
 }
