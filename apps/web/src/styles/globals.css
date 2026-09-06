@@ -1,5 +1,27 @@
 @import 'tailwindcss';
 
+/*
+ * Load the project's design tokens (colors, gradients, fonts, shadows,
+ * animations) defined in tailwind.config.ts. Tailwind v4 does not auto-detect
+ * a JS config, so without this directive the custom utilities
+ * (bg-decorative-*, bg-mesh-hero, text-grayscale-*, etc.) emit nothing and
+ * gradient-clipped text such as the hero headline renders transparent.
+ */
+@config '../../tailwind.config.ts';
+
+/*
+ * Named background-size utilities. Tailwind v4 does not generate bg-<key>
+ * classes from the legacy backgroundSize theme key, so define them here.
+ * bg-gradient-200 gives animate-gradient-pan room to pan; bg-grid-sm sizes
+ * the hero grid overlay.
+ */
+@utility bg-gradient-200 {
+  background-size: 200% 200%;
+}
+@utility bg-grid-sm {
+  background-size: 44px 44px;
+}
+
 html,
 body {
   background: #060a16;
