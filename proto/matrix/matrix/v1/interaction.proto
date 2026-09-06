@@ -1,0 +1,180 @@
+syntax = "proto3";
+
+package matrix.matrix.v1;
+
+import "google/protobuf/timestamp.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/matrix/v1;matrix";
+
+// MatrixMessage represents a P2P message envelope sent between agents
+message MatrixMessage {
+    // Unique message identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Matrix context this message belongs to
+    .matrix.common.v1.Uuid matrix_id = 2;
+    
+    // Message routing
+    .matrix.common.v1.Uuid sender_soul_id = 3;
+    .matrix.common.v1.Uuid recipient_soul_id = 4;
+    
+    // When this message was sent
+    google.protobuf.Timestamp timestamp = 5;
+    
+    // Message content
+    oneof payload {
+        // Direct message between souls
+        bytes direct_message = 6;
+        
+        // Broadcast to all souls in matrix
+        bytes broadcast = 7;
+        
+        // Request for collaboration
+        CollaborationRequest collab_request = 8;
+        
+        // Response to collaboration
+        CollaborationResponse collab_response = 9;
+    }
+    
+    // Optional metadata
+    map<string, string> metadata = 15;
+}
+
+// CollaborationRequest represents a request for souls to work together
+message CollaborationRequest {
+    string task_type = 1;
+    bytes task_data = 2;
+    repeated .matrix.common.v1.Uuid invited_souls = 3;
+    uint32 min_participants = 4;
+    uint32 max_participants = 5;
+    google.protobuf.Timestamp deadline = 6;
+}
+
+// CollaborationResponse represents a soul's response to a collaboration request
+message CollaborationResponse {
+    .matrix.common.v1.Uuid request_id = 1;
+    bool accepted = 2;
+    string reason = 3;
+    bytes response_data = 4;
+}
+
+// Event represents an observable event within a matrix
+message Event {
+    // Unique event identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Matrix context
+    .matrix.common.v1.Uuid matrix_id = 2;
+    
+    // When this event occurred
+    google.protobuf.Timestamp timestamp = 3;
+    
+    // Event type for filtering
+    string event_type = 4;
+    
+    // Event details
+    oneof details {
+        // Soul joined/left the matrix
+        SoulPresenceEvent presence = 5;
+        
+        // Interaction between souls
+        SoulInteractionEvent interaction = 6;
+        
+        // Resource usage by a soul
+        ResourceUsageEvent resource_usage = 7;
+        
+        // Custom event type
+        bytes custom_event = 8;
+    }
+    
+    // Optional event context
+    map<string, string> context = 15;
+}
+
+// SoulPresenceEvent tracks souls joining/leaving matrices
+message SoulPresenceEvent {
+    .matrix.common.v1.Uuid soul_id = 1;
+    bool is_joining = 2;  // true = joined, false = left
+    string reason = 3;
+}
+
+// SoulInteractionEvent represents interaction between souls
+message SoulInteractionEvent {
+    .matrix.common.v1.Uuid initiator_id = 1;
+    .matrix.common.v1.Uuid responder_id = 2;
+    string interaction_type = 3;
+    float interaction_strength = 4;  // 0-1 scale
+    bytes interaction_data = 5;
+}
+
+// ResourceUsageEvent tracks resource consumption
+message ResourceUsageEvent {
+    .matrix.common.v1.Uuid soul_id = 1;
+    string resource_type = 2;
+    double quantity = 3;
+    string unit = 4;
+}
+
+// Signal represents detected patterns of collective behavior
+message Signal {
+    // Unique signal identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Matrix where this signal was detected
+    .matrix.common.v1.Uuid matrix_id = 2;
+    
+    // When this signal was detected
+    google.protobuf.Timestamp detected_at = 3;
+    
+    // Signal classification
+    string signal_type = 4;
+    
+    // Signal strength/confidence (0-1)
+    float confidence = 5;
+    
+    // Souls involved in this emergent behavior
+    repeated .matrix.common.v1.Uuid involved_souls = 6;
+    
+    // Supporting evidence
+    repeated .matrix.common.v1.Uuid related_events = 7;
+    
+    // Signal-specific data
+    bytes signal_data = 8;
+    
+    // Analysis metadata
+    map<string, string> metadata = 15;
+}
+
+// Request to stream matrix events
+message StreamEventsRequest {
+    .matrix.common.v1.Uuid matrix_id = 1;
+    repeated string event_types = 2;  // Empty means all types
+    bool include_history = 3;  // Include recent historical events
+}
+
+// Response for streaming matrix events
+message StreamEventsResponse {
+    Event event = 1;
+}
+
+// Request to stream emergent signals
+message StreamSignalsRequest {
+    .matrix.common.v1.Uuid matrix_id = 1;
+    repeated string signal_types = 2;  // Empty means all types
+    float min_confidence = 3;  // Minimum confidence threshold (0-1)
+}
+
+// Response for streaming emergent signals
+message StreamSignalsResponse {
+    Signal signal = 1;
+}
+
+// MatrixObservationService allows monitoring matrix activity
+service MatrixObservationService {
+    // Stream events from a matrix
+    rpc StreamEvents(StreamEventsRequest) returns (stream StreamEventsResponse) {}
+    
+    // Stream detected emergent signals
+    rpc StreamSignals(StreamSignalsRequest) returns (stream StreamSignalsResponse) {}
+} 

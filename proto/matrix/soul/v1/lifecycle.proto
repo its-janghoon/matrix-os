@@ -1,0 +1,243 @@
+syntax = "proto3";
+
+package matrix.soul.v1;
+
+import "google/protobuf/timestamp.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/soul/v1;soul";
+
+// Soul represents an autonomous AI agent with memories, values, and goals
+message Soul {
+    // Unique soul identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Soul name/identifier
+    string name = 2;
+    
+    // Soul description
+    string description = 3;
+    
+    // When this soul was created
+    google.protobuf.Timestamp created_at = 4;
+    
+    // Current training state
+    TrainingState training_state = 5;
+    
+    // Model configuration
+    ModelConfig model_config = 6;
+    
+    // Current capabilities
+    repeated Capability capabilities = 7;
+    
+    // Soul metadata
+    map<string, string> metadata = 15;
+}
+
+// Configuration for the Soul's underlying AI model
+message ModelConfig {
+    // Model architecture type
+    string model_type = 1;
+    
+    // Model version/checkpoint
+    string model_version = 2;
+    
+    // Model parameters
+    map<string, string> parameters = 3;
+    
+    // Training configuration
+    TrainingConfig training_config = 4;
+}
+
+// Configuration for Soul training
+message TrainingConfig {
+    // Learning rate
+    float learning_rate = 1;
+    
+    // Batch size
+    uint32 batch_size = 2;
+    
+    // Maximum training steps
+    uint64 max_steps = 3;
+    
+    // Early stopping patience
+    uint32 early_stopping_patience = 4;
+    
+    // Validation split
+    float validation_split = 5;
+    
+    // Loss function configuration
+    map<string, float> loss_weights = 6;
+}
+
+// Current state of Soul training
+message TrainingState {
+    // Training status
+    TrainingStatus status = 1;
+    
+    // Current training step
+    uint64 current_step = 2;
+    
+    // Current loss values
+    map<string, float> current_losses = 3;
+    
+    // Best validation metrics
+    map<string, float> best_metrics = 4;
+    
+    // When training started
+    google.protobuf.Timestamp started_at = 5;
+    
+    // When training last updated
+    google.protobuf.Timestamp updated_at = 6;
+}
+
+// Status of Soul training
+enum TrainingStatus {
+    TRAINING_STATUS_UNSPECIFIED = 0;
+    TRAINING_STATUS_INITIALIZING = 1;
+    TRAINING_STATUS_TRAINING = 2;
+    TRAINING_STATUS_VALIDATING = 3;
+    TRAINING_STATUS_COMPLETED = 4;
+    TRAINING_STATUS_FAILED = 5;
+    TRAINING_STATUS_STOPPED = 6;
+}
+
+// Capability represents a learned skill or ability
+message Capability {
+    // Capability name
+    string name = 1;
+    
+    // Capability description
+    string description = 2;
+    
+    // Proficiency level (0-1)
+    float proficiency = 3;
+    
+    // When this capability was acquired
+    google.protobuf.Timestamp acquired_at = 4;
+    
+    // Required capabilities
+    repeated string prerequisites = 5;
+    
+    // Capability metadata
+    map<string, string> metadata = 15;
+}
+
+// TrainingExample represents a single training instance
+message TrainingExample {
+    // Example identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Example type
+    string example_type = 2;
+    
+    // Input data
+    oneof input {
+        string text_input = 3;
+        bytes structured_input = 4;
+    }
+    
+    // Expected output
+    oneof output {
+        string text_output = 5;
+        bytes structured_output = 6;
+    }
+    
+    // Example metadata
+    map<string, string> metadata = 15;
+}
+
+// Request/Response messages for Soul lifecycle
+message CreateSoulRequest {
+    Soul soul = 1;
+}
+
+message CreateSoulResponse {
+    Soul soul = 1;
+}
+
+message GetSoulRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+}
+
+message GetSoulResponse {
+    Soul soul = 1;
+}
+
+message UpdateSoulRequest {
+    Soul soul = 1;
+    repeated string update_mask = 2;
+}
+
+message UpdateSoulResponse {
+    Soul soul = 1;
+}
+
+message DeleteSoulRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+}
+
+message DeleteSoulResponse {
+    .matrix.common.v1.Status status = 1;
+}
+
+message StartTrainingRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+    TrainingConfig config = 2;
+}
+
+message StartTrainingResponse {
+    TrainingState state = 1;
+}
+
+message StopTrainingRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+}
+
+message StopTrainingResponse {
+    TrainingState state = 1;
+}
+
+message GetTrainingStatusRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+}
+
+message GetTrainingStatusResponse {
+    TrainingState state = 1;
+}
+
+message AddTrainingExamplesRequest {
+    .matrix.common.v1.Uuid soul_id = 1;
+    repeated TrainingExample examples = 2;
+}
+
+message AddTrainingExamplesResponse {
+    .matrix.common.v1.Status status = 1;
+}
+
+// SoulLifecycleService manages Soul creation and training
+service SoulLifecycleService {
+    // Create a new soul
+    rpc CreateSoul(CreateSoulRequest) returns (CreateSoulResponse) {}
+    
+    // Get soul information
+    rpc GetSoul(GetSoulRequest) returns (GetSoulResponse) {}
+    
+    // Update soul configuration
+    rpc UpdateSoul(UpdateSoulRequest) returns (UpdateSoulResponse) {}
+    
+    // Delete a soul
+    rpc DeleteSoul(DeleteSoulRequest) returns (DeleteSoulResponse) {}
+    
+    // Start soul training
+    rpc StartTraining(StartTrainingRequest) returns (StartTrainingResponse) {}
+    
+    // Stop soul training
+    rpc StopTraining(StopTrainingRequest) returns (StopTrainingResponse) {}
+    
+    // Get training status
+    rpc GetTrainingStatus(GetTrainingStatusRequest) returns (stream GetTrainingStatusResponse) {}
+    
+    // Add training examples
+    rpc AddTrainingExamples(stream AddTrainingExamplesRequest) returns (AddTrainingExamplesResponse) {}
+} 

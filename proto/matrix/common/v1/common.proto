@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package matrix.common.v1;
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/common/v1;common";
+
+// Uuid represents a unique identifier
+message Uuid {
+    // The string representation of the UUID
+    string value = 1;
+}
+
+// Status represents the current state of an entity
+message Status {
+    // Status code
+    int32 code = 1;
+    
+    // Status message
+    string message = 2;
+    
+    // Additional details
+    map<string, string> details = 3;
+}
+
+// StatusResponse is a common response type for operations
+message StatusResponse {
+    // Operation status
+    Status status = 1;
+}
+
+// Version information
+message Version {
+    // Major version
+    int32 major = 1;
+    
+    // Minor version
+    int32 minor = 2;
+    
+    // Patch version
+    int32 patch = 3;
+    
+    // Optional pre-release identifier
+    string pre_release = 4;
+} 

@@ -1,0 +1,159 @@
+syntax = "proto3";
+
+package matrix.core.v1;
+
+import "google/protobuf/timestamp.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/core/v1;core";
+
+// Identity represents a unique entity in the Matrix OS ecosystem
+message Identity {
+    // Unique identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Identity type
+    IdentityType type = 2;
+    
+    // Human-readable name
+    string name = 3;
+    
+    // Optional description
+    string description = 4;
+    
+    // When this identity was created
+    google.protobuf.Timestamp created_at = 5;
+    
+    // Identity metadata
+    map<string, string> metadata = 15;
+}
+
+// Types of identities in Matrix OS
+enum IdentityType {
+    IDENTITY_TYPE_UNSPECIFIED = 0;
+    IDENTITY_TYPE_SOUL = 1;
+    IDENTITY_TYPE_USER = 2;
+    IDENTITY_TYPE_MATRIX = 3;
+}
+
+// Resource represents a quantifiable system resource
+message Resource {
+    // Resource type
+    ResourceType type = 1;
+    
+    // Current usage
+    double current = 2;
+    
+    // Maximum allowed
+    double maximum = 3;
+    
+    // Unit of measurement
+    string unit = 4;
+}
+
+// Types of resources that can be allocated
+enum ResourceType {
+    RESOURCE_TYPE_UNSPECIFIED = 0;
+    RESOURCE_TYPE_CPU = 1;
+    RESOURCE_TYPE_MEMORY = 2;
+    RESOURCE_TYPE_STORAGE = 3;
+    RESOURCE_TYPE_NETWORK = 4;
+    RESOURCE_TYPE_GPU = 5;
+}
+
+// Capability represents a learned ability or permission
+message Capability {
+    // Capability name
+    string name = 1;
+    
+    // Capability description
+    string description = 2;
+    
+    // Current proficiency (0-1)
+    float proficiency = 3;
+    
+    // When this capability was acquired
+    google.protobuf.Timestamp acquired_at = 4;
+    
+    // Required capabilities
+    repeated string prerequisites = 5;
+    
+    // Capability metadata
+    map<string, string> metadata = 15;
+}
+
+// Location represents a position in a Matrix
+message Location {
+    // Matrix identifier
+    .matrix.common.v1.Uuid matrix_id = 1;
+    
+    // Coordinates (interpretation depends on Matrix type)
+    repeated double coordinates = 2;
+    
+    // Optional region/zone identifier
+    string region = 3;
+    
+    // Location metadata
+    map<string, string> metadata = 15;
+}
+
+// Interaction represents any form of exchange between entities
+message Interaction {
+    // Unique interaction identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Interaction type
+    string type = 2;
+    
+    // Participating entities
+    repeated .matrix.common.v1.Uuid participants = 3;
+    
+    // When this interaction occurred
+    google.protobuf.Timestamp timestamp = 4;
+    
+    // Interaction data
+    bytes data = 5;
+    
+    // Location where interaction occurred
+    Location location = 6;
+    
+    // Interaction metadata
+    map<string, string> metadata = 15;
+}
+
+// Event represents an observable occurrence in the system
+message Event {
+    // Unique event identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Event type
+    string type = 2;
+    
+    // When this event occurred
+    google.protobuf.Timestamp timestamp = 3;
+    
+    // Source of the event
+    .matrix.common.v1.Uuid source_id = 4;
+    
+    // Event severity
+    EventSeverity severity = 5;
+    
+    // Event data
+    bytes data = 6;
+    
+    // Related events
+    repeated .matrix.common.v1.Uuid related_events = 7;
+    
+    // Event metadata
+    map<string, string> metadata = 15;
+}
+
+// Severity levels for events
+enum EventSeverity {
+    EVENT_SEVERITY_UNSPECIFIED = 0;
+    EVENT_SEVERITY_DEBUG = 1;
+    EVENT_SEVERITY_INFO = 2;
+    EVENT_SEVERITY_WARNING = 3;
+    EVENT_SEVERITY_ERROR = 4;
+    EVENT_SEVERITY_CRITICAL = 5;
+} 

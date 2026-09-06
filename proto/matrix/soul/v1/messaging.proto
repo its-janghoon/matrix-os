@@ -1,0 +1,116 @@
+syntax = "proto3";
+
+package matrix.soul.v1;
+
+import "google/protobuf/timestamp.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/soul/v1;soul";
+
+// Message represents a chat message in the system
+message Message {
+    // Unique identifier for this message
+    matrix.common.v1.Uuid id = 1;
+    
+    // Who sent this message
+    oneof sender {
+        matrix.common.v1.Uuid soul_id = 2;
+        matrix.common.v1.Uuid user_id = 3;
+    }
+    
+    // Who should receive this message
+    oneof recipient {
+        matrix.common.v1.Uuid recipient_soul_id = 4;
+        matrix.common.v1.Uuid recipient_user_id = 5;
+    }
+    
+    // When this message was sent
+    google.protobuf.Timestamp timestamp = 6;
+    
+    // The actual content
+    oneof content {
+        string text = 7;
+        bytes structured_data = 8;  // For future extension (e.g. rich media)
+    }
+    
+    // Optional metadata about the message
+    map<string, string> metadata = 15;
+}
+
+// StreamChatRequest represents a message in the chat stream
+message StreamChatRequest {
+    // The message being sent
+    Message message = 1;
+}
+
+// StreamChatResponse represents a message received in the chat stream
+message StreamChatResponse {
+    // The message being received
+    Message message = 1;
+}
+
+// InferRequest represents a stateless inference call to an agent
+message InferRequest {
+    // The soul to query
+    matrix.common.v1.Uuid soul_id = 1;
+    
+    // The type of inference to perform
+    string inference_type = 2;
+    
+    // Input data for the inference
+    oneof input {
+        string text = 3;
+        bytes structured_input = 4;
+    }
+    
+    // Optional context for the inference
+    map<string, string> context = 15;
+}
+
+// InferResponse contains the agent's response to an inference request
+message InferResponse {
+    // Status of the inference
+    matrix.common.v1.Status status = 1;
+    
+    // The actual response
+    oneof output {
+        string text = 2;
+        bytes structured_output = 3;
+    }
+    
+    // Confidence score (0-1)
+    float confidence = 4;
+    
+    // Time taken to process in milliseconds
+    uint32 processing_time_ms = 5;
+    
+    // Optional metadata about the inference
+    map<string, string> metadata = 15;
+}
+
+// StreamInferRequest represents a streaming inference request
+message StreamInferRequest {
+    // The inference request
+    InferRequest request = 1;
+}
+
+// StreamInferResponse represents a streaming inference response
+message StreamInferResponse {
+    // The inference response
+    InferResponse response = 1;
+}
+
+// SoulChatService handles bidirectional chat streams
+service SoulChatService {
+    // Stream messages between souls and users
+    rpc StreamChat(stream StreamChatRequest) returns (stream StreamChatResponse) {}
+}
+
+// InferenceService handles stateless inference requests
+service InferenceService {
+    // Make a single inference request to a soul
+    rpc Infer(InferRequest) returns (InferResponse) {}
+    
+    // Stream multiple inference requests/replies
+    rpc StreamInfer(stream StreamInferRequest) returns (stream StreamInferResponse) {}
+} 

@@ -1,0 +1,32 @@
+version: v1
+name: buf.build/matrix/proto
+deps:
+  - buf.build/googleapis/googleapis
+breaking:
+  use:
+    - FILE
+lint:
+  use:
+    - STANDARD
+  ignore:
+    - PACKAGE_DIRECTORY_MATCH
+    - RPC_REQUEST_RESPONSE_UNIQUE
+    - RPC_RESPONSE_STANDARD_NAME
+    - RPC_REQUEST_STANDARD_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE_TYPE
+    - RPC_RESPONSE_SAME_NAME
+    - RPC_REQUEST_SAME_NAME
+    - RPC_REQUEST_RESPONSE_SAME_NAME
+    - RPC_REQUEST_RESPONSE_UNIQUE_TYPE_IN_PACKAGE
+    - RPC_REQUEST_RESPONSE_UNIQUE_TYPE_IN_FILE
+    - RPC_REQUEST_STANDARD_NAME_IN_PACKAGE
+    - RPC_RESPONSE_STANDARD_NAME_IN_PACKAGE
+  ignore_only:
+    PACKAGE_VERSION_SUFFIX:
+      - matrix/common/v1/common.proto
+      - matrix/core/v1/types.proto
+      - matrix/soul/v1/messaging.proto
+      - matrix/soul/v1/memory.proto
+      - matrix/soul/v1/lifecycle.proto
+      - matrix/matrix/v1/interaction.proto
+      - matrix/matrix/v1/sandbox.proto

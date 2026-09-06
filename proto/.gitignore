@@ -1,0 +1,42 @@
+# Generated code
+gen/
+*.pb.go
+*.pb.gw.go
+
+# Buf
+.buf/
+
+# Go specific
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+go.work
+
+# IDE specific
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Binaries and dependencies
+bin/
+vendor/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Environment files
+.env
+.env.local
+*.env.*
+
+# System files
+.DS_Store
+Thumbs.db

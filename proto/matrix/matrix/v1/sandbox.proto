@@ -1,0 +1,221 @@
+syntax = "proto3";
+
+package matrix.matrix.v1;
+
+import "google/protobuf/duration.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/matrix/v1;matrix";
+
+// SandboxPolicy defines resource constraints and permissions for a Matrix
+message SandboxPolicy {
+    // Unique policy identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Human-readable name
+    string name = 2;
+    
+    // Policy description
+    string description = 3;
+    
+    // Resource limits
+    ResourceLimits resource_limits = 4;
+    
+    // Network access controls
+    NetworkPolicy network_policy = 5;
+    
+    // Storage access controls
+    StoragePolicy storage_policy = 6;
+    
+    // Computation limits
+    ComputePolicy compute_policy = 7;
+    
+    // Soul interaction rules
+    InteractionPolicy interaction_policy = 8;
+    
+    // Optional policy metadata
+    map<string, string> metadata = 15;
+}
+
+// ResourceLimits defines quantitative constraints on resource usage
+message ResourceLimits {
+    // Memory limits in bytes
+    uint64 max_memory_bytes = 1;
+    
+    // CPU limits (percentage * 100, e.g. 100 = 1 core)
+    uint32 max_cpu_units = 2;
+    
+    // Network bandwidth in bytes/sec
+    uint64 max_bandwidth_bytes_per_sec = 3;
+    
+    // Storage limits in bytes
+    uint64 max_storage_bytes = 4;
+    
+    // Maximum number of souls
+    uint32 max_souls = 5;
+    
+    // Maximum concurrent operations
+    uint32 max_concurrent_ops = 6;
+}
+
+// NetworkPolicy defines network access rules
+message NetworkPolicy {
+    // Whether external network access is allowed
+    bool allow_external_network = 1;
+    
+    // Allowed external domains/IPs
+    repeated string allowed_destinations = 2;
+    
+    // Blocked external domains/IPs
+    repeated string blocked_destinations = 3;
+    
+    // Maximum concurrent connections
+    uint32 max_connections = 4;
+    
+    // Rate limiting
+    RateLimit rate_limit = 5;
+}
+
+// StoragePolicy defines storage access rules
+message StoragePolicy {
+    // Whether persistent storage is allowed
+    bool allow_persistent_storage = 1;
+    
+    // Allowed storage paths
+    repeated string allowed_paths = 2;
+    
+    // File size limits in bytes
+    uint64 max_file_size_bytes = 3;
+    
+    // Total storage quota in bytes
+    uint64 quota_bytes = 4;
+    
+    // Allowed file types
+    repeated string allowed_file_types = 5;
+}
+
+// ComputePolicy defines computation constraints
+message ComputePolicy {
+    // Maximum execution time per operation
+    google.protobuf.Duration max_operation_time = 1;
+    
+    // Maximum parallel threads
+    uint32 max_threads = 2;
+    
+    // Whether GPU access is allowed
+    bool allow_gpu = 3;
+    
+    // Maximum GPU memory in bytes (if allowed)
+    uint64 max_gpu_memory_bytes = 4;
+    
+    // Allowed instruction sets
+    repeated string allowed_instruction_sets = 5;
+}
+
+// InteractionPolicy defines rules for soul interactions
+message InteractionPolicy {
+    // Whether direct soul-to-soul communication is allowed
+    bool allow_direct_communication = 1;
+    
+    // Whether broadcast messages are allowed
+    bool allow_broadcast = 2;
+    
+    // Maximum message size in bytes
+    uint64 max_message_size_bytes = 3;
+    
+    // Rate limiting for interactions
+    RateLimit interaction_rate_limit = 4;
+    
+    // Whether souls can form groups
+    bool allow_groups = 5;
+    
+    // Maximum group size
+    uint32 max_group_size = 6;
+}
+
+// RateLimit defines rate limiting parameters
+message RateLimit {
+    // Number of operations allowed
+    uint32 operations = 1;
+    
+    // Time window for rate limiting
+    google.protobuf.Duration window = 2;
+    
+    // Burst allowance
+    uint32 burst = 3;
+}
+
+// Request to create a new policy
+message CreatePolicyRequest {
+    SandboxPolicy policy = 1;
+}
+
+// Response for creating a policy
+message CreatePolicyResponse {
+    SandboxPolicy policy = 1;
+}
+
+// Request to get a policy
+message GetPolicyRequest {
+    .matrix.common.v1.Uuid policy_id = 1;
+}
+
+// Response for getting a policy
+message GetPolicyResponse {
+    SandboxPolicy policy = 1;
+}
+
+// Request to update a policy
+message UpdatePolicyRequest {
+    SandboxPolicy policy = 1;
+    // Fields to update (empty means all fields)
+    repeated string update_mask = 2;
+}
+
+// Response for updating a policy
+message UpdatePolicyResponse {
+    SandboxPolicy policy = 1;
+}
+
+// Request to delete a policy
+message DeletePolicyRequest {
+    .matrix.common.v1.Uuid policy_id = 1;
+}
+
+// Response for deleting a policy
+message DeletePolicyResponse {
+    .matrix.common.v1.Status status = 1;
+}
+
+// Request to list policies
+message ListPoliciesRequest {
+    uint32 page_size = 1;
+    string page_token = 2;
+    // Filter criteria
+    string filter = 3;
+}
+
+// Response for listing policies
+message ListPoliciesResponse {
+    repeated SandboxPolicy policies = 1;
+    string next_page_token = 2;
+    uint32 total_size = 3;
+}
+
+// SandboxPolicyService manages sandbox policies
+service SandboxPolicyService {
+    // Create a new policy
+    rpc CreatePolicy(CreatePolicyRequest) returns (CreatePolicyResponse) {}
+    
+    // Get an existing policy
+    rpc GetPolicy(GetPolicyRequest) returns (GetPolicyResponse) {}
+    
+    // Update an existing policy
+    rpc UpdatePolicy(UpdatePolicyRequest) returns (UpdatePolicyResponse) {}
+    
+    // Delete a policy
+    rpc DeletePolicy(DeletePolicyRequest) returns (DeletePolicyResponse) {}
+    
+    // List all policies
+    rpc ListPolicies(ListPoliciesRequest) returns (ListPoliciesResponse) {}
+} 

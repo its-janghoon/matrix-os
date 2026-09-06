@@ -1,0 +1,270 @@
+syntax = "proto3";
+
+package matrix.soul.v1;
+
+import "google/protobuf/timestamp.proto";
+import "matrix/common/v1/common.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/soul/v1;soul";
+
+// Memory represents a single memory unit stored by a Soul
+message Memory {
+    // Unique memory identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // When this memory was created
+    google.protobuf.Timestamp created_at = 2;
+    
+    // Memory content
+    oneof content {
+        // Textual memory
+        string text = 3;
+        
+        // Structured memory data
+        bytes structured_data = 4;
+        
+        // Reference to another memory
+        .matrix.common.v1.Uuid memory_ref = 5;
+        
+        // Reference to an interaction
+        .matrix.common.v1.Uuid interaction_ref = 6;
+    }
+    
+    // Memory importance (0-1)
+    float importance = 7;
+    
+    // Memory emotional valence (-1 to 1)
+    float emotional_valence = 8;
+    
+    // Associated concepts/tags
+    repeated string tags = 9;
+    
+    // Memory context
+    map<string, string> context = 15;
+}
+
+// Value represents a core value or belief held by a Soul
+message Value {
+    // Unique value identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Value name/description
+    string name = 2;
+    
+    // Importance of this value (0-1)
+    float importance = 3;
+    
+    // How strongly this value is held (-1 to 1)
+    float conviction = 4;
+    
+    // Supporting memories
+    repeated .matrix.common.v1.Uuid supporting_memories = 5;
+    
+    // Conflicting values
+    repeated .matrix.common.v1.Uuid conflicting_values = 6;
+    
+    // Value metadata
+    map<string, string> metadata = 15;
+}
+
+// Goal represents an objective or desired outcome for a Soul
+message Goal {
+    // Unique goal identifier
+    .matrix.common.v1.Uuid id = 1;
+    
+    // Goal description
+    string description = 2;
+    
+    // Goal priority (0-1)
+    float priority = 3;
+    
+    // Goal status
+    GoalStatus status = 4;
+    
+    // Progress towards goal (0-1)
+    float progress = 5;
+    
+    // When this goal was created
+    google.protobuf.Timestamp created_at = 6;
+    
+    // Optional deadline
+    google.protobuf.Timestamp deadline = 7;
+    
+    // Parent goal (if this is a subgoal)
+    .matrix.common.v1.Uuid parent_goal_id = 8;
+    
+    // Child goals (for complex goals)
+    repeated .matrix.common.v1.Uuid child_goal_ids = 9;
+    
+    // Supporting values
+    repeated .matrix.common.v1.Uuid aligned_values = 10;
+    
+    // Goal metadata
+    map<string, string> metadata = 15;
+}
+
+// Status of a goal
+enum GoalStatus {
+    GOAL_STATUS_UNSPECIFIED = 0;
+    GOAL_STATUS_ACTIVE = 1;
+    GOAL_STATUS_COMPLETED = 2;
+    GOAL_STATUS_FAILED = 3;
+    GOAL_STATUS_ABANDONED = 4;
+    GOAL_STATUS_BLOCKED = 5;
+}
+
+// Request/Response messages for Memory service
+message StoreMemoryRequest {
+    Memory memory = 1;
+}
+
+message StoreMemoryResponse {
+    Memory memory = 1;
+}
+
+message QueryMemoriesRequest {
+    // Search query
+    string query = 1;
+    
+    // Filter by tags
+    repeated string tags = 2;
+    
+    // Minimum importance
+    float min_importance = 3;
+    
+    // Time range
+    google.protobuf.Timestamp start_time = 4;
+    google.protobuf.Timestamp end_time = 5;
+    
+    // Pagination
+    uint32 page_size = 6;
+    string page_token = 7;
+}
+
+message QueryMemoriesResponse {
+    repeated Memory memories = 1;
+    string next_page_token = 2;
+}
+
+message UpdateMemoryRequest {
+    Memory memory = 1;
+    repeated string update_mask = 2;
+}
+
+message UpdateMemoryResponse {
+    Memory memory = 1;
+}
+
+message ForgetMemoryRequest {
+    .matrix.common.v1.Uuid memory_id = 1;
+}
+
+message ForgetMemoryResponse {
+    .matrix.common.v1.Status status = 1;
+}
+
+// Request/Response messages for Value service
+message DefineValueRequest {
+    Value value = 1;
+}
+
+message DefineValueResponse {
+    Value value = 1;
+}
+
+message UpdateValueRequest {
+    Value value = 1;
+    repeated string update_mask = 2;
+}
+
+message UpdateValueResponse {
+    Value value = 1;
+}
+
+message ListValuesRequest {
+    // Pagination
+    uint32 page_size = 1;
+    string page_token = 2;
+}
+
+message ListValuesResponse {
+    repeated Value values = 1;
+    string next_page_token = 2;
+}
+
+// Request/Response messages for Goal service
+message SetGoalRequest {
+    Goal goal = 1;
+}
+
+message SetGoalResponse {
+    Goal goal = 1;
+}
+
+message UpdateGoalRequest {
+    Goal goal = 1;
+    repeated string update_mask = 2;
+}
+
+message UpdateGoalResponse {
+    Goal goal = 1;
+}
+
+message ListGoalsRequest {
+    // Filter by status
+    repeated GoalStatus status = 1;
+    
+    // Filter by priority
+    float min_priority = 2;
+    
+    // Include completed goals
+    bool include_completed = 3;
+    
+    // Pagination
+    uint32 page_size = 4;
+    string page_token = 5;
+}
+
+message ListGoalsResponse {
+    repeated Goal goals = 1;
+    string next_page_token = 2;
+}
+
+// MemoryService manages a Soul's memories
+service MemoryService {
+    // Store a new memory
+    rpc StoreMemory(StoreMemoryRequest) returns (StoreMemoryResponse) {}
+    
+    // Retrieve memories
+    rpc QueryMemories(QueryMemoriesRequest) returns (QueryMemoriesResponse) {}
+    
+    // Update memory importance/context
+    rpc UpdateMemory(UpdateMemoryRequest) returns (UpdateMemoryResponse) {}
+    
+    // Forget a memory
+    rpc ForgetMemory(ForgetMemoryRequest) returns (ForgetMemoryResponse) {}
+}
+
+// ValueService manages a Soul's values
+service ValueService {
+    // Define a new value
+    rpc DefineValue(DefineValueRequest) returns (DefineValueResponse) {}
+    
+    // Update a value
+    rpc UpdateValue(UpdateValueRequest) returns (UpdateValueResponse) {}
+    
+    // List all values
+    rpc ListValues(ListValuesRequest) returns (ListValuesResponse) {}
+}
+
+// GoalService manages a Soul's goals
+service GoalService {
+    // Set a new goal
+    rpc SetGoal(SetGoalRequest) returns (SetGoalResponse) {}
+    
+    // Update goal status/progress
+    rpc UpdateGoal(UpdateGoalRequest) returns (UpdateGoalResponse) {}
+    
+    // List active goals
+    rpc ListGoals(ListGoalsRequest) returns (ListGoalsResponse) {}
+} 
