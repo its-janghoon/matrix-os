@@ -1,0 +1,327 @@
+syntax = "proto3";
+
+package matrix.market.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1;market";
+
+// JobStatus mirrors the marketplace job lifecycle. Values track a paid compute
+// job from submission through settlement or teardown.
+enum JobStatus {
+    // Unset/unknown status.
+    JOB_STATUS_UNSPECIFIED = 0;
+    // Job is submitted and capacity is reserved, but not yet settled.
+    JOB_STATUS_PENDING = 1;
+    // Job is actively executing on the provider.
+    JOB_STATUS_RUNNING = 2;
+    // Job settled successfully and credits transferred buyer -> provider.
+    JOB_STATUS_COMPLETED = 3;
+    // Job failed to execute; no credits transferred.
+    JOB_STATUS_FAILED = 4;
+    // Job was cancelled and reserved capacity returned to the provider.
+    JOB_STATUS_CANCELLED = 5;
+}
+
+// ProviderOrigin distinguishes providers registered on this local node from
+// providers discovered over the P2P gossip network, so buyers can tell local
+// capacity apart from remote capacity.
+enum ProviderOrigin {
+    // Unset/unknown origin.
+    PROVIDER_ORIGIN_UNSPECIFIED = 0;
+    // Provider is registered on the local node's order book.
+    PROVIDER_ORIGIN_LOCAL = 1;
+    // Provider was discovered from a remote P2P announcement.
+    PROVIDER_ORIGIN_REMOTE = 2;
+}
+
+// Provider describes an idle-machine compute provider and its advertised
+// capacity, pricing, and origin (local order book vs. remote P2P discovery).
+message Provider {
+    // Stable provider identifier.
+    string id = 1;
+    // Total advertised capacity in compute units.
+    uint64 capacity = 2;
+    // Price per compute unit, in credits.
+    uint64 price_per_unit = 3;
+    // Currently-available (unreserved) capacity in compute units.
+    uint64 available = 4;
+    // Whether this provider is local or remote.
+    ProviderOrigin origin = 5;
+    // For remote providers, the libp2p peer ID that announced the provider.
+    // Empty for local providers.
+    string peer_id = 6;
+}
+
+// Job describes a paid compute job submitted by a buyer against a provider.
+message Job {
+    // Stable job identifier.
+    string id = 1;
+    // Account ID of the buyer who submitted the job.
+    string buyer = 2;
+    // Provider ID the job runs against.
+    string provider = 3;
+    // Number of compute units requested.
+    uint64 units = 4;
+    // Total price in credits (units * provider price_per_unit).
+    uint64 price = 5;
+    // Current lifecycle status.
+    JobStatus status = 6;
+    // When the job was submitted.
+    google.protobuf.Timestamp created_at = 7;
+    // When the job's status last changed.
+    google.protobuf.Timestamp updated_at = 8;
+}
+
+// Transaction is a single settled, signed transfer recorded in the token chain.
+message Transaction {
+    // Zero-based height (position) of the record in the chain.
+    uint64 height = 1;
+    // Sender account ID (hex-encoded ed25519 public key).
+    string from = 2;
+    // Recipient account ID.
+    string to = 3;
+    // Amount transferred, in credits.
+    uint64 amount = 4;
+    // Per-sender monotonic nonce that provided replay protection.
+    uint64 nonce = 5;
+    // SHA-256 link hash of this record.
+    bytes hash = 6;
+    // Link hash of the previous record this transaction chained onto.
+    bytes prev_hash = 7;
+    // Advisory wall-clock time the transaction carried.
+    google.protobuf.Timestamp timestamp = 8;
+}
+
+// RegisterProviderRequest advertises local compute capacity on the order book.
+message RegisterProviderRequest {
+    // Desired provider ID. Must be non-empty and unique.
+    string id = 1;
+    // Total capacity in compute units. Must be > 0.
+    uint64 capacity = 2;
+    // Price per compute unit in credits. Must be > 0.
+    uint64 price_per_unit = 3;
+}
+
+// RegisterProviderResponse returns the registered provider record.
+message RegisterProviderResponse {
+    // The registered provider, with available capacity initialized to capacity.
+    Provider provider = 1;
+}
+
+// ListProvidersRequest enumerates providers.
+message ListProvidersRequest {
+    // When true, include remote providers discovered over P2P gossip in
+    // addition to the local order book. When false, only local providers are
+    // returned.
+    bool include_remote = 1;
+}
+
+// ListProvidersResponse returns providers, each flagged by origin.
+message ListProvidersResponse {
+    // Providers ordered by ID, local entries followed by remote entries.
+    repeated Provider providers = 1;
+}
+
+// SubmitJobRequest reserves capacity for a paid compute job. No credits move at
+// submit time; the buyer is charged only on CompleteJob.
+message SubmitJobRequest {
+    // Buyer account ID.
+    string buyer = 1;
+    // Target provider ID.
+    string provider = 2;
+    // Number of compute units to reserve. Must be > 0.
+    uint64 units = 3;
+}
+
+// SubmitJobResponse returns the newly-created pending job.
+message SubmitJobResponse {
+    // The created job in PENDING state.
+    Job job = 1;
+}
+
+// GetJobRequest looks up a single job by ID.
+message GetJobRequest {
+    // Job ID to fetch.
+    string id = 1;
+}
+
+// GetJobResponse returns the requested job.
+message GetJobResponse {
+    // The requested job.
+    Job job = 1;
+}
+
+// ListJobsRequest enumerates jobs.
+message ListJobsRequest {
+    // Optional buyer filter. When non-empty, only jobs submitted by this buyer
+    // are returned.
+    string buyer = 1;
+}
+
+// ListJobsResponse returns jobs in chronological order.
+message ListJobsResponse {
+    // Jobs ordered by creation time, then ID.
+    repeated Job jobs = 1;
+}
+
+// CompleteJobRequest settles a pending/running job, transferring its price from
+// buyer to provider.
+message CompleteJobRequest {
+    // Job ID to complete.
+    string id = 1;
+}
+
+// CompleteJobResponse returns the settled job.
+message CompleteJobResponse {
+    // The job in COMPLETED state.
+    Job job = 1;
+}
+
+// CancelJobRequest cancels a pending/running job and returns reserved capacity.
+message CancelJobRequest {
+    // Job ID to cancel.
+    string id = 1;
+}
+
+// CancelJobResponse returns the cancelled job.
+message CancelJobResponse {
+    // The job in CANCELLED state.
+    Job job = 1;
+}
+
+// GetBalanceRequest reads a compute-credit balance.
+message GetBalanceRequest {
+    // Account ID to read the balance for. Unknown accounts return zero.
+    string account = 1;
+}
+
+// GetBalanceResponse returns a compute-credit balance.
+message GetBalanceResponse {
+    // Account ID the balance belongs to.
+    string account = 1;
+    // Current balance in credits.
+    uint64 balance = 2;
+}
+
+// GetTransactionRequest reads one settled transaction from the chain by height.
+message GetTransactionRequest {
+    // Zero-based chain height of the transaction to read.
+    uint64 height = 1;
+}
+
+// GetTransactionResponse returns a single chain transaction.
+message GetTransactionResponse {
+    // The transaction recorded at the requested height.
+    Transaction transaction = 1;
+}
+
+// ListTransactionsRequest reads settled transactions from the chain in order.
+message ListTransactionsRequest {
+    // Zero-based height to start from (inclusive).
+    uint64 start_height = 1;
+    // Maximum number of transactions to return. Zero means no explicit limit
+    // (the server may still cap the result).
+    uint64 limit = 2;
+}
+
+// ListTransactionsResponse returns settled transactions and the chain length.
+message ListTransactionsResponse {
+    // Transactions in ascending height order.
+    repeated Transaction transactions = 1;
+    // Total number of records currently in the chain.
+    uint64 chain_length = 2;
+}
+
+// SubmitSignedTransferRequest carries a client-signed ed25519 transfer to be
+// verified and applied through the signed-settlement path. The signature must
+// cover the canonical serialization of the sender key, recipient, amount,
+// nonce, timestamp and prev_hash. prev_hash must equal the current chain head
+// (obtain it out of band via the most recent transaction / chain state).
+message SubmitSignedTransferRequest {
+    // Sender's raw 32-byte ed25519 public key.
+    bytes from_public_key = 1;
+    // Recipient account ID.
+    string to = 2;
+    // Amount to transfer, in credits.
+    uint64 amount = 3;
+    // Per-sender monotonic nonce (must equal the sender's next expected nonce).
+    uint64 nonce = 4;
+    // Link hash of the current chain head this transfer chains onto.
+    bytes prev_hash = 5;
+    // ed25519 signature over the canonical transaction payload.
+    bytes signature = 6;
+    // Advisory wall-clock time in unix nanoseconds (does not affect validation).
+    int64 timestamp = 7;
+}
+
+// SubmitSignedTransferResponse returns the settled transaction record.
+message SubmitSignedTransferResponse {
+    // The settled transaction as recorded on the chain.
+    Transaction transaction = 1;
+}
+
+// MarketService is the external gRPC surface of the Matrix OS compute
+// marketplace. It exposes the local order book, remote P2P providers, the
+// compute-credit ledger, signed settlement, and the token chain so external
+// buyers and providers can register capacity, submit and settle paid compute
+// jobs, and audit settled transfers.
+service MarketService {
+    // RegisterProvider advertises local idle-compute capacity on the order book.
+    // Input: desired ID, total capacity, and price per unit (all required, > 0).
+    // Output: the registered provider with available capacity seeded to capacity.
+    // Side effects: persists the provider and updates provider-count metrics.
+    rpc RegisterProvider(RegisterProviderRequest) returns (RegisterProviderResponse) {}
+
+    // ListProviders enumerates providers. Input: whether to include remote P2P
+    // providers. Output: providers flagged by origin (local vs. remote). No side
+    // effects; remote entries are drawn from the P2P discovery registry.
+    rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse) {}
+
+    // SubmitJob reserves provider capacity for a paid job. Input: buyer,
+    // provider, and units (> 0). Output: the created PENDING job. Side effects:
+    // decrements the provider's available capacity and persists a new job. No
+    // credits move until CompleteJob.
+    rpc SubmitJob(SubmitJobRequest) returns (SubmitJobResponse) {}
+
+    // GetJob fetches a single job by ID. Input: job ID. Output: the job. No side
+    // effects.
+    rpc GetJob(GetJobRequest) returns (GetJobResponse) {}
+
+    // ListJobs enumerates jobs in chronological order. Input: optional buyer
+    // filter. Output: matching jobs. No side effects.
+    rpc ListJobs(ListJobsRequest) returns (ListJobsResponse) {}
+
+    // CompleteJob settles a pending/running job. Input: job ID. Output: the
+    // COMPLETED job. Side effects: transfers the job price from buyer to provider
+    // through the ledger and updates settlement metrics.
+    rpc CompleteJob(CompleteJobRequest) returns (CompleteJobResponse) {}
+
+    // CancelJob cancels a pending/running job. Input: job ID. Output: the
+    // CANCELLED job. Side effects: returns reserved capacity to the provider. No
+    // credits move.
+    rpc CancelJob(CancelJobRequest) returns (CancelJobResponse) {}
+
+    // GetBalance reads a compute-credit balance. Input: account ID. Output: the
+    // balance (zero for unknown accounts). No side effects.
+    rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse) {}
+
+    // GetTransaction reads one settled transaction from the token chain by
+    // height. Input: chain height. Output: the transaction record. No side
+    // effects.
+    rpc GetTransaction(GetTransactionRequest) returns (GetTransactionResponse) {}
+
+    // ListTransactions reads settled transactions from the token chain in
+    // ascending height order. Input: start height and limit. Output: the
+    // transactions and the current chain length. No side effects.
+    rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse) {}
+
+    // SubmitSignedTransfer verifies and applies a client-signed ed25519 transfer
+    // through the signed-settlement path. Input: sender public key, recipient,
+    // amount, nonce, prev_hash, signature, and advisory timestamp. Output: the
+    // settled transaction record. Side effects: appends a record to the
+    // hash-chained transaction log and moves credits on the ledger atomically;
+    // rejects invalid signatures, wrong nonces, prev-hash mismatches, and
+    // unaffordable transfers without mutating any state.
+    rpc SubmitSignedTransfer(SubmitSignedTransferRequest) returns (SubmitSignedTransferResponse) {}
+}

@@ -11,6 +11,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/agent"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/marketapi"
 	"github.com/ecirlabs/matrix-core/internal/marketexchange"
 	"github.com/ecirlabs/matrix-core/internal/matrix"
 	"github.com/ecirlabs/matrix-core/internal/metrics"
@@ -38,6 +39,9 @@ type Config struct {
 	Admin struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"admin"`
+	Market struct {
+		Addr string `yaml:"addr"`
+	} `yaml:"market"`
 }
 
 // Node represents a Matrix node instance
@@ -52,8 +56,9 @@ type Node struct {
 	market      *market.Market
 	tokenChain  *token.Chain
 	exchange    *marketexchange.Exchange
-	metrics     *metrics.Collector
-	adminServer *admin.Server
+	metrics      *metrics.Collector
+	adminServer  *admin.Server
+	marketServer *marketapi.Server
 	agents      map[string]*agent.Agent
 	agentsMu    sync.RWMutex
 	souls       map[string]*soul.Soul
@@ -72,6 +77,7 @@ func Initialize(configPath string) error {
 	config.Security.EnableACLs = true
 	config.Security.AllowUnsignedAgents = false
 	config.Admin.Addr = "0.0.0.0:9090"
+	config.Market.Addr = "0.0.0.0:9091"
 
 	// Create config directory if it doesn't exist
 	configDir := filepath.Dir(configPath)
@@ -111,6 +117,9 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	// Set defaults if not specified
 	if config.Admin.Addr == "" {
 		config.Admin.Addr = "0.0.0.0:9090"
+	}
+	if config.Market.Addr == "" {
+		config.Market.Addr = "0.0.0.0:9091"
 	}
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
@@ -245,6 +254,35 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start admin server: %w", err)
 	}
 
+	// Initialize and start the external marketplace gRPC API. It runs as a
+	// parallel gRPC server to the admin server (its own configurable addr) so
+	// the market surface can bind independently. It is backed by the same real
+	// subsystems the node runs: the market order book/ledger, the signed
+	// settlement path over the token chain, and the P2P exchange for remote
+	// providers. When ACLs are enabled it reuses the admin authenticator so the
+	// same API keys gate the market API; otherwise it serves unauthenticated
+	// (guarding on a nil authenticator like the admin services do).
+	var marketAuth *admin.Authenticator
+	if n.config.Security.EnableACLs {
+		marketAuth = n.adminServer.GetAuthenticator()
+	}
+	marketSettled := token.NewSettledLedger(n.market.Ledger(), n.tokenChain)
+	marketServer, err := marketapi.NewServer(marketapi.Config{
+		Addr:     n.config.Market.Addr,
+		Auth:     marketAuth,
+		Market:   n.market,
+		Settled:  marketSettled,
+		Chain:    n.tokenChain,
+		Exchange: n.exchange,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create market API server: %w", err)
+	}
+	n.marketServer = marketServer
+	if err := n.marketServer.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start market API server: %w", err)
+	}
+
 	// Update metrics
 	n.metrics.RecordPeerCount(len(n.p2pHost.GetHost().Network().Peers()))
 
@@ -263,6 +301,13 @@ func (n *Node) Stop() error {
 		}
 	}
 	n.agentsMu.Unlock()
+
+	// Stop market API server
+	if n.marketServer != nil {
+		if err := n.marketServer.Stop(n.ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to stop market API server: %w", err))
+		}
+	}
 
 	// Stop admin server
 	if n.adminServer != nil {
@@ -362,4 +407,11 @@ func (n *Node) GetTokenChain() *token.Chain {
 // settlements received from the network into the local ledger.
 func (n *Node) GetExchange() *marketexchange.Exchange {
 	return n.exchange
+}
+
+// GetMarketAPI returns the external marketplace gRPC server, which exposes the
+// order book, remote providers, signed settlement and the token chain to
+// external buyers and providers over gRPC.
+func (n *Node) GetMarketAPI() *marketapi.Server {
+	return n.marketServer
 }

@@ -135,7 +135,20 @@ security:
 
 ## 🚀 Getting Started
 
-1. Build the daemon:
+> **Generated Protocol Buffers stubs are required.** The external marketplace
+> gRPC API (`internal/marketapi`, exposing `matrix.market.v1.MarketService`)
+> imports Go stubs generated from `proto/`. Those stubs live under `proto/gen`,
+> which is gitignored and **not** committed, so a fresh checkout must generate
+> them before building:
+>
+> ```bash
+> cd ../../proto && buf generate   # writes proto/gen/go/matrix/**
+> ```
+>
+> Or from the repo root, run `make proto` (or `make build`), which runs
+> `buf generate` and then builds this module.
+
+1. Build the daemon (after generating proto stubs, see above):
    ```bash
    go build ./cmd/matrixd
    ```

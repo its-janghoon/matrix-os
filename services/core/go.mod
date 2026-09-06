@@ -4,6 +4,7 @@ go 1.24.2
 
 require (
 	github.com/cockroachdb/pebble v1.1.5
+	github.com/ecirlabs/matrix-proto v0.0.0-00010101000000-000000000000
 	github.com/google/uuid v1.6.0
 	github.com/libp2p/go-libp2p v0.41.1
 	github.com/libp2p/go-libp2p-pubsub v0.13.1
@@ -11,8 +12,17 @@ require (
 	github.com/prometheus/client_golang v1.21.1
 	github.com/tetratelabs/wazero v1.9.0
 	google.golang.org/grpc v1.66.0
+	google.golang.org/protobuf v1.36.5
 	gopkg.in/yaml.v3 v3.0.1
 )
+
+// matrix-proto is an in-repo module with no published version. Resolve it from
+// the sibling proto/ directory so both workspace-mode (go.work also `use`s
+// ./proto) and standalone module builds pick up the locally-generated stubs.
+// The stubs under proto/gen are gitignored, so run `buf generate` in proto/
+// before building services/core from a fresh checkout (see the Makefile
+// `proto` target).
+replace github.com/ecirlabs/matrix-proto => ../../proto
 
 require (
 	github.com/DataDog/zstd v1.4.5 // indirect
@@ -122,6 +132,5 @@ require (
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/tools v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect
-	google.golang.org/protobuf v1.36.5 // indirect
 	lukechampine.com/blake3 v1.4.0 // indirect
 )
