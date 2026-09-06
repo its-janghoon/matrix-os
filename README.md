@@ -15,36 +15,53 @@ document describes the layout and how to build and test each piece.
 - [`proto`](proto/README.md) — Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
 - [`apps/web`](apps/web) — the Next.js marketing website (ecirlabs-web).
 - [`apps/console`](apps/console/README.md) — Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
-- [`contracts`](contracts/README.md) — the Hardhat project for MATRIX, the ERC-20 settlement and earning token of the compute marketplace.
+- [`contracts`](contracts/README.md) — the Hardhat project for wMATRIX, the bridged ERC-20 mirror of the native MATRIX coin that lets the asset list on exchanges (the native coin on the Go L1 remains the single source of truth for balances).
 
 ## Screenshots
 
-The marketing site and the console below present the four shipped capabilities: the MATRIX
-ERC-20 settlement token, the fast leader-based consensus chain, real LLM inference (local
-runner + provider-API proxy), and the Matrix Console desktop app. Images live in
+The marketing site now uses a multi-page information architecture: a concise landing page
+routes out to dedicated product pages. Together with the desktop app, the screenshots below
+tell the accurate native-first story. Native MATRIX is the coin of the Go consensus L1 and
+the single source of truth for balances, capped at 1,000,000,000 whole MATRIX at 9 decimals.
+wMATRIX is the bridged ERC-20 mirror that lets the asset list on exchanges (it is not the
+settlement token). The network runs fast leader-based BFT consensus that agrees one global
+ledger, offers LLM inference through a local runner and a provider-API proxy, ships the
+`matrix` CLI, and the Matrix Console desktop app. Images live in
 [`docs/screenshots`](docs/screenshots).
 
 ### Marketing site (`apps/web`)
 
 ![Matrix OS home hero](docs/screenshots/web-home.png)
-*The Matrix OS home page.*
+*The Matrix OS home page: a concise landing that routes visitors to the product pages.*
 
-![MATRIX token section](docs/screenshots/web-token.png)
-*MATRIX, the ERC-20 settlement and earning token: name, symbol, decimals, and supply cap.*
+![Compute Marketplace product page](docs/screenshots/web-marketplace.png)
+*Compute Marketplace: peer-to-peer capacity announce and discovery with signed jobs that settle in native MATRIX.*
 
-![Global consensus section](docs/screenshots/web-consensus.png)
-*The fast, leader-based BFT consensus chain that agrees one global ledger.*
+![MATRIX Token product page](docs/screenshots/web-token.png)
+*MATRIX Token: native coin cards (name, symbol, decimals, and 1,000,000,000 max-supply cap) plus the bridged wrapped ERC-20 mirror panel for exchange listing.*
 
-![LLM inference section](docs/screenshots/web-inference.png)
-*Two ways to contribute LLM compute: a local runner and a provider-API proxy.*
+![Consensus product page](docs/screenshots/web-consensus.png)
+*Consensus: fast leader-based BFT that agrees one global ledger.*
 
-![Compute marketplace docs](docs/screenshots/web-docs.png)
-*The Compute Marketplace documentation page.*
+![LLM Inference product page](docs/screenshots/web-inference.png)
+*LLM Inference: two ways to contribute compute, a local runner and a provider-API proxy.*
+
+![Console product page](docs/screenshots/web-console.png)
+*Console: the product page for the Matrix Console desktop app.*
+
+![How It Works page](docs/screenshots/web-how-it-works.png)
+*How It Works: the end-to-end walkthrough of the network.*
+
+![matrix CLI product page](docs/screenshots/web-cli.png)
+*The `matrix` CLI product and reference page.*
+
+![Docs page](docs/screenshots/web-docs.png)
+*The documentation page.*
 
 ### Console (`apps/console`)
 
 ![Matrix Console desktop app](docs/screenshots/console-app.png)
-*Matrix Console: providers, jobs, MATRIX wallet, consensus, and inference in one window.*
+*Matrix Console: providers, jobs, native MATRIX wallet, consensus, and inference tabs in one window.*
 
 ## Repository tooling
 
