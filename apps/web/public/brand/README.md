@@ -18,12 +18,31 @@ no new colour added to the system:
 
 ## The concepts
 
+Round two, cut in the register the crypto/L1 genre actually uses: faceted solids,
+hexagons, isometric blocks, mitred corners, no round caps.
+
+**None of these copies the Ethereum mark.** A four-sided faceted diamond *is* that
+logo, so the solids here are a hexagon, a cube and a letterform instead - the
+genre's vocabulary without its most recognisable shape.
+
 | Slug | Name | What it says |
 | --- | --- | --- |
-| `quorum` | Quorum | A >2/3 quorum closing over a committed block. The lit arc is exactly 240 of 360 degrees, so the consensus threshold is the mark's proportion, not decoration. |
-| `lattice-m` | Lattice M | An M drawn as a peer graph: five nodes, four links. Reads as both the letter and the network. |
-| `ecir-e` | ECIR E | An E monogram for the company, built on one geometric grid. |
-| `aperture` | Aperture | A square aperture closing on a running core: the platform framing whatever runs inside it. |
+| `block` | Block | An isometric block, lit on the newest face. Three faces off one blue ramp, coral inset on the lit top. |
+| `hex-quorum` | Hex Quorum | Six validators as six countable edges, five of them lit - five, not four, because a six-validator set commits on *more* than two thirds. |
+| `facet-m` | Facet M | The M re-cut as four flat facets, each stroke the same width by construction. |
+| `shard` | Shard | A hexagonal stone cut in six wedges, lit from the upper right. The one concept with no accent colour. |
+
+### Round one, kept for reference
+
+Drawn in soft rounded strokes, which read as developer tooling rather than an L1.
+`facet-m` is `lattice-m` re-cut in the new register.
+
+| Slug | Name | What it says |
+| --- | --- | --- |
+| `quorum` | Quorum | A >2/3 quorum closing over a committed block; the lit arc is exactly 240 of 360 degrees. |
+| `lattice-m` | Lattice M | An M drawn as a peer graph: five nodes, four links. |
+| `ecir-e` | ECIR E | An E monogram for the company on one geometric grid. |
+| `aperture` | Aperture | A square aperture closing on a running core. |
 
 ## Files per concept
 
@@ -40,6 +59,11 @@ margin), so any two concepts drop into the same slot at the same visual weight.
 `mark-mono.svg` paints with `currentColor`, so it inherits the surrounding text
 colour - drop it in a dark header and it is white; drop it on a light page and it
 is ink. Nothing to swap per theme.
+
+The faceted concepts (`block`, `facet-m`, `shard`) shade their faces off a blue
+ramp in colour. In one colour the paint collapses to `currentColor` and the face
+**opacity** carries the shading instead, so a solid still reads as a solid at
+16px rather than flattening to a blob.
 
 ## Wordmark caveat
 
@@ -64,9 +88,19 @@ cd apps/web/public/brand && BRAND_OUT=. python3 generate.py
 ```
 
 The script records, in each concept's docstring, the versions that were cut and
-why - a fan-out that rendered as the system share icon, a converging-nodes mark
-that read as a trident, a two-square bridge that read as a toggle switch. Worth
-reading before proposing a fifth concept.
+why:
+
+- a fan-out that rendered as the system share icon
+- a converging-nodes mark that read as a trident
+- a rotational four-bar pinwheel that could read as a swastika
+- a two-square bridge that read as a UI toggle, then muddied at 16px
+- a gem cut as a crown over a rectangular girdle, which read as a house
+- an M whose hand-picked inner vertices gave the legs and diagonals different
+  weights
+
+Worth reading before proposing another concept. `concept_facet_m` also asserts
+its own bounds, because a mis-set stroke extension pushes a corner off-canvas
+silently and only shows up once rendered.
 
 ## Wiring the chosen mark
 
