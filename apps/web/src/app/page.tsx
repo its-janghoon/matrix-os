@@ -276,7 +276,7 @@ export default function Home() {
                 </p>
                 <ul className='space-y-4'>
                   <CheckItem>Native lock to wrapped mint: minting requires a threshold of validator secp256k1 attestations that native was locked</CheckItem>
-                  <CheckItem>Wrapped burn to native unlock: burning wMATRIX authorizes releasing the escrowed native MATRIX</CheckItem>
+                  <CheckItem>Wrapped burn to native unlock: a burn emits an on-chain Burned event that is decoded into an authorization to release the escrowed native MATRIX, applied exactly once per event</CheckItem>
                   <CheckItem>Backed 1:1 by locked native, reconciled through the exact 1e9 conversion factor</CheckItem>
                   <CheckItem>Local and test networks only, not deployed to a public Ethereum network</CheckItem>
                 </ul>
@@ -338,7 +338,7 @@ export default function Home() {
                   <ul className='space-y-4'>
                     <CheckItem>Hash-linked committed block chain shared by every node</CheckItem>
                     <CheckItem>Deterministic ledger application, so all honest nodes converge</CheckItem>
-                    <CheckItem>Authoritative agreed ledger for settlement that runs through it, alongside the pairwise path</CheckItem>
+                    <CheckItem>Authoritative agreed ledger where both compute and inference settle by default</CheckItem>
                   </ul>
                 </div>
               </div>

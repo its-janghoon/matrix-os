@@ -54,7 +54,7 @@ export default function ComputeMarketplaceDocs() {
                     </p>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
                       <li><strong>Lock to mint</strong> — native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
-                      <li><strong>Burn to unlock</strong> — burning wMATRIX authorizes releasing the escrowed native MATRIX back on the L1</li>
+                      <li><strong>Burn to unlock</strong> — burning wMATRIX emits an on-chain Burned event; the bridge decodes that event into an unlock authorization (keyed by transaction hash and log index) and releases the escrowed native MATRIX back on the L1 exactly once per event. Today the event is fed in by an operator or the end-to-end test rather than a always-on log watcher.</li>
                       <li>Native has 9 decimals and wMATRIX has 18, so one native base unit equals 1e9 wrapped base units and the 1,000,000,000 MATRIX cap maps to the same money on both sides</li>
                       <li>Runs against local and test networks only; it is not deployed to any public Ethereum network</li>
                     </ul>
@@ -75,9 +75,11 @@ export default function ComputeMarketplaceDocs() {
                       <li>All nodes apply the same ordered ledger, so a balance is a network-wide fact</li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
-                      Consensus is the authoritative, globally agreed ledger for settlement that flows through it, such
-                      as the inference marketplace. It runs alongside the earlier per-node pairwise settlement rather
-                      than replacing it yet, so drive settlement through consensus when a single agreed ledger matters.
+                      Consensus is the authoritative, globally agreed ledger for marketplace settlement. Both the
+                      compute marketplace and the LLM inference marketplace settle buyer to provider through consensus
+                      in native MATRIX by default. The earlier per-node pairwise settlement and the direct token-chain
+                      transfer remain as separate, non-default primitives for point-to-point transfers, but the
+                      marketplace flows no longer use them.
                     </p>
                   </div>
 
