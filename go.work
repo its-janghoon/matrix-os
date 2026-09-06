@@ -5,4 +5,11 @@ use (
 	./services/core
 )
 
+// Workspace mode unions the dependency graphs of services/core and proto, which
+// surfaces an ambiguous import of the googleapis/rpc packages between the
+// pre-split monolithic genproto (v0.0.0-20230410155749-daa745c078e1) and the
+// split genproto/googleapis/rpc module. This replace pins the post-split
+// monolithic genproto that no longer ships googleapis/rpc, so the combined
+// build resolves the import unambiguously. It only takes effect in workspace
+// mode; standalone module builds are unaffected.
 replace google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 => google.golang.org/genproto v0.0.0-20240604185151-ef581f913117
