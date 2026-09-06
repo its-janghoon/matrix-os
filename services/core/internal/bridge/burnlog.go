@@ -189,7 +189,12 @@ func decodeStringUint(data []byte) (string, *big.Int, error) {
 	}
 	strLen := lenWord.Uint64()
 	start := off + wordLen
-	if start+strLen > uint64(len(data)) {
+	// The prior offset check guarantees off+wordLen <= len(data), so
+	// start <= len(data) and uint64(len(data))-start does not underflow. Compare
+	// strLen against that remaining room instead of computing start+strLen, which
+	// would wrap for a near-MaxUint64 strLen and let an adversarial log bypass the
+	// guard and panic on the slice below.
+	if strLen > uint64(len(data))-start {
 		return "", nil, fmt.Errorf("%w: string length %d overruns data", ErrMalformedLog, strLen)
 	}
 	// The string bytes are right-padded to a multiple of 32; the padding must be

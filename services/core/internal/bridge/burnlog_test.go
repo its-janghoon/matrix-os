@@ -2,6 +2,7 @@ package bridge
 
 import (
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -98,15 +99,57 @@ func TestDecodeBurnedLog_RoundTrip(t *testing.T) {
 	}
 }
 
+// abiEncodeStringUintWithLen builds a Burned-event data buffer with a valid
+// head (offset word 0x40 and amount word) and a body whose declared string
+// length word is set to strLen, while the actual tail bytes are `body`
+// (right-padded to a word). It lets a test declare a length that does not match
+// the buffer, e.g. a near-MaxUint64 value, to exercise the overrun guard.
+func abiEncodeStringUintWithLen(strLen *big.Int, body []byte, amount *big.Int) []byte {
+	out := make([]byte, 0, 3*wordLen+len(body))
+	// word0: offset to string = 0x40.
+	off := make([]byte, wordLen)
+	off[wordLen-1] = 0x40
+	out = append(out, off...)
+	// word1: amount.
+	out = append(out, leftPad32(amount.Bytes())...)
+	// word2: declared string length (may be adversarial / not match body).
+	l := make([]byte, wordLen)
+	strLen.FillBytes(l)
+	out = append(out, l...)
+	// tail: actual body bytes, right-padded to a multiple of 32.
+	if len(body) > 0 {
+		padded := ((len(body) + wordLen - 1) / wordLen) * wordLen
+		buf := make([]byte, padded)
+		copy(buf, body)
+		out = append(out, buf...)
+	}
+	return out
+}
+
 // TestDecodeBurnedLog_Rejects covers the malformed / wrong-event guards.
 func TestDecodeBurnedLog_Rejects(t *testing.T) {
 	valid := abiEncodeStringUint("acct", big.NewInt(1_000_000_000))
 	burner, _ := ParseAddress("0x2222222222222222222222222222222222222222")
 
+	// A data buffer with a valid head/amount but a string-length word set near
+	// MaxUint64. The overrun guard must reject this with ErrMalformedLog rather
+	// than wrapping start+strLen and panicking on the slice.
+	maxUint64 := new(big.Int).SetUint64(^uint64(0))
+	overflowLen := abiEncodeStringUintWithLen(maxUint64, []byte("acct"), big.NewInt(1_000_000_000))
+
 	tests := []struct {
 		name string
 		log  EthLog
 	}{
+		{
+			name: "overflowing string length",
+			log: EthLog{
+				Topics:   [][wordLen]byte{BurnedEventTopic(), addrTopic(burner)},
+				Data:     overflowLen,
+				TxHash:   "0xdead",
+				LogIndex: 0,
+			},
+		},
 		{
 			name: "wrong topic",
 			log: EthLog{
@@ -159,6 +202,31 @@ func TestDecodeBurnedLog_Rejects(t *testing.T) {
 				t.Fatalf("expected error for %s", tc.name)
 			}
 		})
+	}
+}
+
+// TestDecodeStringUint_OverflowLen is the focused regression for the overrun
+// guard: a Burned-event data buffer whose declared string-length word is near
+// MaxUint64 must be rejected with ErrMalformedLog and must not panic with a
+// slice-bounds error from a wrapped start+strLen. This is exactly the
+// untrusted/corrupt operator- or RPC-supplied input the decoder promises to
+// parse safely.
+func TestDecodeStringUint_OverflowLen(t *testing.T) {
+	maxUint64 := new(big.Int).SetUint64(^uint64(0))
+	data := abiEncodeStringUintWithLen(maxUint64, []byte("acct"), big.NewInt(1_000_000_000))
+
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("decodeStringUint panicked on overflowing length: %v", r)
+		}
+	}()
+
+	_, _, err := decodeStringUint(data)
+	if err == nil {
+		t.Fatal("expected error for overflowing string length, got nil")
+	}
+	if !errors.Is(err, ErrMalformedLog) {
+		t.Fatalf("error = %v, want errors.Is(err, ErrMalformedLog)", err)
 	}
 }
 
