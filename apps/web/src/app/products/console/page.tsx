@@ -46,7 +46,7 @@ export default function ConsolePage() {
               <ul className='space-y-3'>
                 <CheckItem>Watch the MATRIX wallet balance and the settled ledger</CheckItem>
                 <CheckItem>Follow the consensus chain: committed height, round leader, and quorum</CheckItem>
-                <CheckItem>Run an inference job and see the completion and its settlement</CheckItem>
+                <CheckItem>Explore inference in the built-in demo mode and follow job status as it completes</CheckItem>
               </ul>
             </div>
             <p className='mt-6 text-sm text-grayscale-400'>

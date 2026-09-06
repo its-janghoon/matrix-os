@@ -17,9 +17,9 @@ const ecosystemTiles = [
   'wMATRIX Bridge',
   'Matrix Console',
   'Hash-Chained Ledger',
-  'Wasm Sandbox',
+  'Round-Robin Leader',
   'matrix CLI',
-  'CRDT Data Fabric',
+  'ed25519 Signing',
 ];
 
 const steps = [
