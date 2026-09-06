@@ -15,9 +15,9 @@ export function Button({ children, href, variant = 'primary', size = 'md', class
   const baseStyles = 'inline-flex items-center justify-center font-medium transition-colors rounded-lg';
 
   const variants = {
-    primary: 'bg-blue-600 text-white hover:bg-blue-700',
-    secondary: 'bg-white/10 text-white hover:bg-white/20',
-    outline: 'bg-transparent border-2 border-white text-white hover:bg-white/10',
+    primary: 'bg-primary text-white hover:bg-primary-500 shadow-lg shadow-primary/20',
+    secondary: 'bg-white/10 text-white hover:bg-white/20 border border-white/10',
+    outline: 'bg-transparent border-2 border-primary-300 text-white hover:bg-primary/10',
   };
 
   const sizes = {

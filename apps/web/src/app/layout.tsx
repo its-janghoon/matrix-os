@@ -1,9 +1,15 @@
 import '@/styles/globals.css';
-import type { Metadata } from 'next';
+import type { Metadata, Viewport } from 'next';
 import { Inter } from 'next/font/google';
 import { Providers } from './providers';
 
 const inter = Inter({ subsets: ['latin'] });
+
+export const viewport: Viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  maximumScale: 1,
+};
 
 export const metadata: Metadata = {
   title: {
@@ -11,19 +17,22 @@ export const metadata: Metadata = {
     template: '%s | ECIR Labs',
   },
   description:
-    'ECIR Labs is building the future of decentralized intelligence with Matrix OS, enabling secure and scalable distributed computing.',
+    'ECIR Labs is building the future of decentralized intelligence with Matrix OS: a peer-to-peer compute marketplace where idle machines earn compute credits and buyers pay for LLM compute and API responses.',
   keywords: [
     'ECIR Labs',
     'Matrix OS',
     'Soul OS',
     'decentralized intelligence',
     'distributed computing',
+    'compute marketplace',
+    'compute credits',
+    'P2P compute',
     'Matrix Protocol',
     'Soul Protocol',
   ],
-  authors: [{ name: 'Janghoon Lee' }],
-  creator: 'Janghoon Lee',
-  publisher: 'Janghoon Lee',
+  authors: [{ name: 'ECIR Labs' }],
+  creator: 'ECIR Labs',
+  publisher: 'ECIR Labs',
   openGraph: {
     type: 'website',
     locale: 'en_US',
@@ -58,11 +67,6 @@ export const metadata: Metadata = {
     apple: '/apple-touch-icon.png',
   },
   manifest: '/site.webmanifest',
-  viewport: {
-    width: 'device-width',
-    initialScale: 1,
-    maximumScale: 1,
-  },
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

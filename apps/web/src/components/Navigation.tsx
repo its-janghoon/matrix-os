@@ -12,7 +12,7 @@ export default function Navigation() {
   const isActive = (path: string) => pathname === path;
 
   return (
-    <nav className='fixed top-0 left-0 right-0 bg-black/80 backdrop-blur-sm border-b border-gray-800 z-50'>
+    <nav className='fixed top-0 left-0 right-0 bg-black/80 backdrop-blur-sm border-b border-grayscale-800 z-50'>
       <div className='max-w-4xl mx-auto px-4'>
         <div className='flex items-center justify-between h-16'>
           {/* Logo and Primary Nav */}
@@ -25,14 +25,20 @@ export default function Navigation() {
             </Link>
             <div className='hidden md:flex items-center gap-6'>
               <Link
+                href='/#marketplace'
+                className='text-sm text-grayscale-400 transition-colors hover:text-white'
+              >
+                Marketplace
+              </Link>
+              <Link
                 href='/docs'
-                className={`text-sm ${isActive('/docs') ? 'text-blue-400' : 'text-gray-300 hover:text-white'}`}
+                className={`text-sm transition-colors ${isActive('/docs') ? 'text-primary-300' : 'text-grayscale-400 hover:text-white'}`}
               >
                 Documentation
               </Link>
               <Link
                 href='/download'
-                className={`text-sm ${isActive('/download') ? 'text-blue-400' : 'text-gray-300 hover:text-white'}`}
+                className={`text-sm transition-colors ${isActive('/download') ? 'text-primary-300' : 'text-grayscale-400 hover:text-white'}`}
               >
                 Download
               </Link>
@@ -44,7 +50,7 @@ export default function Navigation() {
             <div className='hidden md:flex items-center gap-4'>
               <a
                 href='https://github.com/ecirlabs/matrix-core'
-                className='text-gray-300 hover:text-white'
+                className='text-grayscale-400 hover:text-white transition-colors'
                 target='_blank'
                 rel='noopener noreferrer'
               >
@@ -61,7 +67,7 @@ export default function Navigation() {
             {/* Mobile Menu Button */}
             <button
               onClick={() => setIsMenuOpen(!isMenuOpen)}
-              className='md:hidden p-2 text-gray-300 hover:text-white'
+              className='md:hidden p-2 text-grayscale-400 hover:text-white transition-colors'
               aria-label='Toggle menu'
             >
               <svg className='w-6 h-6' fill='none' stroke='currentColor' viewBox='0 0 24 24'>
@@ -77,33 +83,40 @@ export default function Navigation() {
 
         {/* Mobile Menu */}
         {isMenuOpen && (
-          <div className='md:hidden py-4 border-t border-gray-800'>
+          <div className='md:hidden py-4 border-t border-grayscale-800'>
             <div className='flex flex-col gap-4'>
               <Link
+                href='/#marketplace'
+                className='text-sm text-grayscale-400'
+                onClick={() => setIsMenuOpen(false)}
+              >
+                Marketplace
+              </Link>
+              <Link
                 href='/docs'
-                className={`text-sm ${isActive('/docs') ? 'text-blue-400' : 'text-gray-300'}`}
+                className={`text-sm ${isActive('/docs') ? 'text-primary-300' : 'text-grayscale-400'}`}
                 onClick={() => setIsMenuOpen(false)}
               >
                 Documentation
               </Link>
               <Link
                 href='/download'
-                className={`text-sm ${isActive('/download') ? 'text-blue-400' : 'text-gray-300'}`}
+                className={`text-sm ${isActive('/download') ? 'text-primary-300' : 'text-grayscale-400'}`}
                 onClick={() => setIsMenuOpen(false)}
               >
                 Download
               </Link>
               <Link
                 href='/blog'
-                className={`text-sm ${isActive('/blog') ? 'text-blue-400' : 'text-gray-300'}`}
+                className={`text-sm ${isActive('/blog') ? 'text-primary-300' : 'text-grayscale-400'}`}
                 onClick={() => setIsMenuOpen(false)}
               >
                 Blog
               </Link>
-              <div className='flex items-center gap-4 pt-4 border-t border-gray-800'>
+              <div className='flex items-center gap-4 pt-4 border-t border-grayscale-800'>
                 <a
                   href='https://github.com/ecirlabs/matrix-core'
-                  className='text-gray-300 hover:text-white'
+                  className='text-grayscale-400 hover:text-white transition-colors'
                   target='_blank'
                   rel='noopener noreferrer'
                 >
@@ -117,7 +130,7 @@ export default function Navigation() {
                 </a>
                 <a
                   href='https://discord.gg/ecirlabs'
-                  className='text-gray-300 hover:text-white'
+                  className='text-grayscale-400 hover:text-white transition-colors'
                   target='_blank'
                   rel='noopener noreferrer'
                 >

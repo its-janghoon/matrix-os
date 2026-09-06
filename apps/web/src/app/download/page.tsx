@@ -96,11 +96,13 @@ export default function Download() {
       <Navigation />
       <main className='min-h-screen bg-black text-white pt-16'>
         {/* Hero Section */}
-        <section className='py-24 bg-gradient-to-b from-black to-gray-900'>
+        <section className='py-24 bg-gradient-to-b from-black to-grayscale-900'>
           <div className='container mx-auto px-4'>
             <div className='max-w-4xl mx-auto text-center'>
-              <h1 className='text-5xl font-bold mb-6'>Download Matrix Core</h1>
-              <p className='text-xl text-gray-300 mb-12'>
+              <h1 className='text-5xl font-bold mb-6 bg-decorative-1 text-transparent bg-clip-text'>
+                Download Matrix Core
+              </h1>
+              <p className='text-xl text-grayscale-300 mb-12'>
                 Current Version: {currentRelease.version} ({currentRelease.date})
               </p>
             </div>
@@ -114,29 +116,29 @@ export default function Download() {
               {/* Platform Downloads */}
               <div className='grid md:grid-cols-2 gap-6 mb-16'>
                 {/* Windows Downloads */}
-                <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
+                <div className='bg-grayscale-900 rounded-xl p-6 border border-grayscale-800 hover:border-primary-300/40 transition-colors'>
                   <div className='flex items-center gap-3 mb-6'>
-                    <FaWindows className='w-8 h-8 text-blue-500' />
+                    <FaWindows className='w-8 h-8 text-primary-300' />
                     <h2 className='text-2xl font-bold'>Windows</h2>
                   </div>
                   <div className='space-y-4'>
                     {currentRelease.platforms.windows.map((platform, idx) => (
-                      <div key={idx} className='p-4 bg-gray-800 rounded-lg'>
+                      <div key={idx} className='p-4 bg-grayscale-800 rounded-lg'>
                         <div className='flex items-center justify-between mb-3'>
-                          <span className='text-sm text-gray-300'>{platform.arch}</span>
-                          <span className='text-sm text-gray-300'>{platform.size}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.arch}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.size}</span>
                         </div>
                         <div className='flex items-center justify-between'>
                           <button
                             onClick={() => copyHash(platform.checksum)}
-                            className='text-xs font-mono bg-gray-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-gray-600'
+                            className='text-xs font-mono bg-grayscale-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-grayscale-600 transition-colors'
                           >
                             {platform.checksum.slice(0, 8)}...
                             <FiCopy className='w-4 h-4' />
                           </button>
                           <a
                             href={platform.url}
-                            className='flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors text-sm'
+                            className='flex items-center gap-2 px-4 py-2 bg-primary rounded-lg hover:bg-primary-500 transition-colors text-sm'
                           >
                             <FiDownload className='w-4 h-4' />
                             Download
@@ -148,29 +150,29 @@ export default function Download() {
                 </div>
 
                 {/* macOS Downloads */}
-                <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
+                <div className='bg-grayscale-900 rounded-xl p-6 border border-grayscale-800 hover:border-primary-300/40 transition-colors'>
                   <div className='flex items-center gap-3 mb-6'>
-                    <FaApple className='w-8 h-8 text-blue-500' />
+                    <FaApple className='w-8 h-8 text-primary-300' />
                     <h2 className='text-2xl font-bold'>macOS</h2>
                   </div>
                   <div className='space-y-4'>
                     {currentRelease.platforms.mac.map((platform, idx) => (
-                      <div key={idx} className='p-4 bg-gray-800 rounded-lg'>
+                      <div key={idx} className='p-4 bg-grayscale-800 rounded-lg'>
                         <div className='flex items-center justify-between mb-3'>
-                          <span className='text-sm text-gray-300'>{platform.arch}</span>
-                          <span className='text-sm text-gray-300'>{platform.size}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.arch}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.size}</span>
                         </div>
                         <div className='flex items-center justify-between'>
                           <button
                             onClick={() => copyHash(platform.checksum)}
-                            className='text-xs font-mono bg-gray-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-gray-600'
+                            className='text-xs font-mono bg-grayscale-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-grayscale-600 transition-colors'
                           >
                             {platform.checksum.slice(0, 8)}...
                             <FiCopy className='w-4 h-4' />
                           </button>
                           <a
                             href={platform.url}
-                            className='flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors text-sm'
+                            className='flex items-center gap-2 px-4 py-2 bg-primary rounded-lg hover:bg-primary-500 transition-colors text-sm'
                           >
                             <FiDownload className='w-4 h-4' />
                             Download
@@ -182,29 +184,29 @@ export default function Download() {
                 </div>
 
                 {/* Linux Downloads */}
-                <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
+                <div className='bg-grayscale-900 rounded-xl p-6 border border-grayscale-800 hover:border-primary-300/40 transition-colors'>
                   <div className='flex items-center gap-3 mb-6'>
-                    <FaLinux className='w-8 h-8 text-blue-500' />
+                    <FaLinux className='w-8 h-8 text-primary-300' />
                     <h2 className='text-2xl font-bold'>Linux</h2>
                   </div>
                   <div className='space-y-4'>
                     {currentRelease.platforms.linux.map((platform, idx) => (
-                      <div key={idx} className='p-4 bg-gray-800 rounded-lg'>
+                      <div key={idx} className='p-4 bg-grayscale-800 rounded-lg'>
                         <div className='flex items-center justify-between mb-3'>
-                          <span className='text-sm text-gray-300'>{platform.arch}</span>
-                          <span className='text-sm text-gray-300'>{platform.size}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.arch}</span>
+                          <span className='text-sm text-grayscale-300'>{platform.size}</span>
                         </div>
                         <div className='flex items-center justify-between'>
                           <button
                             onClick={() => copyHash(platform.checksum)}
-                            className='text-xs font-mono bg-gray-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-gray-600'
+                            className='text-xs font-mono bg-grayscale-700 px-3 py-1 rounded flex items-center gap-2 hover:bg-grayscale-600 transition-colors'
                           >
                             {platform.checksum.slice(0, 8)}...
                             <FiCopy className='w-4 h-4' />
                           </button>
                           <a
                             href={platform.url}
-                            className='flex items-center gap-2 px-4 py-2 bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors text-sm'
+                            className='flex items-center gap-2 px-4 py-2 bg-primary rounded-lg hover:bg-primary-500 transition-colors text-sm'
                           >
                             <FiDownload className='w-4 h-4' />
                             Download
@@ -216,21 +218,21 @@ export default function Download() {
                 </div>
 
                 {/* Docker */}
-                <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
+                <div className='bg-grayscale-900 rounded-xl p-6 border border-grayscale-800 hover:border-primary-300/40 transition-colors'>
                   <div className='flex items-center gap-3 mb-6'>
-                    <FaDocker className='w-8 h-8 text-blue-500' />
+                    <FaDocker className='w-8 h-8 text-primary-300' />
                     <h2 className='text-2xl font-bold'>Docker</h2>
                   </div>
                   <div className='space-y-4'>
-                    <div className='p-4 bg-gray-800 rounded-lg'>
-                      <p className='text-sm text-gray-300 mb-3'>Pull and run the official Docker image</p>
+                    <div className='p-4 bg-grayscale-800 rounded-lg'>
+                      <p className='text-sm text-grayscale-300 mb-3'>Pull and run the official Docker image</p>
                       <div className='flex items-center justify-between gap-4'>
-                        <pre className='bg-gray-700 px-3 py-2 rounded text-xs font-mono flex-1'>
+                        <pre className='bg-grayscale-700 px-3 py-2 rounded text-xs font-mono flex-1'>
                           docker pull ecirlabs/matrix-core:latest
                         </pre>
                         <button
                           onClick={() => copyCommand('docker pull ecirlabs/matrix-core:latest')}
-                          className='p-2 hover:bg-gray-600 rounded'
+                          className='p-2 hover:bg-grayscale-600 rounded transition-colors'
                         >
                           <FiCopy className='w-4 h-4' />
                         </button>
@@ -241,21 +243,21 @@ export default function Download() {
               </div>
 
               {/* Package Managers */}
-              <div className='bg-gray-900 rounded-xl p-8 border border-gray-800'>
+              <div className='bg-grayscale-900 rounded-xl p-8 border border-grayscale-800'>
                 <div className='flex items-center gap-3 mb-6'>
-                  <FiTerminal className='w-8 h-8 text-blue-500' />
+                  <FiTerminal className='w-8 h-8 text-primary-300' />
                   <h2 className='text-2xl font-bold'>Package Managers</h2>
                 </div>
                 <div className='space-y-6'>
                   <div>
                     <h3 className='text-lg font-semibold mb-3'>NPM</h3>
-                    <div className='flex items-center justify-between gap-4 bg-gray-800 p-4 rounded-lg'>
-                      <pre className='bg-gray-700 px-3 py-2 rounded text-xs font-mono flex-1'>
+                    <div className='flex items-center justify-between gap-4 bg-grayscale-800 p-4 rounded-lg'>
+                      <pre className='bg-grayscale-700 px-3 py-2 rounded text-xs font-mono flex-1'>
                         npm install -g @ecirlabs/matrix-core
                       </pre>
                       <button
                         onClick={() => copyCommand('npm install -g @ecirlabs/matrix-core')}
-                        className='p-2 hover:bg-gray-600 rounded'
+                        className='p-2 hover:bg-grayscale-600 rounded transition-colors'
                       >
                         <FiCopy className='w-4 h-4' />
                       </button>
@@ -267,20 +269,20 @@ export default function Download() {
               {/* Verification Instructions */}
               <div className='mt-16'>
                 <h2 className='text-2xl font-bold mb-6'>Verify Download</h2>
-                <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
-                  <p className='text-gray-300 mb-4'>
+                <div className='bg-grayscale-900 rounded-xl p-6 border border-grayscale-800'>
+                  <p className='text-grayscale-300 mb-4'>
                     To verify your download, compare the SHA256 checksum of the downloaded file with the provided hash.
                   </p>
                   <div className='space-y-4'>
                     <div>
                       <h3 className='text-lg font-semibold mb-2'>Windows (PowerShell)</h3>
-                      <pre className='bg-gray-800 p-4 rounded-lg text-sm font-mono'>
+                      <pre className='bg-grayscale-800 p-4 rounded-lg text-sm font-mono'>
                         Get-FileHash matrix-core-1.0.0-windows-amd64.exe -Algorithm SHA256
                       </pre>
                     </div>
                     <div>
                       <h3 className='text-lg font-semibold mb-2'>macOS/Linux</h3>
-                      <pre className='bg-gray-800 p-4 rounded-lg text-sm font-mono'>
+                      <pre className='bg-grayscale-800 p-4 rounded-lg text-sm font-mono'>
                         shasum -a 256 matrix-core-1.0.0-darwin-amd64
                       </pre>
                     </div>

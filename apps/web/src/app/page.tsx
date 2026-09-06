@@ -4,7 +4,14 @@ import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import MatrixBackground from '@/components/MatrixBackground';
 import Navigation from '@/components/Navigation';
-import { FiDownload } from 'react-icons/fi';
+import { FiCheck, FiCpu, FiDownload, FiServer, FiShoppingCart } from 'react-icons/fi';
+
+const CheckItem = ({ children }: { children: React.ReactNode }) => (
+  <li className='flex gap-3'>
+    <FiCheck className='w-5 h-5 mt-0.5 text-primary-300 shrink-0' />
+    <span className='text-grayscale-300'>{children}</span>
+  </li>
+);
 
 export default function Home() {
   return (
@@ -21,23 +28,23 @@ export default function Home() {
           <div className='container mx-auto px-4 relative z-10'>
             <div className='max-w-4xl mx-auto text-center'>
               <div className='flex items-center justify-center gap-2 mb-6'>
-                <span className='px-3 py-1 text-xs font-medium bg-blue-500/10 text-blue-400 rounded-full'>
+                <span className='px-3 py-1 text-xs font-medium bg-primary/10 text-primary-300 rounded-full border border-primary/20'>
                   v0.1.0-alpha
                 </span>
                 <a
                   href='https://github.com/ecirlabs/matrix-core'
-                  className='px-3 py-1 text-xs font-medium bg-gray-800 text-gray-300 rounded-full hover:bg-gray-700 transition-colors'
+                  className='px-3 py-1 text-xs font-medium bg-grayscale-800 text-grayscale-300 rounded-full hover:bg-grayscale-700 transition-colors'
                 >
                   Star on GitHub
                 </a>
               </div>
 
-              <h1 className='text-6xl md:text-7xl font-bold mb-6 bg-gradient-to-r from-blue-400 via-purple-400 to-blue-600 text-transparent bg-clip-text'>
+              <h1 className='text-6xl md:text-7xl font-bold mb-6 bg-decorative-1 text-transparent bg-clip-text'>
                 Matrix OS
               </h1>
-              <p className='text-xl md:text-2xl text-gray-300 mb-8 max-w-3xl mx-auto'>
-                An operating fabric that lets any device spin up, trade, and orchestrate autonomous agents—forming a
-                decentralized digital civilization.
+              <p className='text-xl md:text-2xl text-grayscale-300 mb-8 max-w-3xl mx-auto'>
+                An operating fabric that lets any device spin up, trade, and orchestrate autonomous agents&mdash;forming
+                a decentralized digital civilization.
               </p>
 
               <div className='flex flex-wrap items-center justify-center gap-4 mb-12'>
@@ -62,91 +69,32 @@ export default function Home() {
         </div>
 
         {/* Core Principles Section */}
-        <section className='py-24 bg-gradient-to-b from-black to-gray-900 relative z-10'>
+        <section className='py-24 bg-gradient-to-b from-black to-grayscale-900 relative z-10'>
           <div className='container mx-auto px-4'>
             <div className='max-w-4xl mx-auto'>
               <h2 className='text-4xl font-bold mb-12 text-center'>Core Principles</h2>
               <div className='grid grid-cols-1 md:grid-cols-2 gap-12'>
                 <div>
                   <h3 className='text-2xl font-semibold mb-4'>Own Your Execution</h3>
-                  <p className='text-gray-300 mb-6'>
-                    One static binary per node—no hidden cloud dependencies. Intelligence runs where your data lives.
+                  <p className='text-grayscale-300 mb-6'>
+                    One static binary per node&mdash;no hidden cloud dependencies. Intelligence runs where your data
+                    lives.
                   </p>
                   <ul className='space-y-4'>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Local-first computing</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>No cloud dependencies</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Device-first architecture</span>
-                    </li>
+                    <CheckItem>Local-first computing</CheckItem>
+                    <CheckItem>No cloud dependencies</CheckItem>
+                    <CheckItem>Device-first architecture</CheckItem>
                   </ul>
                 </div>
                 <div>
                   <h3 className='text-2xl font-semibold mb-4'>Privacy by Locality</h3>
-                  <p className='text-gray-300 mb-6'>
+                  <p className='text-grayscale-300 mb-6'>
                     Your data never exits the device unless you explicitly sign it. Full control over your information.
                   </p>
                   <ul className='space-y-4'>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Data sovereignty</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Signed data transfers</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-blue-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Local-only by default</span>
-                    </li>
+                    <CheckItem>Data sovereignty</CheckItem>
+                    <CheckItem>Signed data transfers</CheckItem>
+                    <CheckItem>Local-only by default</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -154,92 +102,118 @@ export default function Home() {
           </div>
         </section>
 
+        {/* Marketplace Section */}
+        <section id='marketplace' className='py-24 bg-gradient-to-b from-grayscale-900 to-black relative z-10 scroll-mt-16'>
+          <div className='container mx-auto px-4'>
+            <div className='max-w-5xl mx-auto'>
+              <div className='text-center mb-12'>
+                <span className='inline-block px-3 py-1 text-xs font-medium bg-secondary/10 text-secondary-300 rounded-full border border-secondary/20 mb-4'>
+                  Compute Marketplace
+                </span>
+                <h2 className='text-4xl font-bold mb-4'>A Peer-to-Peer Market for Compute</h2>
+                <p className='text-xl text-grayscale-300 max-w-3xl mx-auto'>
+                  Idle machines register as compute providers and advertise capacity. Buyers submit paid compute jobs.
+                  A compute-credits ledger settles payment from buyer to provider the moment a job completes.
+                </p>
+              </div>
+
+              <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
+                {/* Providers */}
+                <div className='p-8 rounded-2xl border border-grayscale-800 bg-gradient-to-b from-grayscale-900 to-black hover:border-primary-300/40 transition-colors'>
+                  <div className='flex items-center gap-3 mb-4'>
+                    <div className='h-11 w-11 rounded-xl bg-primary/10 border border-primary/20 flex items-center justify-center'>
+                      <FiServer className='w-5 h-5 text-primary-300' />
+                    </div>
+                    <h3 className='text-2xl font-semibold'>Providers earn</h3>
+                  </div>
+                  <p className='text-grayscale-300 mb-6'>
+                    Leave a machine running and register it as a provider. It advertises available capacity and a price
+                    per compute unit, then earns compute credits each time a job it served completes.
+                  </p>
+                  <ul className='space-y-4'>
+                    <CheckItem>Register idle capacity and set a price per unit</CheckItem>
+                    <CheckItem>Capacity is reserved when a buyer&apos;s job is accepted</CheckItem>
+                    <CheckItem>Credits land in your ledger balance on job completion</CheckItem>
+                  </ul>
+                </div>
+
+                {/* Buyers */}
+                <div className='p-8 rounded-2xl border border-grayscale-800 bg-gradient-to-b from-grayscale-900 to-black hover:border-secondary-300/40 transition-colors'>
+                  <div className='flex items-center gap-3 mb-4'>
+                    <div className='h-11 w-11 rounded-xl bg-secondary/10 border border-secondary/20 flex items-center justify-center'>
+                      <FiShoppingCart className='w-5 h-5 text-secondary-300' />
+                    </div>
+                    <h3 className='text-2xl font-semibold'>Buyers pay for compute</h3>
+                  </div>
+                  <p className='text-grayscale-300 mb-6'>
+                    Submit a paid job for the LLM compute and API responses you need. The price is quoted up front from
+                    the provider&apos;s rate, and credits only move once the work is done.
+                  </p>
+                  <ul className='space-y-4'>
+                    <CheckItem>Submit jobs priced as units &times; provider rate</CheckItem>
+                    <CheckItem>Balance is checked up front; you are charged on completion</CheckItem>
+                    <CheckItem>Cancel a pending job to release the reserved capacity</CheckItem>
+                  </ul>
+                </div>
+              </div>
+
+              {/* How settlement works */}
+              <div className='mt-6 p-8 rounded-2xl border border-grayscale-800 bg-black'>
+                <div className='flex items-center gap-3 mb-4'>
+                  <FiCpu className='w-5 h-5 text-primary-300' />
+                  <h3 className='text-xl font-semibold'>How settlement works today</h3>
+                </div>
+                <p className='text-grayscale-300'>
+                  The compute-credits ledger is implemented and shipped in the Matrix core: balances are persisted in
+                  the node&apos;s embedded key-value store, jobs move through pending, running, and completed states,
+                  and each completed job transfers credits atomically from buyer to provider.
+                </p>
+              </div>
+
+              {/* Roadmap callout */}
+              <div className='mt-6 p-6 rounded-2xl border border-secondary-300/30 bg-secondary/5'>
+                <div className='flex items-center gap-2 mb-2'>
+                  <span className='px-2.5 py-0.5 text-xs font-semibold bg-secondary/20 text-secondary-300 rounded-full uppercase tracking-wide'>
+                    Roadmap
+                  </span>
+                  <span className='text-sm text-grayscale-400'>Not yet implemented</span>
+                </div>
+                <p className='text-grayscale-300'>
+                  Settlement runs on <span className='text-white font-medium'>internal compute credits</span> today.
+                  A live cryptocurrency token and on-chain payment for cross-network settlement are planned roadmap
+                  items&mdash;there is no live token yet.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
         {/* Technical Features Section */}
-        <section className='py-24 bg-gradient-to-b from-gray-900 to-black relative z-10'>
+        <section className='py-24 bg-gradient-to-b from-black to-grayscale-900 relative z-10'>
           <div className='container mx-auto px-4'>
             <div className='max-w-4xl mx-auto'>
               <h2 className='text-4xl font-bold mb-12 text-center'>Technical Features</h2>
               <div className='grid grid-cols-1 md:grid-cols-2 gap-12'>
                 <div>
                   <h3 className='text-2xl font-semibold mb-4'>Secure Runtime</h3>
-                  <p className='text-gray-300 mb-6'>
+                  <p className='text-grayscale-300 mb-6'>
                     Built with security-first principles using Wasmtime sandbox and advanced encryption.
                   </p>
                   <ul className='space-y-4'>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Wasm sandbox environment</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Resource-capped execution</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>Secure messaging protocols</span>
-                    </li>
+                    <CheckItem>Wasm sandbox environment</CheckItem>
+                    <CheckItem>Resource-capped execution</CheckItem>
+                    <CheckItem>Secure messaging protocols</CheckItem>
                   </ul>
                 </div>
                 <div>
                   <h3 className='text-2xl font-semibold mb-4'>Distributed Infrastructure</h3>
-                  <p className='text-gray-300 mb-6'>
+                  <p className='text-grayscale-300 mb-6'>
                     Peer-to-peer architecture with built-in support for distributed computing and storage.
                   </p>
                   <ul className='space-y-4'>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>libp2p + Noise/TLS 1.3</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>CRDT-based data fabric</span>
-                    </li>
-                    <li className='flex gap-3'>
-                      <svg
-                        className='w-6 h-6 text-purple-400 shrink-0'
-                        fill='none'
-                        viewBox='0 0 24 24'
-                        stroke='currentColor'
-                      >
-                        <path strokeLinecap='round' strokeLinejoin='round' strokeWidth={2} d='M5 13l4 4L19 7' />
-                      </svg>
-                      <span className='text-gray-300'>NAT traversal support</span>
-                    </li>
+                    <CheckItem>libp2p + Noise/TLS 1.3</CheckItem>
+                    <CheckItem>CRDT-based data fabric</CheckItem>
+                    <CheckItem>NAT traversal support</CheckItem>
                   </ul>
                 </div>
               </div>
@@ -248,26 +222,26 @@ export default function Home() {
         </section>
 
         {/* Use Cases Section */}
-        <section className='py-24 bg-gradient-to-b from-black to-gray-900 relative z-10'>
+        <section className='py-24 bg-gradient-to-b from-grayscale-900 to-black relative z-10'>
           <div className='container mx-auto px-4'>
             <div className='max-w-4xl mx-auto'>
               <h2 className='text-4xl font-bold mb-12 text-center'>Use Cases</h2>
               <div className='grid grid-cols-1 md:grid-cols-3 gap-6'>
-                <div className='p-6 rounded-xl border border-gray-800 bg-gradient-to-b from-gray-900 to-black'>
+                <div className='p-6 rounded-xl border border-grayscale-800 bg-gradient-to-b from-grayscale-900 to-black hover:border-primary-300/40 transition-colors'>
                   <h3 className='text-xl font-semibold mb-4'>End Users</h3>
-                  <p className='text-gray-400'>
+                  <p className='text-grayscale-400'>
                     Run copilots that learn locally, borrow compute from friends, and never leak data.
                   </p>
                 </div>
-                <div className='p-6 rounded-xl border border-gray-800 bg-gradient-to-b from-gray-900 to-black'>
+                <div className='p-6 rounded-xl border border-grayscale-800 bg-gradient-to-b from-grayscale-900 to-black hover:border-primary-300/40 transition-colors'>
                   <h3 className='text-xl font-semibold mb-4'>Developers</h3>
-                  <p className='text-gray-400'>
+                  <p className='text-grayscale-400'>
                     Publish Wasm micro-agents that scale from Raspberry Pi to 128-core workstations.
                   </p>
                 </div>
-                <div className='p-6 rounded-xl border border-gray-800 bg-gradient-to-b from-gray-900 to-black'>
+                <div className='p-6 rounded-xl border border-grayscale-800 bg-gradient-to-b from-grayscale-900 to-black hover:border-primary-300/40 transition-colors'>
                   <h3 className='text-xl font-semibold mb-4'>Enterprises</h3>
-                  <p className='text-gray-400'>
+                  <p className='text-grayscale-400'>
                     Weave on-prem nodes into public swarms while preserving data sovereignty.
                   </p>
                 </div>
@@ -280,18 +254,20 @@ export default function Home() {
         <section className='py-24 relative z-10'>
           <div className='container mx-auto px-4'>
             <div className='max-w-4xl mx-auto text-center'>
-              <div className='bg-gradient-to-r from-blue-600/20 via-purple-600/20 to-blue-600/20 rounded-xl p-12 border border-blue-500/20'>
-                <h2 className='text-4xl font-bold mb-6'>Ready to Get Started?</h2>
-                <p className='text-xl text-gray-300 mb-8'>
-                  Join the growing community of developers building the future of AI agents.
-                </p>
-                <div className='flex flex-wrap justify-center gap-4'>
-                  <Button href='/docs/introduction' variant='primary' size='lg'>
-                    Read the Docs
-                  </Button>
-                  <Button href='/download' variant='outline' size='lg'>
-                    Download Now
-                  </Button>
+              <div className='bg-decorative-1 rounded-2xl p-[1px]'>
+                <div className='rounded-2xl bg-black/70 p-12'>
+                  <h2 className='text-4xl font-bold mb-6'>Ready to Get Started?</h2>
+                  <p className='text-xl text-grayscale-300 mb-8'>
+                    Join the growing community of developers building the future of AI agents.
+                  </p>
+                  <div className='flex flex-wrap justify-center gap-4'>
+                    <Button href='/docs/introduction' variant='primary' size='lg'>
+                      Read the Docs
+                    </Button>
+                    <Button href='/download' variant='outline' size='lg'>
+                      Download Now
+                    </Button>
+                  </div>
                 </div>
               </div>
             </div>
