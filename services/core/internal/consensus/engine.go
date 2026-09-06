@@ -1019,6 +1019,26 @@ func (e *Engine) WaitForSettlement(ctx context.Context, tx *token.Transaction) (
 
 	select {
 	case <-ctx.Done():
+		// Deregister this waiter so a transaction that never commits (dropped from
+		// the mempool, or a submit whose block never lands) does not leave a
+		// permanent entry in settleWaiters. recordApplied may have closed ch and
+		// removed the whole key concurrently between ctx firing and us taking the
+		// lock; in that case the key is simply absent and the filter is a no-op.
+		e.mu.Lock()
+		if waiters, present := e.settleWaiters[key]; present {
+			kept := waiters[:0]
+			for _, w := range waiters {
+				if w != ch {
+					kept = append(kept, w)
+				}
+			}
+			if len(kept) == 0 {
+				delete(e.settleWaiters, key)
+			} else {
+				e.settleWaiters[key] = kept
+			}
+		}
+		e.mu.Unlock()
 		return false, false, ctx.Err()
 	case <-ch:
 		e.mu.Lock()
