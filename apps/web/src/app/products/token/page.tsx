@@ -3,6 +3,7 @@
 import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
+import { TokenBridge } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiLayers, FiShoppingCart } from 'react-icons/fi';
 
@@ -56,10 +57,8 @@ export default function TokenPage() {
               <h3 className='text-xl font-semibold'>Native first, one currency end to end</h3>
             </div>
             <p className='mt-4 text-grayscale-300'>
-              Native MATRIX lives on our own fast leader-based BFT L1. It has 9 decimals, and its supply is capped at
-              1,000,000,000 whole MATRIX. A genesis allocation plus a genesis-funded reward pool back provider earnings
-              as capped, supply-tracked issuance, not unlimited minting. Every balance change is a committed consensus
-              fact, so buyers and providers transact in one coin from end to end.
+              One coin end to end. Provider earnings come from a genesis allocation and a genesis-funded reward pool -
+              capped, supply-tracked issuance rather than minting at will.
             </p>
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
               <CheckItem>Native coin of the Matrix L1: the single source of truth for balances and supply</CheckItem>
@@ -75,13 +74,13 @@ export default function TokenPage() {
               <h3 className='text-xl font-semibold'>The bridge: a wrapped mirror for listing</h3>
             </div>
             <p className='mt-4 text-grayscale-300'>
-              The ERC-20 is not the settlement token. It is wMATRIX, a wrapped mirror produced by a lock-and-mint bridge
-              so native MATRIX can be represented on Ethereum, for example for a future exchange listing. Outstanding
-              wrapped supply always equals the native MATRIX locked on the L1, so the mirror stays backed 1:1. Native
-              has 9 decimals and the wrapped token has 18, so one native base unit equals 1e9 wrapped base units, and
-              the native cap of 1,000,000,000 MATRIX maps to the same amount on the wrapped side. The bridge runs
-              against local and test networks only. It is NOT deployed to any public Ethereum network.
+              wMATRIX is not the settlement token. It is a mirror, minted only against native MATRIX locked in escrow,
+              so it can be represented on Ethereum. The bridge runs against local and test networks only:{' '}
+              <strong className='font-semibold text-white'>it is not deployed to any public Ethereum network</strong>,
+              so there is no wMATRIX to buy or sell yet.
             </p>
+
+            <TokenBridge />
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
               <CheckItem>Native lock to wrapped mint: minting requires a threshold of validator secp256k1 attestations that native was locked</CheckItem>
               <CheckItem>Wrapped burn to native unlock: a burn emits an on-chain Burned event that is decoded into an authorization to release the escrowed native MATRIX, applied exactly once per event</CheckItem>

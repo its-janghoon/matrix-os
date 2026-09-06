@@ -1,6 +1,7 @@
 'use client';
 
 import DocSidebar from '@/components/DocSidebar';
+import { ConsensusRound, JobLifecycle, TokenBridge } from '@/components/diagrams';
 import Navigation from '@/components/Navigation';
 
 export default function ComputeMarketplaceDocs() {
@@ -20,20 +21,20 @@ export default function ComputeMarketplaceDocs() {
                   <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
                     <h1 className='text-4xl font-bold text-white mb-4'>Compute Marketplace</h1>
                     <p className='text-xl text-gray-100'>
-                      How the shipped Matrix compute marketplace fits together: native MATRIX, the coin of the Matrix
-                      L1 that you earn and spend, the fast consensus chain that agrees the ledger, the pluggable LLM
-                      inference backends that do the work, and the bridged wrapped ERC-20 mirror for exchange listing.
+                      What is shipped and how the pieces fit: the coin, the ledger that agrees it, the backends that do
+                      the work, and the wrapped mirror on Ethereum.
                     </p>
                   </div>
 
+                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>A job, start to finish</h2>
+                  <JobLifecycle className='mx-auto max-w-md' />
+
                   {/* Token */}
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>Native MATRIX, the settlement coin</h2>
+                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Native MATRIX, the settlement coin</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
                     <p className='text-gray-100 leading-relaxed mb-4'>
-                      MATRIX is the native coin of the Matrix L1 consensus chain and the single source of truth for
-                      balances and supply. Buyers pay in it and providers earn it, and every compute and inference
-                      settlement transacts in native MATRIX through consensus. It is one currency end to end, not a
-                      separate notion of credits.
+                      Buyers pay in it, providers earn it, and it is the single source of truth for balances and supply.
+                      One currency end to end, not a separate notion of credits.
                     </p>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
                       <li>Symbol <strong>MATRIX</strong>, 9 native decimals on the Matrix L1</li>
@@ -45,16 +46,16 @@ export default function ComputeMarketplaceDocs() {
 
                   {/* Bridge */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>The bridged wrapped ERC-20 mirror</h2>
+                  <TokenBridge />
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      The ERC-20 is not the settlement token. It is wMATRIX, a wrapped mirror produced by a
-                      lock-and-mint bridge so native MATRIX can be represented on Ethereum, for example for a future
-                      exchange listing. The wrapped supply always equals the native MATRIX locked on the L1, so it
-                      stays backed 1:1.
-                    </p>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
                       <li><strong>Lock to mint</strong> — native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
-                      <li><strong>Burn to unlock</strong> — burning wMATRIX emits an on-chain Burned event; the bridge decodes that event into an unlock authorization (keyed by transaction hash and log index) and releases the escrowed native MATRIX back on the L1 exactly once per event. Today the event is fed in by an operator or the end-to-end test rather than a always-on log watcher.</li>
+                      <li>
+                        <strong>Burn to unlock</strong> - burning wMATRIX emits an on-chain Burned event. A watcher
+                        inside the node polls Ethereum for those events past a confirmation depth, keeps a persisted
+                        scan cursor across restarts, and releases the escrowed native MATRIX exactly once per event
+                        (keyed by transaction hash and log index).
+                      </li>
                       <li>Native has 9 decimals and wMATRIX has 18, so one native base unit equals 1e9 wrapped base units and the 1,000,000,000 MATRIX cap maps to the same money on both sides</li>
                       <li>Runs against local and test networks only; it is not deployed to any public Ethereum network</li>
                     </ul>
@@ -63,16 +64,16 @@ export default function ComputeMarketplaceDocs() {
                   {/* Consensus */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Fast consensus chain</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      Payments are ordered and finalized by a fast, leader-based BFT protocol built for speed rather
-                      than proof-of-work. A fixed ed25519 validator set takes turns as leader in round-robin order.
-                    </p>
+                    <ConsensusRound className='mx-auto max-w-xl' />
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                      <li>The leader proposes a block and validators vote on it</li>
-                      <li>A block commits in a single round once more than two-thirds of validators agree</li>
-                      <li>Round timeouts rotate the leader if one stalls, so progress continues</li>
+                      <li>Fixed ed25519 validator set, round-robin leader, no proof-of-work</li>
+                      <li>A quorum is more than two thirds of the set, in both voting phases</li>
+                      <li>
+                        Round timeouts rotate the leader, and the next leader must re-propose the block that last
+                        reached a polka, carrying the polka as proof
+                      </li>
                       <li>Committed blocks are SHA-256 hash-linked into one chain every node shares</li>
-                      <li>All nodes apply the same ordered ledger, so a balance is a network-wide fact</li>
+                      <li>A node that missed a block fetches it from a peer with the quorum that committed it</li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
                       Consensus is the authoritative, globally agreed ledger for marketplace settlement. Both the

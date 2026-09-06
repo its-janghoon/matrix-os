@@ -5,6 +5,7 @@ import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import HeroBackdrop from '@/components/HeroBackdrop';
 import Navigation from '@/components/Navigation';
+import { MarketFlow } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, Section } from '@/components/marketing';
 import {
   FiArrowRight,
@@ -49,7 +50,7 @@ const products = [
     icon: FiGlobe,
     tone: 'secondary' as const,
     title: 'Consensus',
-    body: 'A fast leader-based BFT Layer 1 with round-robin leaders and single-round finality, so every balance is one globally agreed, hash-linked fact.',
+    body: 'A fast leader-based BFT Layer 1 with round-robin leaders, so every balance is one globally agreed, hash-linked fact.',
     href: '/products/consensus',
   },
   {
@@ -223,38 +224,23 @@ $ ./matrix quickstart`}</code>
         {/* How it works teaser */}
         <Section className='bg-section-glow'>
           <Card className='overflow-hidden'>
-            <div className='grid grid-cols-1 items-center gap-10 lg:grid-cols-2'>
-              <div>
-                <Eyebrow>How it works</Eyebrow>
-                <h2 className='mt-4 text-3xl font-bold tracking-tight'>Follow one job, end to end</h2>
-                <p className='mt-4 text-grayscale-300'>
-                  A provider announces idle capacity, a buyer submits a signed job, the pluggable inference backend runs
-                  the work, and the buyer-to-provider transfer settles in native MATRIX through fast BFT consensus, so
-                  every balance is one globally agreed fact. See the full walkthrough and the building blocks behind it.
-                </p>
-                <div className='mt-6'>
-                  <Button href='/how-it-works' variant='secondary' size='md'>
-                    See how it works
-                    <FiArrowRight className='ml-2 h-4 w-4' />
-                  </Button>
-                </div>
-              </div>
-              <div className='grid grid-cols-1 gap-3'>
-                {[
-                  { icon: FiShoppingCart, tone: 'primary' as const, label: 'Providers announce, buyers submit signed jobs' },
-                  { icon: FiCpu, tone: 'accent' as const, label: 'The pluggable inference backend runs the work' },
-                  { icon: FiGlobe, tone: 'secondary' as const, label: 'Settlement commits through fast BFT consensus' },
-                ].map((item) => (
-                  <div
-                    key={item.label}
-                    className='flex items-center gap-4 rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 backdrop-blur-sm'
-                  >
-                    <IconBadge icon={item.icon} tone={item.tone} />
-                    <span className='text-sm font-medium text-grayscale-200'>{item.label}</span>
-                  </div>
-                ))}
-              </div>
+            <div className='max-w-2xl'>
+              <Eyebrow>How it works</Eyebrow>
+              <h2 className='mt-4 text-3xl font-bold tracking-tight'>Follow one job, end to end</h2>
+              <p className='mt-4 text-grayscale-300'>
+                Idle capacity in, a signed job through, one agreed balance out.
+              </p>
             </div>
+
+            {/* Full width rather than a side column: the diagram has a minimum
+                readable width, and squeezed into half a card it would scroll
+                horizontally even on a desktop. */}
+            <MarketFlow />
+
+            <Button href='/how-it-works' variant='secondary' size='md'>
+              See how it works
+              <FiArrowRight className='ml-2 h-4 w-4' />
+            </Button>
           </Card>
         </Section>
 

@@ -3,6 +3,7 @@
 import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
+import { MarketFlow } from '@/components/diagrams';
 import { Card, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiCpu, FiGlobe, FiLayers, FiServer, FiShoppingCart } from 'react-icons/fi';
 
@@ -22,44 +23,47 @@ const ecosystemTiles = [
   'ed25519 Signing',
 ];
 
+// The flow itself is carried by MarketFlow above the list; these are the
+// one-line facts a reader needs per step, plus where to go for the detail. They
+// used to be 40-60 word paragraphs restating the diagram in prose.
 const steps = [
   {
     icon: FiServer,
     tone: 'primary' as const,
     title: 'Providers announce capacity',
-    body: 'A provider node signs its available capacity and a price per compute unit and announces it across the libp2p gossip network. Remote nodes discover those announcements into a local registry, so buyers can find both local and remote providers.',
+    body: 'A signed announcement of available units and a price per unit, gossiped over libp2p. No broker.',
     href: '/products/marketplace',
     linkLabel: 'Compute marketplace',
   },
   {
     icon: FiShoppingCart,
     tone: 'secondary' as const,
-    title: 'Buyers discover and submit signed jobs',
-    body: 'A buyer discovers providers over the P2P network and submits a signed job through the matrix.market.v1 MarketService. The price is quoted up front from the provider rate, the balance is checked, and capacity is reserved for the job.',
+    title: 'Buyers submit signed jobs',
+    body: 'Price quoted from the provider rate, balance checked, capacity reserved. Nothing is paid yet.',
     href: '/products/marketplace',
     linkLabel: 'Compute marketplace',
   },
   {
     icon: FiCpu,
     tone: 'accent' as const,
-    title: 'The selected inference backend runs the work',
-    body: 'The pluggable inference backend runs the request: an Ollama-style local runner, a GPU-free echo backend for testing, or an OpenAI-compatible provider-API proxy whose key is read from an environment variable. The work is metered per unit.',
+    title: 'A pluggable backend runs it',
+    body: 'A local runner, a provider-API proxy, or an echo backend for testing. Metered per unit.',
     href: '/products/inference',
     linkLabel: 'LLM inference',
   },
   {
     icon: FiGlobe,
     tone: 'primary' as const,
-    title: 'Settlement commits through fast BFT consensus',
-    body: 'The buyer-to-provider transfer settles in native MATRIX through the fast leader-based BFT ledger. A round-robin leader proposes the block, and it commits once a greater-than-two-thirds quorum agrees in a single voting round, capped at the amount reserved up front.',
+    title: 'Consensus settles the payment',
+    body: 'The transfer commits in native MATRIX once more than two thirds of validators agree, capped at what was reserved.',
     href: '/products/consensus',
     linkLabel: 'Consensus',
   },
   {
     icon: FiLayers,
     tone: 'accent' as const,
-    title: 'Balances are one globally agreed fact',
-    body: 'Committed blocks are SHA-256 hash-linked into a single chain every node shares, so a MATRIX balance is a network-wide fact instead of a private per-node number. The chain can be validated end to end to detect tampering.',
+    title: 'Balances are one agreed fact',
+    body: 'Committed blocks are SHA-256 hash-linked into one chain every node shares, and can be validated end to end.',
     href: '/products/token',
     linkLabel: 'MATRIX token',
   },
@@ -75,7 +79,7 @@ export default function HowItWorksPage() {
           eyebrow='How it works'
           title='A cohesive stack, end to'
           gradient='end'
-          lead='Matrix ties peer discovery, a signed compute market, pluggable inference, and a fast BFT consensus ledger into one flow. Follow a single job from announcement to a globally agreed balance, and jump into the product it belongs to at each step.'
+          lead='Peer discovery, a signed compute market, pluggable inference and a BFT ledger, in one flow. Follow a single job from announcement to a globally agreed balance.'
           actions={
             <>
               <Button href='/docs/architecture' variant='primary' size='lg'>
@@ -95,10 +99,11 @@ export default function HowItWorksPage() {
             <Eyebrow>End to end</Eyebrow>
             <h2 className='mt-4 text-3xl font-bold tracking-tight sm:text-4xl'>One job, five steps</h2>
             <p className='mt-4 text-lg text-grayscale-300'>
-              From a provider announcing idle capacity to a balance that every node agrees on, here is how a single unit
-              of compute flows through the Matrix stack.
+              From idle capacity to a balance every node agrees on.
             </p>
           </div>
+
+          <MarketFlow className='mx-auto mt-10 max-w-4xl' />
 
           <div className='mt-14 space-y-6'>
             {steps.map((step, index) => (

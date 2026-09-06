@@ -107,7 +107,11 @@ ws.addEventListener('message', (ev) => {
   if (!msg.id || !pending.has(msg.id)) return;
   const { resolve, reject } = pending.get(msg.id);
   pending.delete(msg.id);
-  msg.error ? reject(new Error(JSON.stringify(msg.error))) : resolve(msg.result);
+  if (msg.error) {
+    reject(new Error(JSON.stringify(msg.error)));
+  } else {
+    resolve(msg.result);
+  }
 });
 const send = (method, params = {}, sessionId) =>
   new Promise((resolve, reject) => {

@@ -3,6 +3,7 @@
 import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
+import { JobLifecycle } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiCpu, FiServer, FiShoppingCart } from 'react-icons/fi';
 
@@ -40,9 +41,7 @@ export default function MarketplacePage() {
                 <h3 className='text-xl font-semibold'>Providers earn</h3>
               </div>
               <p className='mt-4 text-grayscale-300'>
-                Leave a machine running and register it as a provider. It signs and announces available capacity and a
-                price per compute unit across the P2P gossip network, then receives signed token transfers each time a
-                job it served completes.
+                Leave a machine running, register it, and get paid per job it serves.
               </p>
               <ul className='mt-6 space-y-3'>
                 <CheckItem>Sign and announce idle capacity and a price per unit over P2P gossip</CheckItem>
@@ -57,9 +56,7 @@ export default function MarketplacePage() {
                 <h3 className='text-xl font-semibold'>Buyers pay for compute</h3>
               </div>
               <p className='mt-4 text-grayscale-300'>
-                Discover providers across the P2P network and submit a signed job for the LLM compute and API responses
-                you need. The price is quoted up front from the provider&apos;s rate, and tokens only move through a
-                verified signed transfer once the work is done.
+                Find capacity, submit a signed job, pay only for work that completed.
               </p>
               <ul className='mt-6 space-y-3'>
                 <CheckItem>Discover local and remote providers over the P2P network</CheckItem>
@@ -76,22 +73,17 @@ export default function MarketplacePage() {
               <h3 className='text-lg font-semibold'>How settlement works</h3>
             </div>
             <p className='mt-4 text-grayscale-300'>
-              Settlement is cryptographic and shipped in the Matrix core. Each account is an ed25519 keypair, and the
-              earning currency is native <span className='font-medium text-white'>MATRIX</span>, the coin of the Matrix
-              L1 consensus chain. Tokens move only through transfers that are signed by the sender. Settlement routed
-              through the fast consensus chain is verified, ordered, and applied in one globally agreed ledger before a
-              balance can change. Nonces prevent replay and the committed chain can be validated end to end to detect
-              tampering, so a balance changes only through a valid signed transaction that the validator set has agreed
-              on.
+              Every account is an ed25519 keypair and every transfer is signed by its sender. A balance changes only
+              through a signed transfer the validator set has committed, and nonces make a replay impossible.
             </p>
+
+            <JobLifecycle className='mx-auto max-w-md' />
+
             <p className='mt-4 text-grayscale-300'>
-              Providers sign and announce their capacity and pricing over the libp2p gossip network, and remote nodes
-              discover them into a local registry. When a buyer pays a provider, the signed transfer is proposed, voted
-              on, and committed once a super-majority of validators agree, so every node applies the same ordered ledger
-              rather than a private per-node balance. An external gRPC API, the{' '}
-              <span className='font-medium text-white'>matrix.market.v1</span> MarketService, lets buyers and providers
-              register, discover local and remote providers, submit and manage jobs, read balances and transactions,
-              and broadcast signed transfers from outside the node.
+              Everything above is reachable from outside the node through the{' '}
+              <span className='font-medium text-white'>matrix.market.v1</span> MarketService: register, discover local
+              and remote providers, submit and manage jobs, read balances and transactions, and broadcast signed
+              transfers.
             </p>
           </Card>
         </Section>

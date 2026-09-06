@@ -3,6 +3,7 @@
 import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
+import { ConsensusRound } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiGlobe, FiLayers, FiZap } from 'react-icons/fi';
 
@@ -16,7 +17,7 @@ export default function ConsensusPage() {
           eyebrow='Global consensus'
           title='One fast, globally agreed'
           gradient='ledger'
-          lead='Every node applies the same ordered ledger. Matrix reaches agreement with a fast, leader-based BFT protocol built for speed first, not proof-of-work, so a payment is final in a single voting round.'
+          lead='Every node applies the same ordered ledger. Matrix reaches agreement with a fast, leader-based BFT protocol - no mining, no proof-of-work - and a payment is final the moment a quorum of validators has committed it.'
           actions={
             <>
               <Button href='/docs/architecture' variant='primary' size='lg'>
@@ -31,21 +32,22 @@ export default function ConsensusPage() {
         />
 
         <Section>
-          <div className='grid grid-cols-1 gap-6 md:grid-cols-2'>
+          <ConsensusRound className='mx-auto max-w-xl' />
+
+          <div className='mt-4 grid grid-cols-1 gap-6 md:grid-cols-2'>
             <Card>
               <div className='flex items-center gap-3'>
                 <IconBadge icon={FiZap} />
-                <h3 className='text-xl font-semibold'>Speed-first BFT</h3>
+                <h3 className='text-xl font-semibold'>Two phases, deliberately</h3>
               </div>
-              <p className='mt-4 text-grayscale-300'>
-                A fixed ed25519 validator set takes turns as leader in round-robin order. The leader proposes a block,
-                validators vote, and the block commits immediately once more than two-thirds agree. That single-round
-                fast path keeps settlement quick while tolerating faulty or offline validators.
-              </p>
               <ul className='mt-6 space-y-3'>
-                <CheckItem>Leader-based BFT over a fixed validator set (no mining, no proof-of-work)</CheckItem>
-                <CheckItem>Round-robin leader rotation with timeouts so a stalled leader is replaced</CheckItem>
-                <CheckItem>Commit on a greater-than-two-thirds quorum in a single voting round</CheckItem>
+                <CheckItem>Fixed ed25519 validator set, round-robin leader, no mining</CheckItem>
+                <CheckItem>A quorum of prevotes for one block is a polka; a quorum of precommits commits it</CheckItem>
+                <CheckItem>
+                  A validator locks on its precommit, not on its own single vote, so leader rotation can never orphan a
+                  block a quorum chose
+                </CheckItem>
+                <CheckItem>Per-round timeout backoff, so a slow network rotates leaders without livelocking</CheckItem>
               </ul>
             </Card>
 
@@ -54,15 +56,13 @@ export default function ConsensusPage() {
                 <IconBadge icon={FiGlobe} tone='secondary' />
                 <h3 className='text-xl font-semibold'>Globally agreed order</h3>
               </div>
-              <p className='mt-4 text-grayscale-300'>
-                Committed blocks are SHA-256 hash-linked into a single chain that every node shares. Because all nodes
-                apply the same committed order, a balance is a network-wide fact instead of a private per-node number,
-                and the chain can be validated end to end to detect tampering.
-              </p>
               <ul className='mt-6 space-y-3'>
-                <CheckItem>Hash-linked committed block chain shared by every node</CheckItem>
-                <CheckItem>Deterministic ledger application, so all honest nodes converge</CheckItem>
-                <CheckItem>Authoritative agreed ledger where both compute and inference settle by default</CheckItem>
+                <CheckItem>SHA-256 hash-linked block chain shared by every node, validatable end to end</CheckItem>
+                <CheckItem>Deterministic application, so honest nodes converge on identical balances</CheckItem>
+                <CheckItem>
+                  A node that missed a block fetches it from a peer with the precommit quorum that committed it
+                </CheckItem>
+                <CheckItem>Both compute and inference settle here by default</CheckItem>
               </ul>
             </Card>
           </div>

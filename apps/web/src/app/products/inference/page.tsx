@@ -4,6 +4,7 @@ import { Button } from '@/components/Button';
 import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
+import { InferencePath } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiBookOpen, FiCpu, FiGlobe, FiServer, FiShoppingCart } from 'react-icons/fi';
 
@@ -60,9 +61,7 @@ export default function InferencePage() {
                 <h3 className='text-xl font-semibold'>Local runner</h3>
               </div>
               <p className='mt-4 text-grayscale-300'>
-                Point the node at a local model server that speaks the Ollama-style chat API and serve inference
-                straight from your own hardware. A built-in echo backend lets you run the whole flow without a GPU for
-                testing.
+                Serve inference from your own hardware, or from the built-in echo backend with no GPU at all.
               </p>
               <ul className='mt-6 space-y-3'>
                 <CheckItem>Ollama-style local HTTP backend for on-device models</CheckItem>
@@ -77,9 +76,7 @@ export default function InferencePage() {
                 <h3 className='text-xl font-semibold'>Provider-API proxy</h3>
               </div>
               <p className='mt-4 text-grayscale-300'>
-                Already pay for an OpenAI-compatible API? Contribute by proxying network requests through it. The node
-                forwards the chat completion and the API key is read from an environment variable, never hardcoded or
-                committed.
+                Already pay for an OpenAI-compatible API? Contribute by proxying requests through it.
               </p>
               <ul className='mt-6 space-y-3'>
                 <CheckItem>OpenAI-compatible chat completions backend</CheckItem>
@@ -94,13 +91,12 @@ export default function InferencePage() {
               <IconBadge icon={FiCpu} />
               <h3 className='text-lg font-semibold'>Metered and settled through consensus</h3>
             </div>
+            <InferencePath className='mx-auto max-w-md' />
+
             <p className='mt-4 text-grayscale-300'>
-              A buyer submits a job over the <span className='font-medium text-white'>matrix.inference.v1</span>{' '}
-              InferenceService, capacity is reserved with an up-front affordability check on the reserved price, and the
-              selected backend runs the request. The buyer-to-provider transfer is then settled in native MATRIX through
-              the consensus ledger, scaled by the provider&apos;s price per unit and capped at the reserved amount, and
-              the job is reported complete only once that settlement commits and applies, so a buyer is charged exactly
-              once for work that really happened and never more than it reserved.
+              Jobs arrive over the <span className='font-medium text-white'>matrix.inference.v1</span> InferenceService.
+              A job is reported complete only once its settlement has committed, so a buyer is charged exactly once, for
+              work that really happened, and never more than it reserved.
             </p>
 
             {/* Click-to-copy: the full `matrix` sequence that gets an inference

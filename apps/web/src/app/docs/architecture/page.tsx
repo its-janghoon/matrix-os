@@ -1,16 +1,67 @@
-'use client';
-
+import { CopyButton } from '@/components/CopyButton';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
-import { FiCopy } from 'react-icons/fi';
-import { toast } from 'sonner';
+import { NodeStack } from '@/components/diagrams';
 
-export default function MatrixOsArchitecture() {
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    toast.success('Code copied to clipboard');
-  };
+export const metadata = {
+  title: 'Architecture',
+  description:
+    'What runs inside a matrixd node: the libp2p host, the compute marketplace, the BFT consensus engine, the inference backends and the Pebble store they all share.',
+};
 
+/**
+ * This page used to describe a different product. It had a "Kernel" exposing
+ * `@KernelModule` decorators imported from an `@matrix-os/core` npm package, an
+ * agent runtime configured with container isolation, and a DHT - none of which
+ * exist anywhere in this repository. What does exist is one Go daemon with a
+ * libp2p host, a marketplace, a consensus engine, pluggable inference backends
+ * and a Pebble store, reachable over gRPC. That is what is documented here, and
+ * the diagram carries the shape so the text can stop restating it.
+ */
+const CONFIG = `network:
+  listen_addr: /ip4/0.0.0.0/tcp/9000
+  bootstrap_peers: []
+storage:
+  engine: pebble
+  path: ~/.matrix/data
+admin:
+  addr: 0.0.0.0:9090      # gRPC: deploy, health, logs
+market:
+  addr: 0.0.0.0:9091      # gRPC: matrix.market.v1.MarketService
+inference:
+  addr: 0.0.0.0:9092      # gRPC: matrix.inference.v1.InferenceService
+  echo_provider: local    # GPU-free backend, for trying the flow
+consensus:
+  validators: []          # hex account IDs; empty = solo validator`;
+
+const subsystems = [
+  {
+    name: 'libp2p host and transport',
+    body: 'Peer connections and the gossip topics the marketplace and consensus publish on. Discovery is peer-to-peer; there is no broker and no registry server.',
+  },
+  {
+    name: 'Compute marketplace',
+    body: 'The provider order book and the job records. Registering announces capacity and a price; submitting a job reserves that capacity.',
+  },
+  {
+    name: 'Consensus engine',
+    body: 'A fixed ed25519 validator set, a round-robin leader, and two voting phases per height. Committed blocks are hash-linked, and a node that misses one fetches it from a peer with the precommit quorum that committed it.',
+  },
+  {
+    name: 'Inference backends',
+    body: 'An Ollama-style local runner, an OpenAI-compatible proxy whose key comes from the environment, or a deterministic echo backend that needs no GPU.',
+  },
+  {
+    name: 'Pebble store',
+    body: 'One embedded key-value store per node, holding the market ledger, the per-node token chain and the committed block chain under disjoint key prefixes.',
+  },
+  {
+    name: 'gRPC services',
+    body: 'Market, inference and admin, each on its own port, gated by the same authentication when ACLs are enabled.',
+  },
+];
+
+export default function ArchitecturePage() {
   return (
     <>
       <Navigation />
@@ -19,186 +70,67 @@ export default function MatrixOsArchitecture() {
           <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
-            {/* Main Content */}
             <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
-              <div className='max-w-4xl mx-auto'>
+              <div className='mx-auto max-w-4xl'>
                 <article className='text-gray-100'>
-                  {/* Hero Section */}
-                  <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
-                    <h1 className='text-4xl font-bold text-white mb-4'>Matrix OS Architecture</h1>
+                  <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
+                    <h1 className='mb-4 text-4xl font-bold text-white'>Architecture</h1>
                     <p className='text-xl text-gray-100'>
-                      Understand the core architecture of Matrix OS, its components, and how they work together to
-                      create a powerful distributed operating system.
+                      One process, one store, six subsystems. Here is what a node is made of and how you reach it.
                     </p>
                   </div>
 
-                  {/* System Overview */}
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>System Overview</h2>
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      Matrix OS is built on a layered architecture that combines distributed systems, blockchain
-                      technology, and AI capabilities:
-                    </p>
-                    <ul className='text-gray-100 space-y-3 list-disc pl-6'>
-                      <li>Core System Layer - Handles fundamental OS operations</li>
-                      <li>Network Layer - Manages peer-to-peer communications</li>
-                      <li>Consensus Layer - Ensures distributed agreement</li>
-                      <li>Agent Runtime Layer - Executes autonomous agents</li>
-                      <li>Application Layer - Hosts user applications and services</li>
-                    </ul>
-                  </div>
+                  <NodeStack />
 
-                  {/* Core Components */}
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Core Components</h2>
-
-                  <div className='space-y-8'>
-                    {/* Kernel */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Kernel</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        The Matrix OS kernel manages system resources and provides core services:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Kernel Architecture</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`// Matrix OS Kernel Component Example
-import { KernelModule } from '@matrix-os/core';
-
-@KernelModule({
-  name: 'resource-manager',
-  priority: 'high'
-})
-export class ResourceManager {
-  async allocateResources(request: ResourceRequest): Promise<ResourceAllocation> {
-    // Resource allocation logic
-    return this.optimizer.allocate(request);
-  }
-}`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`// Matrix OS Kernel Component Example
-import { KernelModule } from '@matrix-os/core';
-
-@KernelModule({
-  name: 'resource-manager',
-  priority: 'high'
-})
-export class ResourceManager {
-  async allocateResources(request: ResourceRequest): Promise<ResourceAllocation> {
-    // Resource allocation logic
-    return this.optimizer.allocate(request);
-  }
-}`}</code>
-                        </pre>
+                  <h2 className='mb-6 mt-12 text-3xl font-bold text-white'>Subsystems</h2>
+                  <dl className='grid gap-4 sm:grid-cols-2'>
+                    {subsystems.map((s) => (
+                      <div key={s.name} className='rounded-xl border border-gray-800 bg-gray-900/50 p-5'>
+                        <dt className='text-base font-semibold text-white'>{s.name}</dt>
+                        <dd className='mt-2 text-sm leading-relaxed text-gray-300'>{s.body}</dd>
                       </div>
-                    </div>
+                    ))}
+                  </dl>
 
-                    {/* Network Stack */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Network Stack</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        The network stack enables peer-to-peer communication and distributed consensus:
-                      </p>
-                      <ul className='text-gray-100 space-y-3 list-disc pl-6'>
-                        <li>P2P Discovery Protocol</li>
-                        <li>Secure Message Transport</li>
-                        <li>Distributed Hash Table (DHT)</li>
-                        <li>Network State Synchronization</li>
-                      </ul>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>How it is configured</h2>
+                  <p className='mb-4 text-gray-300'>
+                    One YAML file, written by <code className='text-white'>matrix init</code> and read at startup.
+                    Every field below is real; see{' '}
+                    <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                      configuration
+                    </a>{' '}
+                    for the rest.
+                  </p>
+                  <div className='rounded-lg border border-gray-800 bg-black p-4'>
+                    <div className='mb-2 flex items-center justify-between'>
+                      <span className='text-sm text-gray-400'>~/.matrix/config.yaml</span>
+                      <CopyButton value={CONFIG} label='Copy' />
                     </div>
-
-                    {/* Agent Runtime */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Agent Runtime</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        The agent runtime provides the execution environment for autonomous agents:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Agent Runtime Example</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`// Agent Runtime Configuration
-{
-  "runtime": {
-    "isolation": "container",
-    "resources": {
-      "cpu": "dynamic",
-      "memory": "2GB"
-    },
-    "security": {
-      "sandboxing": true,
-      "permissions": ["network", "storage"]
-    }
-  }
-}`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`// Agent Runtime Configuration
-{
-  "runtime": {
-    "isolation": "container",
-    "resources": {
-      "cpu": "dynamic",
-      "memory": "2GB"
-    },
-    "security": {
-      "sandboxing": true,
-      "permissions": ["network", "storage"]
-    }
-  }
-}`}</code>
-                        </pre>
-                      </div>
-                    </div>
+                    <pre className='overflow-x-auto text-sm text-gray-100'>
+                      <code>{CONFIG}</code>
+                    </pre>
                   </div>
 
-                  {/* System Flow */}
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>System Flow</h2>
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      Understanding how components interact in Matrix OS:
-                    </p>
-                    <ol className='text-gray-100 space-y-3 list-decimal pl-6'>
-                      <li>System initialization and boot sequence</li>
-                      <li>Network discovery and peer connection</li>
-                      <li>Agent deployment and execution</li>
-                      <li>Resource management and optimization</li>
-                      <li>State synchronization across the network</li>
-                    </ol>
-                  </div>
-
-                  {/* Next Steps */}
-                  <div className='bg-blue-500/10 rounded-xl p-6 mt-8 border border-blue-500/20'>
-                    <h2 className='text-2xl font-bold text-white mb-4'>Next Steps</h2>
-                    <p className='text-gray-100 leading-relaxed mb-4'>To dive deeper into Matrix OS architecture:</p>
-                    <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
+                  <div className='mt-10 rounded-xl border border-primary-400/20 bg-primary-400/10 p-6'>
+                    <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
+                    <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/matrix-protocol' className='text-blue-400 hover:text-blue-300 underline'>
-                          Learn about the Matrix Protocol
-                        </a>
+                        <a href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
+                          The Matrix Protocol
+                        </a>{' '}
+                        - the wire messages between nodes
                       </li>
                       <li>
-                        <a href='/docs/configuration' className='text-blue-400 hover:text-blue-300 underline'>
-                          Explore configuration options
-                        </a>
+                        <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                          The compute marketplace
+                        </a>{' '}
+                        - providers, jobs and settlement
                       </li>
                       <li>
-                        <a href='/docs/soul-protocol' className='text-blue-400 hover:text-blue-300 underline'>
-                          Understand the Soul Protocol
-                        </a>
+                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                          Configuration
+                        </a>{' '}
+                        - every field in the file above
                       </li>
                     </ul>
                   </div>
