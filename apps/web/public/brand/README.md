@@ -67,28 +67,43 @@ ramp in colour. In one colour the paint collapses to `currentColor` and the face
 
 ## Wordmark caveat
 
-The lockups set the wordmark as **live text in Inter**, not outlines. On this site
-that is the better choice: Inter is already loaded via `next/font`, so the text
-stays crisp at every size and editable in place. It does mean the lockup files are
-**not self-contained** - opened somewhere without Inter, they fall back down the
-declared stack and the spacing shifts.
+The lockups set the wordmark as **live text in Inter**, not outlines, so the lockup
+files are **not self-contained**: opened anywhere without Inter they fall back down
+the declared stack and the spacing shifts.
 
-Before handing a lockup to a printer, a press kit, or any third party, outline the
-text once in a vector editor. The `mark.svg` and `mark-mono.svg` files have no text
-in them at all and are safe to send anywhere as-is.
+**That includes this site.** An earlier version of this file claimed the lockups
+were safe here because Inter is loaded via `next/font` - that is wrong. An SVG
+referenced through `<img>` or `next/image` renders in an *isolated* context: it
+cannot reach the document's fonts or `currentColor`. Dropping
+`lockup-matrix-os.svg` into the header would render the wordmark in whatever
+system sans the visitor has.
+
+So:
+
+- **In the site**, use `BrandMark` (`src/components/BrandMark.tsx`) next to real
+  HTML text. That is what the header does. The text is then real Inter, real DOM,
+  selectable and translatable.
+- **Outside the site** - a deck, a press kit, a printer, a README badge - use a
+  lockup, and outline its text once in a vector editor first.
+- `mark.svg` and `mark-mono.svg` contain no text at all and are safe to send
+  anywhere as-is.
 
 ## Regenerating
 
-`generate.py` holds the geometry for all four concepts and emits every variant, so
-a mark and its monochrome sibling can never drift apart. Edit the geometry there,
-never the SVGs by hand:
+The generators live in [`apps/web/scripts/brand/`](../../scripts/brand). They take
+paths from their own location, so they run from any checkout:
 
 ```sh
-cd apps/web/public/brand && BRAND_OUT=. python3 generate.py
+cd apps/web
+python3 scripts/brand/generate.py         # the marks and lockups, into public/brand/
+python3 scripts/brand/gen_icons.py shard  # 27 favicons / app icons + favicon.ico
+python3 scripts/brand/gen_og.py shard     # public/og-image.png
 ```
 
-The script records, in each concept's docstring, the versions that were cut and
-why:
+`generate.py` holds the geometry for every concept and emits all their variants, so
+a mark and its monochrome sibling can never drift apart. Edit the geometry there,
+never the SVGs by hand. It records, in each concept's docstring, the versions that
+were cut and why:
 
 - a fan-out that rendered as the system share icon
 - a converging-nodes mark that read as a trident
@@ -98,43 +113,69 @@ why:
 - an M whose hand-picked inner vertices gave the legs and diagonals different
   weights
 
-Worth reading before proposing another concept. `concept_facet_m` also asserts
-its own bounds, because a mis-set stroke extension pushes a corner off-canvas
-silently and only shows up once rendered.
+Worth reading before proposing another concept. `concept_facet_m` also asserts its
+own bounds, because a mis-set stroke extension pushes a corner off-canvas silently
+and only shows up once rendered.
 
-## Wiring the chosen mark
+### Why there is a PNG codec in here
 
-The header logo is currently a placeholder: a gradient rounded square with the
-letters `ECIR` set at 11px. In
-[`src/components/Navigation.tsx`](../../src/components/Navigation.tsx):
+`gen_icons.py` and `gen_og.py` render through the headless Chromium already
+installed for Playwright, and resample with `pngtool.py` (decode / area-average
+resize / crop / encode, stdlib only) because this repo has no image library.
 
-```tsx
-<div className='h-9 w-9 rounded-xl bg-decorative-1 flex items-center justify-center shadow-glow'>
-  <span className='text-[11px] font-bold text-white tracking-wider'>ECIR</span>
-</div>
-<span className='ml-2.5 text-lg font-semibold text-white tracking-tight'>Matrix</span>
-```
+Two Chromium behaviours are worth knowing before touching these scripts, since
+both fail *silently* - they produce a plausible file rather than an error:
 
-Replace both elements with the chosen lockup:
+- **`--window-size` is the outer window.** Chromium subtracts its own chrome from
+  the layout viewport (measured: 87px of height). Asking for a 1200x630 window
+  lays out at 1200x543 and pads the screenshot with white, which is why a bottom
+  edge element vanishes. Both scripts render into a generous window and crop the
+  top-left instead of trusting that number.
+- **Small windows and fractional scale factors are clamped.** A direct 16x16
+  screenshot comes back blank and mid sizes come back clipped;
+  `--force-device-scale-factor` will not go below 0.5. So every icon is resampled
+  from one 512px master rather than rendered at its final size.
 
-```tsx
-import Image from 'next/image';
+Both scripts assert on the pixels they produce - that the master actually painted,
+that the og-image's gradient rule, headline and ghost mark are all there - because
+a blank or clipped render is exactly the failure that otherwise ships unnoticed.
 
-<Image
-  src='/brand/<slug>/lockup-matrix-os.svg'
-  alt='Matrix OS'
-  width={168}
-  height={44}
-  className='h-9 w-auto'
-  priority
-/>
-```
+## What is wired up
 
-Then, still to do once a concept is chosen:
+`shard` is the chosen mark, and it is live:
 
-- **Favicons.** `public/` currently holds PNG favicons and app icons generated from
-  the old mark. Re-export them from the chosen `mark-mono.svg` (or `mark.svg` for
-  the coloured tiles) at the sizes already present, and update
-  `manifest.json` and `browserconfig.xml` if the theme colour changes.
-- **`public/og-image.svg`.** Still the old placeholder: plain text on `#111111`,
-  a canvas that predates the navy design system. Rebuild it around the chosen mark.
+| Surface | File |
+| --- | --- |
+| Header logo | [`src/components/BrandMark.tsx`](../../src/components/BrandMark.tsx), inlined next to real HTML text |
+| Browser tab | `favicon.svg`, `favicon.ico`, `favicon-16x16.png`, `favicon-32x32.png`, `favicon-96x96.png` |
+| iOS home screen | `apple-touch-icon.png` + the `apple-icon-*` set |
+| Android launcher | `android-icon-*`, including a 512 and a maskable entry in `manifest.json` |
+| Windows tiles | `ms-icon-*`, `browserconfig.xml` |
+| Link previews | `og-image.png` (1200x630) |
+
+The header mark is **inlined as a component** rather than loaded from
+`/brand/shard/mark.svg`: it saves a request on every page, and an SVG loaded
+through `<img>` cannot inherit the page's font or `currentColor` (see the wordmark
+caveat above). Its geometry is a copy of `shard/mark.svg` - regenerate the mark and
+update the component's `FACES` together.
+
+### Bugs fixed while wiring this up
+
+- `layout.tsx` pointed at **three files that did not exist** - `/favicon.ico`,
+  `/apple-touch-icon.png` and `/site.webmanifest` - so the site served no icon at
+  all and no manifest. All three now exist (the manifest as its real name,
+  `/manifest.json`).
+- `og:image` was an **SVG**, which Twitter, Facebook and Slack do not render. It is
+  now a PNG.
+- `manifest.json` carried `theme_color: #0B111B` and `background_color: #ffffff`,
+  and `browserconfig.xml` a white `TileColor` - all predating the navy design
+  system. All three are now `#060A16`.
+
+### Still open
+
+- `manifest.json` still describes ECIR Labs as "an inclusive research community
+  ... we make tech fun and accessible", which contradicts the positioning in
+  `layout.tsx`. That is copy, not an asset, so it was left alone.
+- `public/png/logo.png` is an old raster logo that nothing in `src/` references.
+- Round one's four marks are still in this directory. Delete them once you are
+  sure none is wanted - `ecir-e` may still be useful as a company monogram.

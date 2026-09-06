@@ -51,7 +51,10 @@ def resolve_faces(body, mono):
         body = body.replace(f"OPA_{key}", FACE_MONO_OPACITY[key] if mono else "1")
     return body
 
-OUT = os.environ.get("BRAND_OUT", ".")
+WEB = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# Defaults to the served asset directory so a bare run updates the real
+# files; BRAND_OUT redirects it for a scratch render.
+OUT = os.environ.get("BRAND_OUT", os.path.join(WEB, "public", "brand"))
 
 # The site's signature sweep is linear-gradient(101deg, #2E6BFF, #22D3EE).
 # 101deg in CSS (0deg = up, clockwise) maps to this SVG vector on a 32x32 box.
@@ -404,8 +407,24 @@ def tidy(svg):
     return _NUM.sub(lambda m: f"{float(m.group()):.2f}".rstrip("0").rstrip("."), svg)
 
 
+_DEFS = re.compile(r"<defs>.*?</defs>", re.S)
+
+
+def drop_unused_defs(svg):
+    """Strip the gradient def when nothing references it.
+
+    The faceted concepts paint literal colours off the blue ramp and never use
+    the sweep, so shipping its <defs> would put dead markup in the favicon and
+    in every app icon generated from the mark.
+    """
+    gid = re.search(r'<linearGradient id="([^"]+)"', svg)
+    if gid and f"url(#{gid.group(1)})" not in svg:
+        return _DEFS.sub("", svg, count=1)
+    return svg
+
+
 def write(path, text):
-    text = tidy(text)
+    text = drop_unused_defs(tidy(text))
     full = os.path.join(OUT, path)
     os.makedirs(os.path.dirname(full), exist_ok=True)
     with open(full, "w", encoding="utf-8") as f:

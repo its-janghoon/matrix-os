@@ -5,6 +5,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { FiChevronDown } from 'react-icons/fi';
 import { Button } from './Button';
+import { BrandMark } from '@/components/BrandMark';
 
 type NavLink = { label: string; href: string; description?: string; external?: boolean };
 type NavMenu = { label: string; href?: string; links?: NavLink[] };
@@ -123,11 +124,20 @@ export default function Navigation() {
         <div className='flex items-center justify-between h-16'>
           {/* Logo and Primary Nav */}
           <div className='flex items-center gap-10'>
-            <Link href='/' className='flex items-center group' onClick={closeAll}>
-              <div className='h-9 w-9 rounded-xl bg-decorative-1 flex items-center justify-center shadow-glow'>
-                <span className='text-[11px] font-bold text-white tracking-wider'>ECIR</span>
-              </div>
-              <span className='ml-2.5 text-lg font-semibold text-white tracking-tight'>Matrix</span>
+            {/* The wordmark stays real text rather than part of an SVG lockup:
+                an SVG loaded through <img> or next/image cannot reach the page's
+                Inter, so a lockup file would silently fall back to a system
+                sans here. */}
+            <Link
+              href='/'
+              className='flex items-center gap-2.5 group'
+              aria-label='Matrix OS, home'
+              onClick={closeAll}
+            >
+              <BrandMark size={32} className='shrink-0' />
+              <span className='text-lg font-semibold tracking-tight text-white'>
+                Matrix <span className='text-secondary-400'>OS</span>
+              </span>
             </Link>
 
             <div className='hidden lg:flex items-center gap-1'>

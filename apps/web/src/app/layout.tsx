@@ -12,6 +12,9 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
+  // Without this, Next resolves relative og:image URLs against localhost, so
+  // link previews in production point at a host nobody can reach.
+  metadataBase: new URL('https://ecirlabs.com'),
   title: {
     default: 'ECIR Labs - Building the future of decentralized intelligence',
     template: '%s | ECIR Labs',
@@ -43,12 +46,15 @@ export const metadata: Metadata = {
     title: 'ECIR Labs - Decentralized Intelligence Platform',
     description:
       'ECIR Labs is building the future of decentralized intelligence with Matrix OS, enabling secure and scalable distributed computing.',
+    // A raster, not the SVG this used to point at: Twitter, Facebook and Slack
+    // do not render an SVG og:image.
     images: [
       {
-        url: '/og-image.svg',
+        url: '/og-image.png',
         width: 1200,
         height: 630,
-        alt: 'ECIR Labs',
+        type: 'image/png',
+        alt: 'Matrix OS - a peer-to-peer marketplace for compute',
       },
     ],
   },
@@ -63,12 +69,20 @@ export const metadata: Metadata = {
       'max-snippet': -1,
     },
   },
+  // These all pointed at files that did not exist (/favicon.ico,
+  // /apple-touch-icon.png, /site.webmanifest), so the site served no icon at
+  // all. The files below are generated from the brand mark; see
+  // public/brand/README.md.
   icons: {
-    icon: '/favicon.ico',
-    shortcut: '/favicon-16x16.png',
-    apple: '/apple-touch-icon.png',
+    icon: [
+      { url: '/favicon.svg', type: 'image/svg+xml' },
+      { url: '/favicon-32x32.png', sizes: '32x32', type: 'image/png' },
+      { url: '/favicon-16x16.png', sizes: '16x16', type: 'image/png' },
+    ],
+    shortcut: '/favicon.ico',
+    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
   },
-  manifest: '/site.webmanifest',
+  manifest: '/manifest.json',
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

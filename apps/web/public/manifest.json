@@ -1,6 +1,6 @@
 {
-  "theme_color": "#0B111B",
-  "background_color": "#ffffff",
+  "theme_color": "#060A16",
+  "background_color": "#060A16",
   "display": "standalone",
   "scope": "/",
   "start_url": "/",
@@ -43,6 +43,18 @@
       "sizes": "192x192",
       "type": "image/png",
       "density": "4.0"
+    },
+    {
+      "src": "/android-icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "density": "4.0"
+    },
+    {
+      "src": "/android-icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }
