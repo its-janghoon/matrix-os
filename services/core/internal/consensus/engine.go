@@ -105,6 +105,16 @@ type Engine struct {
 	// can never be applied twice. It is the consensus analogue of token.Chain's
 	// per-sender nonce gate.
 	committedTxs map[string]struct{}
+	// appliedTxs records, per committed transaction dedup key, whether the
+	// transfer actually MOVED credits (true) or was deterministically skipped at
+	// apply time because the sender could not afford it (false). It lets a caller
+	// distinguish "committed and paid" from "committed but skipped", which is what
+	// a settlement API needs to avoid reporting an unfunded payment as complete.
+	appliedTxs map[string]bool
+	// settleWaiters are channels to close when a specific committed tx key becomes
+	// known (applied or skipped), so a caller can block until its settlement is
+	// finalised rather than polling. Keyed by tx dedup key.
+	settleWaiters map[string][]chan struct{}
 	// height is the next height to commit (equals committed chain length).
 	height uint64
 	// round is the current round for the current height. It starts at 0 for each
@@ -120,8 +130,32 @@ type Engine struct {
 	// committed.
 	proposals map[string]*Block
 	// votes tallies distinct voter IDs per block hash (hex) for the current
-	// height.
+	// height, aggregated across all rounds. A block keeps the same hash when
+	// re-proposed at a higher round, so votes accumulate toward one quorum per
+	// block regardless of the round they were cast in.
 	votes map[string]map[string]struct{}
+	// roundVotes retains the actual signed Vote messages seen for the current
+	// height, keyed by round -> blockHashHex -> voterID -> Vote. It is the
+	// evidence a leader draws on to build a PolkaCertificate justifying a
+	// higher-round proposal, and lets the engine detect when a block reached a
+	// quorum (a "polka") at a specific round.
+	roundVotes map[uint64]map[string]map[string]Vote
+	// votedRound / votedHash record the (round, block hash) this node last voted
+	// for at the current height. They enforce the vote-once-per-round rule (never
+	// cast two votes in the same round) together with the lock below.
+	votedRound uint64
+	votedHash  string
+	hasVoted   bool
+	// lockedRound / lockedHash record the highest round at which this node voted
+	// for a block at the current height, and that block's hash. This is the LOCK:
+	// once locked, the node will not vote for a DIFFERENT block at the same height
+	// unless it sees a valid PolkaCertificate proving that different block reached
+	// a quorum at a round >= lockedRound (i.e. the network provably moved on). The
+	// lock is what makes leader rotation safe: two conflicting blocks can never
+	// both gather a quorum at the same height.
+	lockedRound uint64
+	lockedHash  string
+	locked      bool
 	// committedThisHeight guards against double-commit at a height.
 	committing bool
 	// futureProposals stashes proposals for heights ahead of ours (this node is
@@ -161,8 +195,11 @@ func New(cfg Config) (*Engine, error) {
 		onCommit:        cfg.OnCommit,
 		mempoolSet:      make(map[string]struct{}),
 		committedTxs:    make(map[string]struct{}),
+		appliedTxs:      make(map[string]bool),
+		settleWaiters:   make(map[string][]chan struct{}),
 		proposals:       make(map[string]*Block),
 		votes:           make(map[string]map[string]struct{}),
+		roundVotes:      make(map[uint64]map[string]map[string]Vote),
 		futureProposals: make(map[string]*Block),
 		futureVotes:     make(map[uint64]map[string]map[string]struct{}),
 	}
@@ -325,9 +362,13 @@ func (e *Engine) tick(ctx context.Context) {
 	e.mu.Lock()
 
 	// Round timeout: rotate the leader if this height has not committed in time.
+	// Bumping the round permits one fresh vote in the new round (vote-once is
+	// per-round); the LOCK is deliberately preserved across the bump so a node
+	// still refuses to vote for a conflicting block without a justifying polka.
 	if time.Now().After(e.roundDeadline) {
 		e.round++
 		e.roundDeadline = time.Now().Add(e.roundTimeout)
+		e.hasVoted = false
 	}
 
 	// Only the leader proposes, only if this node is a validator with a key.
@@ -359,7 +400,36 @@ func (e *Engine) tick(ctx context.Context) {
 // buildBlockLocked constructs a signed block proposal for the current
 // height/round from the mempool. Callers must hold e.mu. It returns nil when
 // this node cannot propose. The proposal is signed by e.self.
+//
+// Voting-discipline rule for the leader: if this node is LOCKED on a block at
+// the current height (it voted for it in an earlier round), it MUST re-propose
+// that exact locked block rather than a fresh one, unless it can attach a polka
+// certificate for a different block at a round >= its lock (proving the network
+// moved on). This keeps rotation safe: a leader cannot orphan a value that a
+// quorum may already have locked. When re-proposing the locked block at a higher
+// round it re-signs it for the new round and attaches the best certificate it
+// holds so locked followers can verify and vote.
 func (e *Engine) buildBlockLocked() *Block {
+	// If locked, prefer re-proposing the locked block (unless a higher polka lets
+	// us switch — handled by bestPolkaLocked returning a certificate for another
+	// block at a round >= lockedRound).
+	if e.locked {
+		best := e.bestPolkaLocked()
+		if best == nil || best.Round < e.lockedRound || string(best.BlockHash) == e.lockedHash {
+			// No justification to switch away from the locked block: re-propose it.
+			if lb, ok := e.proposals[e.lockedHash]; ok {
+				reproposed := *lb
+				reproposed.Round = e.round
+				reproposed.ProposerID = e.selfID
+				reproposed.Justify = e.bestPolkaLocked()
+				if err := reproposed.Sign(e.self.PrivateKey); err != nil {
+					return nil
+				}
+				return &reproposed
+			}
+		}
+	}
+
 	txs := make([]token.Transaction, 0, len(e.mempool))
 	for i := range e.mempool {
 		if len(txs) >= e.maxBlockTxs {
@@ -383,10 +453,59 @@ func (e *Engine) buildBlockLocked() *Block {
 		Txs:           txs,
 		ProposerID:    e.selfID,
 	}
+	// A round > 0 proposal for a fresh block must justify why it is safe to
+	// abandon any earlier-round value: attach the highest polka certificate we
+	// hold. If we hold none but are proposing a fresh block at round > 0, the
+	// proposal is unjustified and locked followers will not vote for it; that is
+	// acceptable (it simply will not reach quorum) and preserves safety.
+	if e.round > 0 {
+		b.Justify = e.bestPolkaLocked()
+	}
 	if err := b.Sign(e.self.PrivateKey); err != nil {
 		return nil
 	}
 	return b
+}
+
+// bestPolkaLocked returns a PolkaCertificate for the highest round at the
+// current height at which some block reached a quorum of votes, or nil if no
+// block has been polka'd yet. Callers must hold e.mu. The certificate carries
+// the actual signed votes so a receiver can verify it independently.
+func (e *Engine) bestPolkaLocked() *PolkaCertificate {
+	quorum := e.validators.Quorum()
+	var (
+		bestRound = uint64(0)
+		bestHash  string
+		found     bool
+	)
+	for round, byHash := range e.roundVotes {
+		for hkey, voters := range byHash {
+			if len(voters) < quorum {
+				continue
+			}
+			if !found || round > bestRound {
+				bestRound = round
+				bestHash = hkey
+				found = true
+			}
+		}
+	}
+	if !found {
+		return nil
+	}
+	voters := e.roundVotes[bestRound][bestHash]
+	votes := make([]Vote, 0, len(voters))
+	var blockHash []byte
+	for _, v := range voters {
+		votes = append(votes, v)
+		blockHash = v.BlockHash
+	}
+	return &PolkaCertificate{
+		Height:    e.height,
+		Round:     bestRound,
+		BlockHash: append([]byte(nil), blockHash...),
+		Votes:     votes,
+	}
 }
 
 // ingestProposal records a locally-built proposal, publishes it, and casts this
@@ -525,31 +644,143 @@ func (e *Engine) acceptProposal(b *Block) error {
 		seenInBlock[key] = struct{}{}
 	}
 
+	hash := b.Hash()
+	hkey := fmt.Sprintf("%x", hash)
+
+	// Voting-discipline / lock rule. This is the heart of the safety fix: an
+	// honest validator that has locked a block at the current height will NOT
+	// accept (and therefore will not vote for) a proposal for a DIFFERENT block at
+	// this height unless the proposal carries a valid PolkaCertificate proving
+	// that different block reached a quorum at a round >= our locked round. That
+	// certificate is only obtainable if a quorum voted for the other block, which
+	// (by quorum intersection) cannot happen for a block conflicting with one that
+	// already committed. So two conflicting blocks can never both reach quorum at
+	// one height, and no node commits a block another node has ruled out.
+	if e.locked && hkey != e.lockedHash {
+		if b.Justify == nil {
+			return fmt.Errorf("%w: locked on %s, proposal %s carries no justification", ErrInvalidMessage, e.lockedHash, hkey)
+		}
+		if err := b.Justify.Verify(e.validators); err != nil {
+			return fmt.Errorf("%w: invalid justification: %v", ErrInvalidMessage, err)
+		}
+		if b.Justify.Height != e.height {
+			return fmt.Errorf("%w: justification for wrong height", ErrInvalidMessage)
+		}
+		if b.Justify.Round < e.lockedRound {
+			return fmt.Errorf("%w: justification round %d < locked round %d", ErrInvalidMessage, b.Justify.Round, e.lockedRound)
+		}
+		// The justification must endorse the block being proposed (a leader cannot
+		// wave an unrelated certificate to unlock followers onto a third block).
+		if fmt.Sprintf("%x", b.Justify.BlockHash) != hkey {
+			return fmt.Errorf("%w: justification does not endorse the proposed block", ErrInvalidMessage)
+		}
+		// Valid, higher-or-equal-round polka for this different block: release the
+		// lock so we may vote for it. (advanceHeight resets the lock per height.)
+		e.locked = false
+	}
+
+	// If a proposal carries a justification, ingest its votes so we too can build
+	// certificates and detect polkas across rounds even if we missed the raw vote
+	// gossip.
+	if b.Justify != nil {
+		if err := b.Justify.Verify(e.validators); err == nil && b.Justify.Height == e.height {
+			for i := range b.Justify.Votes {
+				e.recordRoundVoteLocked(&b.Justify.Votes[i])
+			}
+		}
+	}
+
 	// Cache the block for this height so votes can be tallied against it. Adopt
 	// the proposal's round so our own subsequent votes/leadership checks align
 	// with the block we are voting for.
-	hash := b.Hash()
-	hkey := fmt.Sprintf("%x", hash)
 	if _, seen := e.proposals[hkey]; !seen {
 		cp := *b
+		cp.Justify = nil // do not retain certificates in the cached body
 		e.proposals[hkey] = &cp
 	}
 	if b.Round > e.round {
 		e.round = b.Round
 		e.roundDeadline = time.Now().Add(e.roundTimeout)
+		// A new round permits one fresh vote; clear the per-round guard while
+		// keeping the lock intact.
+		e.hasVoted = false
 	}
 	return nil
+}
+
+// recordRoundVoteLocked stores a signed vote in the per-round evidence map for
+// the current height so it can later back a PolkaCertificate. Callers must hold
+// e.mu. Votes for other heights are ignored.
+func (e *Engine) recordRoundVoteLocked(v *Vote) {
+	if v.Height != e.height {
+		return
+	}
+	byHash := e.roundVotes[v.Round]
+	if byHash == nil {
+		byHash = make(map[string]map[string]Vote)
+		e.roundVotes[v.Round] = byHash
+	}
+	hkey := fmt.Sprintf("%x", v.BlockHash)
+	set := byHash[hkey]
+	if set == nil {
+		set = make(map[string]Vote)
+		byHash[hkey] = set
+	}
+	if _, ok := set[v.VoterID]; !ok {
+		set[v.VoterID] = *v
+	}
 }
 
 // castVote signs and broadcasts this node's vote for block b, and also tallies
 // the vote locally (which may itself trigger a commit if quorum is already
 // present, e.g. in a single-validator set). A non-validator node does not vote
 // but still tallies received votes toward a commit.
+//
+// The voting discipline is enforced here, under the lock, so no two goroutines
+// can slip two votes past it:
+//
+//   - Vote-once-per-round: at most one vote per (height, round). A second vote
+//     in the same round is refused.
+//   - Lock: a node never votes for a block that differs from the one it is
+//     locked on at the current height. acceptProposal only releases the lock when
+//     it has verified a quorum polka for the new block at a round >= the lock, so
+//     by the time we get here the block is safe to vote for. Casting the vote
+//     (re)locks the node onto this block at this round.
+//
+// Together these guarantee an honest validator never contributes its vote to two
+// conflicting blocks at the same height, which is exactly what quorum
+// intersection needs to make double-commit (divergence) impossible.
 func (e *Engine) castVote(ctx context.Context, b *Block) {
 	if !e.isValidator {
 		return
 	}
 	hash := b.Hash()
+	hkey := fmt.Sprintf("%x", hash)
+
+	e.mu.Lock()
+	if b.Height != e.height {
+		e.mu.Unlock()
+		return
+	}
+	// Vote-once-per-round: refuse a second, distinct vote within the same round.
+	if e.hasVoted && e.votedRound == b.Round {
+		if e.votedHash == hkey {
+			// Idempotent re-vote for the same block/round: allow the tally + publish
+			// (gossip may need the echo) but do not change lock state.
+		} else {
+			e.mu.Unlock()
+			return
+		}
+	}
+	// Lock: never vote for a block different from the one we are locked on. The
+	// lock is only released in acceptProposal after verifying a higher-or-equal
+	// round polka for the new block, so reaching here with a different hash while
+	// locked should not happen; guard defensively.
+	if e.locked && hkey != e.lockedHash {
+		e.mu.Unlock()
+		return
+	}
+
 	v := &Vote{
 		Height:    b.Height,
 		Round:     b.Round,
@@ -558,8 +789,21 @@ func (e *Engine) castVote(ctx context.Context, b *Block) {
 		PublicKey: e.self.PublicKey,
 	}
 	if err := v.Sign(e.self.PrivateKey); err != nil {
+		e.mu.Unlock()
 		return
 	}
+	// Record that we voted, and (re)lock onto this block at this round. The lock
+	// round only advances, so a stale re-proposal cannot lower it.
+	e.hasVoted = true
+	e.votedRound = b.Round
+	e.votedHash = hkey
+	if !e.locked || b.Round >= e.lockedRound {
+		e.locked = true
+		e.lockedRound = b.Round
+		e.lockedHash = hkey
+	}
+	e.mu.Unlock()
+
 	// Tally our own vote first so a single-node / already-quorate set commits
 	// without waiting for the network to echo our vote back.
 	e.tallyVote(v)
@@ -602,6 +846,9 @@ func (e *Engine) tallyVote(v *Vote) {
 			e.votes[hkey] = set
 		}
 		set[v.VoterID] = struct{}{}
+		// Retain the raw vote per round so a leader can later assemble a
+		// PolkaCertificate proving this block reached a quorum at this round.
+		e.recordRoundVoteLocked(v)
 	case v.Height > e.height && v.Height <= e.height+maxFutureStash:
 		// We are lagging: buffer the vote so it counts the moment we reach that
 		// height, so a node that fell behind still collects the quorum that let the
@@ -703,8 +950,10 @@ func (e *Engine) commitAndApply(b *Block) error {
 	// Apply transfers atomically as one critical section on the ledger, matching
 	// token.SettledLedger's safe pattern (affordability check + transfer under the
 	// ledger write lock). Determinism: iterate in block order; skip unaffordable
-	// transfers uniformly.
-	return e.ledger.Atomically(func(ltx market.LedgerTx) error {
+	// transfers uniformly. Record per-tx whether the transfer actually applied so
+	// a settlement caller can tell "paid" from "skipped".
+	applied := make(map[string]bool, len(b.Txs))
+	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
 		for i := range b.Txs {
 			tx := &b.Txs[i]
 			sender := tx.SenderID()
@@ -716,14 +965,67 @@ func (e *Engine) commitAndApply(b *Block) error {
 				// Deterministically skip: insufficient funds at apply time. Every node
 				// sees the same prior balances (same committed prefix), so every node
 				// makes the same skip decision.
+				applied[mempoolKey(tx)] = false
 				continue
 			}
 			if err := ltx.Transfer(sender, tx.To, tx.Amount); err != nil {
 				return err
 			}
+			applied[mempoolKey(tx)] = true
 		}
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	// Publish the applied/skipped result and wake any settlement waiters. Done
+	// after the ledger critical section so observers only see finalised state.
+	e.recordApplied(applied)
+	return nil
+}
+
+// recordApplied stores the applied/skipped outcome for each committed tx and
+// wakes any waiters blocked on those txs. It takes e.mu.
+func (e *Engine) recordApplied(applied map[string]bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for key, ok := range applied {
+		e.appliedTxs[key] = ok
+		if waiters, present := e.settleWaiters[key]; present {
+			for _, ch := range waiters {
+				close(ch)
+			}
+			delete(e.settleWaiters, key)
+		}
+	}
+}
+
+// WaitForSettlement blocks until the given transaction is committed to a block
+// and its apply outcome is known, or until ctx is done. It returns whether the
+// transfer was committed and whether it actually applied (moved credits). This
+// is what an API caller uses to avoid reporting a settled/complete job for a
+// payment that has only been submitted to the mempool and may yet be skipped.
+// The primitive return signature (no shared struct) lets consumers in other
+// packages depend on the Engine without importing a result type from here.
+func (e *Engine) WaitForSettlement(ctx context.Context, tx *token.Transaction) (committed bool, applied bool, err error) {
+	key := mempoolKey(tx)
+	e.mu.Lock()
+	if a, ok := e.appliedTxs[key]; ok {
+		e.mu.Unlock()
+		return true, a, nil
+	}
+	ch := make(chan struct{})
+	e.settleWaiters[key] = append(e.settleWaiters[key], ch)
+	e.mu.Unlock()
+
+	select {
+	case <-ctx.Done():
+		return false, false, ctx.Err()
+	case <-ch:
+		e.mu.Lock()
+		a := e.appliedTxs[key]
+		e.mu.Unlock()
+		return true, a, nil
+	}
 }
 
 // advanceHeight resets per-height consensus state after a commit and moves the
@@ -756,6 +1058,15 @@ func (e *Engine) advanceHeight(committed *Block) {
 	e.round = 0
 	e.roundDeadline = time.Now().Add(e.roundTimeout)
 	e.proposals = make(map[string]*Block)
+	// Reset the per-height voting discipline state: a fresh height starts with no
+	// vote cast, no lock, and no round-vote evidence.
+	e.roundVotes = make(map[uint64]map[string]map[string]Vote)
+	e.votedRound = 0
+	e.votedHash = ""
+	e.hasVoted = false
+	e.lockedRound = 0
+	e.lockedHash = ""
+	e.locked = false
 	// Seed the new height's vote tally from any votes we buffered while lagging,
 	// so a node that fell behind immediately counts the quorum the rest of the
 	// network already produced for this height.
@@ -792,6 +1103,13 @@ func (e *Engine) reconcileToChainHead() {
 		e.roundDeadline = time.Now().Add(e.roundTimeout)
 		e.proposals = make(map[string]*Block)
 		e.votes = make(map[string]map[string]struct{})
+		e.roundVotes = make(map[uint64]map[string]map[string]Vote)
+		e.votedRound = 0
+		e.votedHash = ""
+		e.hasVoted = false
+		e.lockedRound = 0
+		e.lockedHash = ""
+		e.locked = false
 	}
 }
 

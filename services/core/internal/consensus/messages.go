@@ -24,10 +24,15 @@
 // Messages travel over the transport.Transport gossip topics; a small Transport
 // interface is kept so a multi-node test can wire N engines to an in-memory bus.
 //
-// This is a REAL global consensus that REPLACES the deliberately per-node
-// pairwise settlement in internal/marketexchange: the authoritative, agreed
-// ordered ledger is the committed consensus chain, and marketplace settlement
-// now flows through it.
+// This is a REAL global consensus that provides an authoritative, agreed,
+// hash-linked ordered ledger of settlements. It is the settlement path new
+// inference marketplace flows use (see internal/inference). NOTE: it does NOT
+// yet replace the pre-existing per-node pairwise settlement in
+// internal/marketexchange nor the token-chain SubmitSignedTransfer path; those
+// still write to the same market ledger. Until they are routed through
+// consensus, multiple settlement paths coexist on one ledger and consensus is
+// the authoritative path only for the flows that submit through it. See the
+// node wiring notes in internal/node/node.go for the current authority model.
 package consensus
 
 import (
@@ -85,6 +90,18 @@ var (
 // individually-signed token transactions the block commits. ProposerID is the
 // leader's account ID (hex of its public key). Signature is the leader's ed25519
 // signature over the canonical block bytes.
+//
+// Justify carries the lock/polka certificate that makes a round > 0 proposal
+// safe under leader rotation (see the voting discipline in engine.go). It is nil
+// for a round-0 proposal (no prior round to justify) and MUST be present and
+// valid for a round > 0 proposal that proposes a block conflicting with what
+// honest validators may have locked. The certificate is a quorum of votes for a
+// block at a strictly earlier round of the SAME height; it proves the network
+// reached (or could have reached) a quorum on that block, which is what lets a
+// locked validator safely release its lock and vote for it. Justify is NOT part
+// of the block's signing bytes or hash: a block's identity is its content, so
+// the same block re-proposed at a higher round with a fresh certificate keeps
+// the same hash and votes for it accumulate across rounds.
 type Block struct {
 	Height        uint64              `json:"height"`
 	Round         uint64              `json:"round"`
@@ -92,6 +109,27 @@ type Block struct {
 	Txs           []token.Transaction `json:"txs"`
 	ProposerID    string              `json:"proposer_id"`
 	Signature     []byte              `json:"signature"`
+	Justify       *PolkaCertificate   `json:"justify,omitempty"`
+}
+
+// PolkaCertificate is a quorum of votes for one block at one (height, round),
+// proving that block gathered (or could gather) enough support to commit at that
+// round. A leader proposing at round r > 0 attaches the certificate for the
+// highest earlier round it knows a block was polka'd at, so a validator that
+// locked a block in a prior round can verify the network moved on and safely
+// release its lock. The engine validates every vote in the certificate against
+// the validator set and confirms the set forms a quorum before honoring it.
+type PolkaCertificate struct {
+	// Height is the height all votes in the certificate are for.
+	Height uint64 `json:"height"`
+	// Round is the round all votes in the certificate are for (strictly less than
+	// the round of the proposal carrying it).
+	Round uint64 `json:"round"`
+	// BlockHash is the block hash all votes in the certificate endorse.
+	BlockHash []byte `json:"block_hash"`
+	// Votes are the individual signed votes; each is verified independently and
+	// distinct voters are counted toward the quorum.
+	Votes []Vote `json:"votes"`
 }
 
 // signingBytes returns the canonical, deterministic, length-prefixed
@@ -223,6 +261,55 @@ func (v *Vote) Verify() error {
 		return ErrInvalidSignature
 	}
 	return nil
+}
+
+// Verify validates the certificate against a validator set: it confirms the
+// certificate is structurally sound, every vote individually verifies, is cast
+// by a distinct member of vs for the certificate's exact (height, round,
+// blockHash), and that the number of distinct valid voters reaches quorum. It
+// returns nil when the certificate proves a quorum polka'd BlockHash at
+// (Height, Round). A nil certificate is not valid.
+func (c *PolkaCertificate) Verify(vs *ValidatorSet) error {
+	if c == nil {
+		return fmt.Errorf("%w: nil certificate", ErrInvalidMessage)
+	}
+	if len(c.BlockHash) == 0 {
+		return fmt.Errorf("%w: certificate block hash must not be empty", ErrInvalidMessage)
+	}
+	seen := make(map[string]struct{}, len(c.Votes))
+	for i := range c.Votes {
+		v := &c.Votes[i]
+		if v.Height != c.Height || v.Round != c.Round {
+			return fmt.Errorf("%w: certificate vote %d height/round mismatch", ErrInvalidMessage, i)
+		}
+		if !bytesEqual(v.BlockHash, c.BlockHash) {
+			return fmt.Errorf("%w: certificate vote %d block hash mismatch", ErrInvalidMessage, i)
+		}
+		if !vs.Contains(v.VoterID) {
+			return fmt.Errorf("%w: certificate vote %d not a validator", ErrNotValidator, i)
+		}
+		if err := v.Verify(); err != nil {
+			return fmt.Errorf("%w: certificate vote %d: %v", ErrInvalidSignature, i, err)
+		}
+		seen[v.VoterID] = struct{}{}
+	}
+	if len(seen) < vs.Quorum() {
+		return fmt.Errorf("%w: certificate has %d distinct voters, need quorum %d", ErrInvalidMessage, len(seen), vs.Quorum())
+	}
+	return nil
+}
+
+// bytesEqual reports whether two byte slices are equal.
+func bytesEqual(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // checkKeyPair confirms priv is a well-formed ed25519 private key whose public
