@@ -192,4 +192,5 @@ update the component's `FACES` together.
 
 ### Still open
 
-- `public/png/logo.png` is an old raster logo that nothing in `src/` references.
+- `public/png/landing-banner.png` is a nautilus-shell image from the same old
+  branding as the deleted `logo.png`. Nothing in `src/` references it either.
