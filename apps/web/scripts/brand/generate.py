@@ -18,7 +18,10 @@ import math, os, re
 NAVY = "#060A16"
 BLUE = "#2E6BFF"
 CYAN = "#22D3EE"
-CORAL = "#FF7A66"
+# The system's third tone, kept in step with `accent.DEFAULT` in
+# tailwind.config.ts. It was a warm coral until that hue was replaced for
+# fighting the blue/cyan pair; marks that use an accent must move with it.
+ACCENT = "#9B6CF9"
 WHITE = "#FFFFFF"
 GRAY400 = "#8B96AC"
 # The blue ramp, darkest to lightest, used to light the faces of a solid.
@@ -83,7 +86,7 @@ def polar(cx, cy, r, deg):
 # Each concept is a function (slug) -> (body, notes). `body` is SVG that may
 # reference two paint sources:
 #   url(#<slug>-g)  the brand gradient
-#   ACCENT          the third-colour highlight (coral), swapped out in mono
+#   ACCENT          the third-colour highlight (violet), swapped out in mono
 # Mono rendering replaces both with currentColor, so a concept's silhouette is
 # identical across variants and only the paint changes.
 
@@ -100,7 +103,7 @@ def concept_quorum(slug):
     body = (
         # The full validator set. The third that has not voted is the same ring
         # held back, so it is the brand paint at low opacity rather than a second
-        # hue: a coral dim ring muddies to brown against the blue arc.
+        # hue: a warm dim ring muddied to brown against the blue arc.
         f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="url(#{slug}-g)" '
         f'stroke-opacity="0.22" stroke-width="3.4"/>'
         # The quorum that carried the block.
@@ -186,7 +189,7 @@ def _hexagon(cx, cy, r):
 def concept_block(slug):
     """An isometric cube: the block, drawn as the unit it is.
 
-    Three faces off one blue ramp. The top face carries a coral inset, so the
+    Three faces off one blue ramp. The top face carries an accent inset, so the
     newest block reads as the lit one.
     """
     w, rh, side = 11.0, 6.35, 9.0
@@ -199,7 +202,7 @@ def concept_block(slug):
     e2 = (cx + w, ty + side)
     s2 = (cx, ty + rh + side)
     w2 = (cx - w, ty + side)
-    inset = 0.42                             # coral rhombus, as a share of the top face
+    inset = 0.42                             # accent rhombus, as a share of the top face
     top_inset = [
         (cx, ty - rh * inset), (cx + w * inset, ty),
         (cx, ty + rh * inset), (cx - w * inset, ty),
@@ -345,7 +348,7 @@ def mark_svg(slug, name, body):
     return (
         HEADER.format(w=32, h=32, label=f"{name} mark")
         + f"<defs>{grad(slug + '-g')}</defs>"
-        + resolve_faces(body.replace("ACCENT", CORAL), mono=False)
+        + resolve_faces(body.replace("ACCENT", ACCENT), mono=False)
         + "</svg>\n"
     )
 
@@ -389,7 +392,7 @@ def lockup_svg(slug, name, body, head, tail, tail_color, tail_weight, tail_track
         HEADER.format(w=round(total_w), h=round(total_h), label=wordmark_label)
         + f"<defs>{grad(slug + '-g')}</defs>"
         + f'<g transform="translate(0 {(total_h - mark_size) / 2:.1f}) scale({mark_size / 32:.5f})">'
-        + resolve_faces(body.replace("ACCENT", CORAL), mono=False)
+        + resolve_faces(body.replace("ACCENT", ACCENT), mono=False)
         + "</g>"
         + f'<text x="{text_x}" y="{baseline}" '
         f'font-family="Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Helvetica, Arial, sans-serif" '

@@ -13,7 +13,7 @@ no new colour added to the system:
 | Canvas | `background` | `#060A16` |
 | Primary | `primary.DEFAULT` | `#2E6BFF` |
 | Secondary | `secondary.DEFAULT` | `#22D3EE` |
-| Accent | `accent.DEFAULT` | `#FF7A66` |
+| Accent | `accent.DEFAULT` | `#9B6CF9` |
 | Sweep | `decorative-1` | `linear-gradient(101deg, #2E6BFF, #22D3EE)` |
 
 ## The concepts
@@ -27,7 +27,7 @@ genre's vocabulary without its most recognisable shape.
 
 | Slug | Name | What it says |
 | --- | --- | --- |
-| `block` | Block | An isometric block, lit on the newest face. Three faces off one blue ramp, coral inset on the lit top. |
+| `block` | Block | An isometric block, lit on the newest face. Three faces off one blue ramp, accent inset on the lit top. |
 | `hex-quorum` | Hex Quorum | Six validators as six countable edges, five of them lit - five, not four, because a six-validator set commits on *more* than two thirds. |
 | `facet-m` | Facet M | The M re-cut as four flat facets, each stroke the same width by construction. |
 | `shard` | Shard | A hexagonal stone cut in six wedges, lit from the upper right. The one concept with no accent colour. |

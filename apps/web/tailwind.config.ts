@@ -4,7 +4,7 @@
  * The palette is an ORIGINAL, blue-forward crypto-infrastructure system
  * (inspired by the visual language of top-tier infra landing pages: a deep
  * navy canvas, a vivid electric-blue primary, a cyan secondary accent, and a
- * warm coral highlight). Token class NAMES are kept stable
+ * violet third tone). Token class NAMES are kept stable
  * (primary / secondary / accent / grayscale / semantic, decorative-1..4) so
  * existing components keep resolving, while the underlying values, type scale,
  * gradients, shadows and motion are modernised.
@@ -36,15 +36,24 @@ const colors = {
     600: '#0A6E84',
   },
 
-  // Warm coral highlight (retained from the previous system, refreshed).
+  // Violet third tone. It replaced a warm coral highlight, which was the one
+  // hue in the system that fought the blue/cyan pair instead of sitting with
+  // it. Violet was picked over staying inside the cyan family because a
+  // cyan-adjacent accent collapses: at hue 170 it lands 18 degrees from
+  // `secondary` and 28 from `semantic.success`, so `tone='accent'` would stop
+  // being visually distinct from `tone='secondary'`. Hue 260 sits 38 degrees
+  // off `primary` and 72 off `secondary`, and accent-300 as text over
+  // `bg-accent-300/10` on the navy canvas measures 5.05:1, past AA.
+  // The ramp follows the same lightness/saturation curve the coral ramp used,
+  // so it drops in as a sibling rather than a differently-weighted colour.
   accent: {
-    DEFAULT: '#FF7A66',
-    50: '#FFF3F1',
-    100: '#FFE1DB',
-    200: '#FF9E8E',
-    300: '#FF7A66',
-    400: '#F0533B',
-    500: '#C63A26',
+    DEFAULT: '#9B6CF9',
+    50: '#F5F0FF',
+    100: '#E7DBFF',
+    200: '#B591FD',
+    300: '#9B6CF9',
+    400: '#793FEE',
+    500: '#5B28C3',
   },
 
   // Cool neutral ramp tuned for a dark navy UI.
@@ -75,12 +84,15 @@ const colors = {
 const backgroundImage = {
   // Signature primary -> secondary sweep used for headline text and CTAs.
   'decorative-1': 'linear-gradient(101deg, #2E6BFF 0%, #22D3EE 100.01%)',
-  // Primary -> coral for warmer accents.
-  'decorative-2': 'linear-gradient(96deg, #2E6BFF 0%, #FF7A66 100%)',
+  // Primary -> violet accent. The accent hex is spelled out here, so changing
+  // the accent token alone would have left this gradient on the old coral.
+  // Currently unused by any component; kept because the token names are part
+  // of the system's published surface.
+  'decorative-2': 'linear-gradient(96deg, #2E6BFF 0%, #9B6CF9 100%)',
   // Vertical cyan -> violet.
   'decorative-3': 'linear-gradient(0deg, #22D3EE 0%, #6E9BFF 100%)',
-  // Warm sunset accent.
-  'decorative-4': 'linear-gradient(180deg, #6E9BFF 0%, #FF7A66 100%)',
+  // Light blue -> violet accent. Also currently unused.
+  'decorative-4': 'linear-gradient(180deg, #6E9BFF 0%, #9B6CF9 100%)',
   // Radial mesh accents for hero / section backdrops (original composition).
   'mesh-hero':
     'radial-gradient(60% 60% at 15% 15%, rgba(46,107,255,0.28) 0%, rgba(46,107,255,0) 60%), radial-gradient(50% 50% at 85% 10%, rgba(34,211,238,0.22) 0%, rgba(34,211,238,0) 55%), radial-gradient(55% 55% at 75% 85%, rgba(110,155,255,0.18) 0%, rgba(110,155,255,0) 60%)',
