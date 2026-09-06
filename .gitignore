@@ -1,0 +1,63 @@
+# ---- Go (services/core) ----
+bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/
+# Note: go.work is intentionally committed and must NOT be ignored.
+go.work.sum
+
+# ---- Protocol Buffers (proto) ----
+gen/
+*.pb.go
+*.pb.gw.go
+.buf/
+
+# ---- Node / Yarn (apps/web) ----
+/node_modules
+node_modules/
+/.pnp
+.pnp.js
+.pnp.*
+package-lock.json
+
+# ---- Next.js (apps/web) ----
+/.next/
+/out/
+/build
+next-env.d.ts
+*.tsbuildinfo
+
+# ---- Testing / coverage ----
+/coverage
+coverage/
+
+# ---- Environment files ----
+.env
+.env.local
+.env*
+*.env.*
+
+# ---- Logs / temp ----
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+*.tmp
+*.temp
+
+# ---- Deploy ----
+.vercel
+*.pem
+
+# ---- Editor / OS ----
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+*.swo

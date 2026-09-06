@@ -1,0 +1,8 @@
+go 1.24.2
+
+use (
+	./proto
+	./services/core
+)
+
+replace google.golang.org/genproto v0.0.0-20230410155749-daa745c078e1 => google.golang.org/genproto v0.0.0-20240604185151-ef581f913117
