@@ -9,6 +9,7 @@ import (
 
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
+	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/marketapi"
@@ -42,29 +43,39 @@ type Config struct {
 	Market struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"market"`
+	Consensus struct {
+		// Validators is the fixed validator set as hex-encoded account IDs
+		// (ed25519 public keys). This node's own consensus identity is always
+		// added to the set, so an empty list yields a functioning single-validator
+		// consensus suitable for a solo/dev node. Every node configured with the
+		// same list derives the identical round-robin leader schedule.
+		Validators []string `yaml:"validators"`
+	} `yaml:"consensus"`
 }
 
 // Node represents a Matrix node instance
 type Node struct {
-	ctx         context.Context
-	cancel      context.CancelFunc
-	config      *Config
-	p2pHost     *p2p.Host
-	transport   *transport.Transport
-	eventBus    *transport.EventBus
-	kvStore     *kv.Store
-	market      *market.Market
-	tokenChain  *token.Chain
-	exchange    *marketexchange.Exchange
-	metrics      *metrics.Collector
-	adminServer  *admin.Server
-	marketServer *marketapi.Server
-	agents      map[string]*agent.Agent
-	agentsMu    sync.RWMutex
-	souls       map[string]*soul.Soul
-	soulsMu     sync.RWMutex
-	matrices    map[string]*matrix.Matrix
-	matricesMu  sync.RWMutex
+	ctx              context.Context
+	cancel           context.CancelFunc
+	config           *Config
+	p2pHost          *p2p.Host
+	transport        *transport.Transport
+	eventBus         *transport.EventBus
+	kvStore          *kv.Store
+	market           *market.Market
+	tokenChain       *token.Chain
+	exchange         *marketexchange.Exchange
+	consensus        *consensus.Engine
+	consensusAccount *token.Account
+	metrics          *metrics.Collector
+	adminServer      *admin.Server
+	marketServer     *marketapi.Server
+	agents           map[string]*agent.Agent
+	agentsMu         sync.RWMutex
+	souls            map[string]*soul.Soul
+	soulsMu          sync.RWMutex
+	matrices         map[string]*matrix.Matrix
+	matricesMu       sync.RWMutex
 }
 
 // Initialize creates a new node configuration
@@ -212,6 +223,40 @@ func (n *Node) Start() error {
 	}
 	n.exchange = exchange
 
+	// Initialize the global consensus engine over the same gossip transport. This
+	// is the authoritative, fast leader-based BFT ledger that REPLACES the
+	// deliberately per-node pairwise settlement path as the network's agreed
+	// ordered ledger: the leader for each round batches signed transfers into a
+	// block, validators vote, and on a >2/3 quorum every node commits the block to
+	// a hash-linked chain (persisted under consensus/*) and deterministically
+	// applies its ordered transactions to the shared market ledger, so all nodes
+	// converge to the identical balances. The node's stable consensus identity is
+	// persisted so its place in the fixed validator set / round-robin leader
+	// schedule survives restarts.
+	consensusAccount, err := consensus.LoadOrCreateValidatorAccount(n.kvStore)
+	if err != nil {
+		return fmt.Errorf("failed to load consensus identity: %w", err)
+	}
+	n.consensusAccount = consensusAccount
+	validatorSet, err := consensus.ValidatorSetFromConfig(consensusAccount.PublicKey, n.config.Consensus.Validators)
+	if err != nil {
+		return fmt.Errorf("failed to build validator set: %w", err)
+	}
+	consensusEngine, err := consensus.New(consensus.Config{
+		Transport:  n.transport,
+		Validators: validatorSet,
+		Chain:      consensus.NewBlockChain(n.kvStore),
+		Ledger:     n.market.Ledger(),
+		Self:       consensusAccount,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to initialize consensus engine: %w", err)
+	}
+	if err := consensusEngine.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start consensus engine: %w", err)
+	}
+	n.consensus = consensusEngine
+
 	// Connect to bootstrap peers
 	for _, peerAddr := range n.config.Network.BootstrapPeers {
 		if err := n.p2pHost.Connect(n.ctx, peerAddr); err != nil {
@@ -329,9 +374,18 @@ func (n *Node) Stop() error {
 	// from. Cancelling the node context (below) closes the transport's
 	// subscription channels, which ends the exchange's receive loops; we cancel
 	// first, then Wait, so the loops observe cancellation and exit cleanly.
-	if n.exchange != nil {
+	if n.exchange != nil || n.consensus != nil {
+		// Cancelling the node context closes the transport subscription channels,
+		// which ends both the exchange and consensus receive/driver loops. Cancel
+		// once, then Wait on each so their goroutines observe cancellation and exit
+		// cleanly before the transport is torn down.
 		n.cancel()
-		n.exchange.Wait()
+		if n.exchange != nil {
+			n.exchange.Wait()
+		}
+		if n.consensus != nil {
+			n.consensus.Wait()
+		}
 	}
 
 	// Close transport
@@ -416,6 +470,27 @@ func (n *Node) GetTokenChain() *token.Chain {
 // settlements received from the network into the local ledger.
 func (n *Node) GetExchange() *marketexchange.Exchange {
 	return n.exchange
+}
+
+// GetConsensus returns the global consensus engine: the fast leader-based BFT
+// ledger that gives every node an agreed-upon ordered log of settlements and is
+// the authoritative path marketplace settlement now flows through.
+func (n *Node) GetConsensus() *consensus.Engine {
+	return n.consensus
+}
+
+// SettleThroughConsensus is the consensus-backed settlement entrypoint. It
+// submits a signed transfer of amount credits from the given account to
+// recipient into the global consensus engine; when a committed block includes
+// the transaction, every node deterministically reflects it on the market
+// ledger. This replaces the per-node pairwise settlement as the authoritative
+// way marketplace credits move across the network. It returns the submitted
+// signed transaction so callers can correlate it with the committed block.
+func (n *Node) SettleThroughConsensus(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {
+	if n.consensus == nil {
+		return nil, fmt.Errorf("consensus engine is not running")
+	}
+	return n.consensus.SubmitAccountTransfer(from, recipient, amount, nonce)
 }
 
 // GetMarketAPI returns the external marketplace gRPC server, which exposes the
