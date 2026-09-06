@@ -50,6 +50,27 @@ var (
 		Name: "matrix_message_count",
 		Help: "Number of messages by topic",
 	}, []string{"topic"})
+
+	// Marketplace metrics
+	marketProviders = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "matrix_market_providers",
+		Help: "Number of registered compute providers on the marketplace",
+	})
+
+	marketActiveJobs = promauto.NewGauge(prometheus.GaugeOpts{
+		Name: "matrix_market_active_jobs",
+		Help: "Number of active (pending or running) compute jobs on the marketplace",
+	})
+
+	marketJobsCompleted = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "matrix_market_jobs_completed_total",
+		Help: "Total number of compute jobs settled to completion",
+	})
+
+	marketCreditsTransferred = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "matrix_market_credits_transferred_total",
+		Help: "Total compute credits transferred from buyers to providers on job completion",
+	})
 )
 
 // Collector provides methods to record metrics
@@ -98,4 +119,24 @@ func (c *Collector) RecordAgentMemory(agentID string, usage int64) {
 // RecordMessage increments the message counter for a topic
 func (c *Collector) RecordMessage(topic string) {
 	messageCount.WithLabelValues(topic).Inc()
+}
+
+// RecordProviderCount updates the registered marketplace provider count metric
+func (c *Collector) RecordProviderCount(count int) {
+	marketProviders.Set(float64(count))
+}
+
+// RecordActiveJobs updates the active (pending or running) marketplace job count metric
+func (c *Collector) RecordActiveJobs(count int) {
+	marketActiveJobs.Set(float64(count))
+}
+
+// IncJobsCompleted increments the total count of completed marketplace jobs
+func (c *Collector) IncJobsCompleted() {
+	marketJobsCompleted.Inc()
+}
+
+// AddCreditsTransferred adds to the total compute credits transferred to providers
+func (c *Collector) AddCreditsTransferred(credits uint64) {
+	marketCreditsTransferred.Add(float64(credits))
 }

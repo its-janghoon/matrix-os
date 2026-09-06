@@ -10,6 +10,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
 	"github.com/ecirlabs/matrix-core/internal/kv"
+	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/matrix"
 	"github.com/ecirlabs/matrix-core/internal/metrics"
 	"github.com/ecirlabs/matrix-core/internal/p2p"
@@ -46,6 +47,7 @@ type Node struct {
 	transport  *transport.Transport
 	eventBus   *transport.EventBus
 	kvStore    *kv.Store
+	market     *market.Market
 	metrics    *metrics.Collector
 	adminServer *admin.Server
 	agents     map[string]*agent.Agent
@@ -136,6 +138,13 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to initialize KV store: %w", err)
 	}
 	n.kvStore = kvStore
+
+	// Initialize compute marketplace on top of the shared KV store. The market
+	// is pure persistence/logic with no goroutines or sockets of its own; the
+	// node is the integration point that observes it via metrics.
+	n.market = market.NewMarket(n.kvStore)
+	n.metrics.RecordProviderCount(len(n.market.ListProviders()))
+	n.metrics.RecordActiveJobs(0)
 
 	// Initialize P2P host
 	p2pHost, err := p2p.New(n.ctx, &p2p.Config{
@@ -242,6 +251,9 @@ func (n *Node) Stop() error {
 		}
 	}
 
+	// The marketplace has no background goroutines or sockets to tear down; it
+	// persists through the shared kvStore, which is closed just below.
+
 	// Close KV store
 	if n.kvStore != nil {
 		if err := n.kvStore.Close(); err != nil {
@@ -284,4 +296,9 @@ func (n *Node) GetKVStore() *kv.Store {
 // GetMetrics returns the metrics collector
 func (n *Node) GetMetrics() *metrics.Collector {
 	return n.metrics
+}
+
+// GetMarket returns the compute marketplace
+func (n *Node) GetMarket() *market.Market {
+	return n.market
 }

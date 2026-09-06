@@ -17,6 +17,7 @@ Matrix Core follows a modular architecture with clear separation of concerns:
 | P2P Networking | `internal/p2p` | Peer discovery and networking via libp2p |
 | Message Transport | `internal/transport` | Message routing and event distribution |
 | Key-Value Store | `internal/kv` | Persistent storage using Pebble |
+| Compute Marketplace | `internal/market` | Compute-credits ledger and paid compute-job marketplace: providers advertise capacity, buyers pay for jobs, credits settle to providers on completion |
 | Metrics | `internal/metrics` | Prometheus metrics collection |
 
 ### Directory Structure
@@ -32,6 +33,7 @@ matrix-core/
 │   ├── p2p/              # libp2p networking and peer discovery
 │   ├── transport/        # Message routing and event distribution
 │   ├── kv/              # Key-value storage with Pebble
+│   ├── market/          # Compute-credits ledger and compute-job marketplace
 │   ├── metrics/         # Prometheus metrics collection
 │   └── node/            # Node lifecycle and configuration
 ├── .github/             # GitHub Actions and configs
