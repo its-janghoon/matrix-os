@@ -166,7 +166,9 @@ export default function Home() {
                 <p className='text-grayscale-300'>
                   The compute-credits ledger is implemented and shipped in the Matrix core: balances are persisted in
                   the node&apos;s embedded key-value store, jobs move through pending, running, and completed states,
-                  and each completed job transfers credits atomically from buyer to provider.
+                  and each completed job transfers credits atomically from buyer to provider. Registered providers and
+                  their open jobs are rehydrated from disk when a node restarts, so reserved capacity and pending work
+                  survive downtime.
                 </p>
               </div>
 

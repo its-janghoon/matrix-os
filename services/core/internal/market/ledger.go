@@ -37,6 +37,9 @@ var (
 	// ErrInvalidJobState is returned when a job cannot transition to the
 	// requested state.
 	ErrInvalidJobState = errors.New("market: invalid job state")
+	// ErrSelfDealing is returned when a buyer submits a job against their own
+	// provider account, which would settle credits from an account to itself.
+	ErrSelfDealing = errors.New("market: buyer and provider must differ")
 )
 
 // balanceKeyPrefix namespaces compute-credit balances in the KV store.
@@ -140,6 +143,15 @@ func (l *Ledger) Transfer(from, to string, amount uint64) error {
 	}
 	if fromBalance < amount {
 		return fmt.Errorf("transfer %d from %q to %q: %w", amount, from, to, ErrInsufficientFunds)
+	}
+	// A self-transfer is a no-op once affordability is confirmed: debiting and
+	// crediting the same account nets to zero. Short-circuit here because both
+	// balanceKey(from) and balanceKey(to) would be identical, so the two batched
+	// writes below would collapse to a single write and the credit would win,
+	// inflating the balance to balance+amount. The insufficient-funds check
+	// above still runs first so an unaffordable self-transfer is rejected.
+	if from == to {
+		return nil
 	}
 	toBalance, err := l.readBalance(to)
 	if err != nil {

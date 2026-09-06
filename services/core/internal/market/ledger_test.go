@@ -154,6 +154,44 @@ func TestLedger_Transfer(t *testing.T) {
 	})
 }
 
+func TestLedger_SelfTransfer(t *testing.T) {
+	t.Run("affordable self-transfer is a no-op", func(t *testing.T) {
+		ledger := NewLedger(newTestStore(t))
+		if err := ledger.Credit("solo", 100); err != nil {
+			t.Fatalf("Credit() error = %v", err)
+		}
+
+		// Transferring an affordable amount to oneself must leave the balance
+		// unchanged rather than minting credits (regression: two batched writes
+		// to the same key used to leave balance+amount).
+		if err := ledger.Transfer("solo", "solo", 30); err != nil {
+			t.Fatalf("Transfer() error = %v", err)
+		}
+
+		bal, _ := ledger.Balance("solo")
+		if bal != 100 {
+			t.Errorf("balance after self-transfer = %d, want 100 (unchanged)", bal)
+		}
+	})
+
+	t.Run("unaffordable self-transfer still returns ErrInsufficientFunds", func(t *testing.T) {
+		ledger := NewLedger(newTestStore(t))
+		if err := ledger.Credit("solo", 20); err != nil {
+			t.Fatalf("Credit() error = %v", err)
+		}
+
+		err := ledger.Transfer("solo", "solo", 50)
+		if !errors.Is(err, ErrInsufficientFunds) {
+			t.Fatalf("Transfer() error = %v, want ErrInsufficientFunds", err)
+		}
+
+		bal, _ := ledger.Balance("solo")
+		if bal != 20 {
+			t.Errorf("balance after rejected self-transfer = %d, want 20 (unchanged)", bal)
+		}
+	})
+}
+
 func TestLedger_Persistence(t *testing.T) {
 	// A balance written by one Ledger must be readable by another Ledger over
 	// the same store, proving state is really persisted through Pebble.

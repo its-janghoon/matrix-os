@@ -3,6 +3,9 @@ package market
 import (
 	"errors"
 	"testing"
+	"time"
+
+	"github.com/ecirlabs/matrix-core/internal/kv"
 )
 
 func TestMarket_RegisterProvider(t *testing.T) {
@@ -35,7 +38,7 @@ func TestMarket_RegisterProvider(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			m := NewMarket(newTestStore(t))
+			m := newTestMarket(t, newTestStore(t))
 			err := m.RegisterProvider(tt.provider)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("RegisterProvider() error = %v, want %v", err, tt.wantErr)
@@ -57,10 +60,21 @@ func TestMarket_RegisterProvider(t *testing.T) {
 	}
 }
 
+// newTestMarket constructs a Market over the given store, failing the test on
+// any construction (rehydration) error.
+func newTestMarket(t *testing.T, store *kv.Store) *Market {
+	t.Helper()
+	m, err := NewMarket(store)
+	if err != nil {
+		t.Fatalf("NewMarket() error = %v", err)
+	}
+	return m
+}
+
 // setupMarket registers one provider and credits a buyer, returning the market.
 func setupMarket(t *testing.T, capacity, pricePerUnit, buyerCredits uint64) *Market {
 	t.Helper()
-	m := NewMarket(newTestStore(t))
+	m := newTestMarket(t, newTestStore(t))
 	if err := m.RegisterProvider(Provider{ID: "prov", Capacity: capacity, PricePerUnit: pricePerUnit}); err != nil {
 		t.Fatalf("RegisterProvider() error = %v", err)
 	}
@@ -231,9 +245,226 @@ func TestMarket_CancelJob(t *testing.T) {
 	}
 }
 
+func TestMarket_SubmitJob_SelfDealingRejected(t *testing.T) {
+	// A provider registered under the same account the buyer uses must not be
+	// able to buy from itself: completion would transfer credits to the same
+	// account. Register a provider whose ID equals the buyer and submit against
+	// it.
+	m := newTestMarket(t, newTestStore(t))
+	if err := m.RegisterProvider(Provider{ID: "self", Capacity: 100, PricePerUnit: 5}); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	if err := m.Ledger().Credit("self", 1000); err != nil {
+		t.Fatalf("Credit() error = %v", err)
+	}
+
+	_, err := m.SubmitJob("self", "self", 10)
+	if !errors.Is(err, ErrSelfDealing) {
+		t.Fatalf("SubmitJob() error = %v, want ErrSelfDealing", err)
+	}
+
+	// No job created and capacity untouched.
+	if len(m.ListJobs()) != 0 {
+		t.Errorf("no job should be created, got %d", len(m.ListJobs()))
+	}
+	prov, _ := m.GetProvider("self")
+	if prov.Available != 100 {
+		t.Errorf("provider Available = %d, want 100 (unchanged)", prov.Available)
+	}
+}
+
+func TestMarket_RehydrateAfterRestart(t *testing.T) {
+	// Persist providers and jobs through one Market, then build a second Market
+	// over the same store (simulating a node restart) and assert the durable
+	// state is visible via the read APIs rather than lost.
+	store := newTestStore(t)
+
+	first := newTestMarket(t, store)
+	if err := first.RegisterProvider(Provider{ID: "prov-a", Capacity: 100, PricePerUnit: 5}); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	if err := first.RegisterProvider(Provider{ID: "prov-b", Capacity: 40, PricePerUnit: 2}); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	if err := first.Ledger().Credit("buyer", 1000); err != nil {
+		t.Fatalf("Credit() error = %v", err)
+	}
+
+	// One pending job (reserves capacity) and one completed job.
+	pending, err := first.SubmitJob("buyer", "prov-a", 10) // reserves 10, price 50
+	if err != nil {
+		t.Fatalf("SubmitJob() error = %v", err)
+	}
+	completed, err := first.SubmitJob("buyer", "prov-b", 5) // price 10
+	if err != nil {
+		t.Fatalf("SubmitJob() error = %v", err)
+	}
+	if err := first.CompleteJob(completed.ID); err != nil {
+		t.Fatalf("CompleteJob() error = %v", err)
+	}
+
+	// Simulate a restart: a fresh Market over the same store must rehydrate.
+	second := newTestMarket(t, store)
+
+	// Providers rehydrated with their reserved capacity intact.
+	provA, ok := second.GetProvider("prov-a")
+	if !ok {
+		t.Fatalf("prov-a not found after restart")
+	}
+	if provA.Available != 90 {
+		t.Errorf("prov-a Available = %d, want 90 (10 reserved by pending job)", provA.Available)
+	}
+	if provA.Capacity != 100 || provA.PricePerUnit != 5 {
+		t.Errorf("prov-a = %+v, want Capacity 100 PricePerUnit 5", provA)
+	}
+	provB, ok := second.GetProvider("prov-b")
+	if !ok {
+		t.Fatalf("prov-b not found after restart")
+	}
+	if provB.Available != 35 {
+		t.Errorf("prov-b Available = %d, want 35 (5 consumed by completed job)", provB.Available)
+	}
+
+	if got := len(second.ListProviders()); got != 2 {
+		t.Errorf("ListProviders() len = %d, want 2", got)
+	}
+
+	// Jobs rehydrated with their statuses.
+	if got := len(second.ListJobs()); got != 2 {
+		t.Errorf("ListJobs() len = %d, want 2", got)
+	}
+	rehydratedPending, ok := second.GetJob(pending.ID)
+	if !ok {
+		t.Fatalf("pending job %q not found after restart", pending.ID)
+	}
+	if rehydratedPending.Status != JobPending {
+		t.Errorf("pending job status = %q, want %q", rehydratedPending.Status, JobPending)
+	}
+	rehydratedCompleted, ok := second.GetJob(completed.ID)
+	if !ok {
+		t.Fatalf("completed job %q not found after restart", completed.ID)
+	}
+	if rehydratedCompleted.Status != JobCompleted {
+		t.Errorf("completed job status = %q, want %q", rehydratedCompleted.Status, JobCompleted)
+	}
+
+	// The rehydrated pending job is still completable, proving reserved state is
+	// usable and not just cosmetic.
+	if err := second.CompleteJob(pending.ID); err != nil {
+		t.Fatalf("CompleteJob() after restart error = %v", err)
+	}
+	provBal, _ := second.Ledger().Balance("prov-a")
+	if provBal != 50 {
+		t.Errorf("prov-a balance = %d, want 50 after completing rehydrated job", provBal)
+	}
+}
+
+func TestMarket_FreshStoreStartsEmpty(t *testing.T) {
+	// Rehydration must not change behavior over a brand-new store.
+	m := newTestMarket(t, newTestStore(t))
+	if got := len(m.ListProviders()); got != 0 {
+		t.Errorf("ListProviders() len = %d, want 0 on fresh store", got)
+	}
+	if got := len(m.ListJobs()); got != 0 {
+		t.Errorf("ListJobs() len = %d, want 0 on fresh store", got)
+	}
+}
+
+// recordingObserver captures observer callbacks for assertions in tests.
+type recordingObserver struct {
+	providerCount int
+	activeJobs    int
+	jobsCompleted int
+	creditsTotal  uint64
+}
+
+func (o *recordingObserver) ProviderCountChanged(count int) { o.providerCount = count }
+func (o *recordingObserver) ActiveJobsChanged(count int)    { o.activeJobs = count }
+func (o *recordingObserver) JobCompleted(credits uint64) {
+	o.jobsCompleted++
+	o.creditsTotal += credits
+}
+
+func TestMarket_ObserverDrivenByActivity(t *testing.T) {
+	obs := &recordingObserver{}
+	m := newTestMarket(t, newTestStore(t))
+	m.SetObserver(obs)
+
+	if err := m.RegisterProvider(Provider{ID: "prov", Capacity: 100, PricePerUnit: 5}); err != nil {
+		t.Fatalf("RegisterProvider() error = %v", err)
+	}
+	if obs.providerCount != 1 {
+		t.Errorf("providerCount = %d, want 1 after registration", obs.providerCount)
+	}
+
+	if err := m.Ledger().Credit("buyer", 1000); err != nil {
+		t.Fatalf("Credit() error = %v", err)
+	}
+	job, err := m.SubmitJob("buyer", "prov", 10) // price 50
+	if err != nil {
+		t.Fatalf("SubmitJob() error = %v", err)
+	}
+	if obs.activeJobs != 1 {
+		t.Errorf("activeJobs = %d, want 1 after submit", obs.activeJobs)
+	}
+
+	if err := m.CompleteJob(job.ID); err != nil {
+		t.Fatalf("CompleteJob() error = %v", err)
+	}
+	if obs.activeJobs != 0 {
+		t.Errorf("activeJobs = %d, want 0 after completion", obs.activeJobs)
+	}
+	if obs.jobsCompleted != 1 {
+		t.Errorf("jobsCompleted = %d, want 1", obs.jobsCompleted)
+	}
+	if obs.creditsTotal != 50 {
+		t.Errorf("creditsTotal = %d, want 50", obs.creditsTotal)
+	}
+}
+
+func TestMarket_JobTimestampsAndOrdering(t *testing.T) {
+	m := setupMarket(t, 100, 1, 1000)
+
+	first, err := m.SubmitJob("buyer", "prov", 1)
+	if err != nil {
+		t.Fatalf("SubmitJob() error = %v", err)
+	}
+	if first.CreatedAt.IsZero() || first.UpdatedAt.IsZero() {
+		t.Fatalf("job timestamps should be set, got CreatedAt=%v UpdatedAt=%v", first.CreatedAt, first.UpdatedAt)
+	}
+
+	// Ensure a distinct creation time for deterministic ordering.
+	time.Sleep(2 * time.Millisecond)
+	second, err := m.SubmitJob("buyer", "prov", 1)
+	if err != nil {
+		t.Fatalf("SubmitJob() error = %v", err)
+	}
+
+	jobs := m.ListJobs()
+	if len(jobs) != 2 {
+		t.Fatalf("ListJobs() len = %d, want 2", len(jobs))
+	}
+	if jobs[0].ID != first.ID || jobs[1].ID != second.ID {
+		t.Errorf("ListJobs() order = [%s, %s], want chronological [%s, %s]",
+			jobs[0].ID, jobs[1].ID, first.ID, second.ID)
+	}
+
+	// Completing a job advances UpdatedAt but preserves CreatedAt.
+	if err := m.CompleteJob(first.ID); err != nil {
+		t.Fatalf("CompleteJob() error = %v", err)
+	}
+	done, _ := m.GetJob(first.ID)
+	if !done.CreatedAt.Equal(first.CreatedAt) {
+		t.Errorf("CreatedAt changed on completion: got %v, want %v", done.CreatedAt, first.CreatedAt)
+	}
+	if !done.UpdatedAt.After(first.UpdatedAt) {
+		t.Errorf("UpdatedAt should advance on completion: got %v, was %v", done.UpdatedAt, first.UpdatedAt)
+	}
+}
+
 func TestMarket_FullFlow(t *testing.T) {
 	// End-to-end: register, submit, complete; verify balances and capacity.
-	m := NewMarket(newTestStore(t))
+	m := newTestMarket(t, newTestStore(t))
 	if err := m.RegisterProvider(Provider{ID: "node-a", Capacity: 50, PricePerUnit: 3}); err != nil {
 		t.Fatalf("RegisterProvider() error = %v", err)
 	}

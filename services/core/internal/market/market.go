@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/google/uuid"
@@ -38,13 +39,35 @@ type Provider struct {
 }
 
 // Job represents a paid compute job submitted by a buyer against a provider.
+// CreatedAt records submit time and UpdatedAt the last status transition, giving
+// ListJobs a stable chronological order and basic auditability.
 type Job struct {
-	ID       string    `json:"id"`
-	Buyer    string    `json:"buyer"`
-	Provider string    `json:"provider"`
-	Units    uint64    `json:"units"`
-	Price    uint64    `json:"price"`
-	Status   JobStatus `json:"status"`
+	ID        string    `json:"id"`
+	Buyer     string    `json:"buyer"`
+	Provider  string    `json:"provider"`
+	Units     uint64    `json:"units"`
+	Price     uint64    `json:"price"`
+	Status    JobStatus `json:"status"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// Observer receives notifications about marketplace activity so an integration
+// layer (the node) can update observability such as Prometheus metrics without
+// this package importing the metrics package. All methods are called after the
+// corresponding state change has been persisted and applied in memory, and must
+// be safe for concurrent use. A nil Observer disables notifications.
+//
+// The interface is defined here but implemented by the node, which keeps
+// internal/market free of any internal/metrics import.
+type Observer interface {
+	// ProviderCountChanged reports the current number of registered providers.
+	ProviderCountChanged(count int)
+	// ActiveJobsChanged reports the current number of pending or running jobs.
+	ActiveJobsChanged(count int)
+	// JobCompleted reports that one job settled to completion, transferring
+	// credits compute credits from buyer to provider.
+	JobCompleted(credits uint64)
 }
 
 // Market is the compute-job marketplace engine. It owns a credits Ledger and
@@ -55,6 +78,8 @@ type Market struct {
 	store  *kv.Store
 	ledger *Ledger
 
+	observer Observer
+
 	providersMu sync.RWMutex
 	providers   map[string]Provider
 
@@ -63,20 +88,112 @@ type Market struct {
 }
 
 // NewMarket creates a new Market backed by the given store, constructing the
-// credits ledger internally.
-func NewMarket(store *kv.Store) *Market {
-	return &Market{
+// credits ledger internally. It rehydrates any providers and jobs previously
+// persisted to the store so a Market built over an existing store observes the
+// durable marketplace state rather than starting empty. Over a fresh store this
+// is a no-op and the maps start empty.
+func NewMarket(store *kv.Store) (*Market, error) {
+	m := &Market{
 		store:     store,
 		ledger:    NewLedger(store),
 		providers: make(map[string]Provider),
 		jobs:      make(map[string]Job),
 	}
+	if err := m.load(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// load rehydrates the in-memory provider and job indexes from the KV store by
+// scanning the persisted key prefixes. It is called once during construction so
+// a node restart recovers the marketplace state that write paths persisted.
+func (m *Market) load() error {
+	if err := m.store.Iterate([]byte(providerKeyPrefix), func(_, value []byte) error {
+		var p Provider
+		if err := json.Unmarshal(value, &p); err != nil {
+			return fmt.Errorf("failed to unmarshal persisted provider: %w", err)
+		}
+		m.providers[p.ID] = p
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	if err := m.store.Iterate([]byte(jobKeyPrefix), func(_, value []byte) error {
+		var j Job
+		if err := json.Unmarshal(value, &j); err != nil {
+			return fmt.Errorf("failed to unmarshal persisted job: %w", err)
+		}
+		m.jobs[j.ID] = j
+		return nil
+	}); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // Ledger exposes the underlying compute-credits ledger so callers can credit
 // buyer accounts and inspect balances.
 func (m *Market) Ledger() *Ledger {
 	return m.ledger
+}
+
+// SetObserver registers an Observer that receives marketplace-activity
+// notifications. Passing nil disables notifications. It is intended to be called
+// once during node setup before the market handles traffic.
+func (m *Market) SetObserver(o Observer) {
+	m.observer = o
+}
+
+// SyncMetrics pushes the current provider and active-job counts to the
+// registered observer. It is safe to call at any time and is used at startup to
+// seed gauges from rehydrated state. It is a no-op when no observer is set.
+func (m *Market) SyncMetrics() {
+	if m.observer == nil {
+		return
+	}
+	m.observer.ProviderCountChanged(len(m.ListProviders()))
+	m.observer.ActiveJobsChanged(m.countActiveJobs())
+}
+
+// countActiveJobs returns the number of jobs in a pending or running state.
+func (m *Market) countActiveJobs() int {
+	m.jobsMu.RLock()
+	defer m.jobsMu.RUnlock()
+
+	active := 0
+	for _, j := range m.jobs {
+		if j.Status == JobPending || j.Status == JobRunning {
+			active++
+		}
+	}
+	return active
+}
+
+// notifyProviderCount reports the current provider count to the observer.
+func (m *Market) notifyProviderCount() {
+	if m.observer == nil {
+		return
+	}
+	m.observer.ProviderCountChanged(len(m.ListProviders()))
+}
+
+// notifyActiveJobs reports the current active-job count to the observer.
+func (m *Market) notifyActiveJobs() {
+	if m.observer == nil {
+		return
+	}
+	m.observer.ActiveJobsChanged(m.countActiveJobs())
+}
+
+// notifyJobCompleted reports a settled job and the credits it transferred.
+func (m *Market) notifyJobCompleted(credits uint64) {
+	if m.observer == nil {
+		return
+	}
+	m.observer.JobCompleted(credits)
 }
 
 // persistProvider writes a provider to the KV store as JSON.
@@ -119,12 +236,16 @@ func (m *Market) RegisterProvider(p Provider) error {
 	p.Available = p.Capacity
 
 	m.providersMu.Lock()
-	defer m.providersMu.Unlock()
-
 	if err := m.persistProvider(p); err != nil {
+		m.providersMu.Unlock()
 		return err
 	}
 	m.providers[p.ID] = p
+	m.providersMu.Unlock()
+
+	// Notify after releasing the lock so the observer's read of the provider
+	// count does not deadlock against the write lock held above.
+	m.notifyProviderCount()
 	return nil
 }
 
@@ -138,6 +259,13 @@ func (m *Market) RegisterProvider(p Provider) error {
 func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error) {
 	if units == 0 {
 		return nil, fmt.Errorf("units must be > 0: %w", ErrInsufficientCapacity)
+	}
+	// Reject self-dealing: a buyer settling a job against their own provider
+	// account would transfer credits from an account to itself on completion,
+	// which is economically meaningless and would otherwise exercise the
+	// self-transfer path in the ledger.
+	if buyer == providerID {
+		return nil, fmt.Errorf("buyer %q equals provider %q: %w", buyer, providerID, ErrSelfDealing)
 	}
 
 	m.providersMu.Lock()
@@ -163,13 +291,16 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 			buyer, balance, price, ErrInsufficientFunds)
 	}
 
+	now := time.Now().UTC()
 	job := Job{
-		ID:       uuid.NewString(),
-		Buyer:    buyer,
-		Provider: providerID,
-		Units:    units,
-		Price:    price,
-		Status:   JobPending,
+		ID:        uuid.NewString(),
+		Buyer:     buyer,
+		Provider:  providerID,
+		Units:     units,
+		Price:     price,
+		Status:    JobPending,
+		CreatedAt: now,
+		UpdatedAt: now,
 	}
 
 	// Reserve capacity on a copy first so a persistence failure does not mutate
@@ -182,15 +313,20 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 	}
 
 	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
 	if err := m.persistJob(job); err != nil {
 		// Roll back the reservation persistence to keep capacity consistent.
 		_ = m.persistProvider(provider)
+		m.jobsMu.Unlock()
 		return nil, err
 	}
 
 	m.providers[providerID] = reserved
 	m.jobs[job.ID] = job
+	m.jobsMu.Unlock()
+
+	// A new pending job raises the active-job count. Notify after releasing the
+	// locks to avoid deadlocking against the observer's reads.
+	m.notifyActiveJobs()
 
 	jobCopy := job
 	return &jobCopy, nil
@@ -201,64 +337,88 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 // job is left non-completed and the error is returned.
 func (m *Market) CompleteJob(jobID string) error {
 	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
 
 	job, ok := m.jobs[jobID]
 	if !ok {
+		m.jobsMu.Unlock()
 		return fmt.Errorf("complete job %q: %w", jobID, ErrJobNotFound)
 	}
 	if job.Status != JobPending && job.Status != JobRunning {
+		m.jobsMu.Unlock()
 		return fmt.Errorf("complete job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
 	}
 
 	// Transfer credits first; only mark completed if the transfer succeeds so a
-	// failed transfer leaves the job non-completed.
+	// failed transfer leaves the job non-completed. job.Provider is always a
+	// provider ID that RegisterProvider validated and SubmitJob looked up, and
+	// SubmitJob rejects buyer == provider, so the ledger credits a real, distinct
+	// counterparty rather than stranding credits on a typo'd account.
 	if err := m.ledger.Transfer(job.Buyer, job.Provider, job.Price); err != nil {
+		m.jobsMu.Unlock()
 		return fmt.Errorf("complete job %q: %w", jobID, err)
 	}
 
 	job.Status = JobCompleted
+	job.UpdatedAt = time.Now().UTC()
 	if err := m.persistJob(job); err != nil {
+		m.jobsMu.Unlock()
 		return err
 	}
 	m.jobs[jobID] = job
+	credits := job.Price
+	m.jobsMu.Unlock()
+
+	// A completed job leaves the active set and settles credits. Notify after
+	// releasing the lock to avoid deadlocking against the observer's reads.
+	m.notifyActiveJobs()
+	m.notifyJobCompleted(credits)
 	return nil
 }
 
 // CancelJob cancels a pending or running job, returning the reserved capacity to
 // its provider. No credits are transferred.
 func (m *Market) CancelJob(jobID string) error {
-	m.jobsMu.Lock()
-	defer m.jobsMu.Unlock()
+	if err := func() error {
+		m.jobsMu.Lock()
+		defer m.jobsMu.Unlock()
 
-	job, ok := m.jobs[jobID]
-	if !ok {
-		return fmt.Errorf("cancel job %q: %w", jobID, ErrJobNotFound)
-	}
-	if job.Status != JobPending && job.Status != JobRunning {
-		return fmt.Errorf("cancel job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
-	}
-
-	m.providersMu.Lock()
-	defer m.providersMu.Unlock()
-
-	if provider, ok := m.providers[job.Provider]; ok {
-		restored := provider
-		restored.Available += job.Units
-		if restored.Available > restored.Capacity {
-			restored.Available = restored.Capacity
+		job, ok := m.jobs[jobID]
+		if !ok {
+			return fmt.Errorf("cancel job %q: %w", jobID, ErrJobNotFound)
 		}
-		if err := m.persistProvider(restored); err != nil {
+		if job.Status != JobPending && job.Status != JobRunning {
+			return fmt.Errorf("cancel job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
+		}
+
+		m.providersMu.Lock()
+		defer m.providersMu.Unlock()
+
+		if provider, ok := m.providers[job.Provider]; ok {
+			restored := provider
+			restored.Available += job.Units
+			if restored.Available > restored.Capacity {
+				restored.Available = restored.Capacity
+			}
+			if err := m.persistProvider(restored); err != nil {
+				return err
+			}
+			m.providers[job.Provider] = restored
+		}
+
+		job.Status = JobCancelled
+		job.UpdatedAt = time.Now().UTC()
+		if err := m.persistJob(job); err != nil {
 			return err
 		}
-		m.providers[job.Provider] = restored
-	}
-
-	job.Status = JobCancelled
-	if err := m.persistJob(job); err != nil {
+		m.jobs[jobID] = job
+		return nil
+	}(); err != nil {
 		return err
 	}
-	m.jobs[jobID] = job
+
+	// A cancelled job leaves the active set. Notify after releasing the locks to
+	// avoid deadlocking against the observer's reads.
+	m.notifyActiveJobs()
 	return nil
 }
 
@@ -291,7 +451,8 @@ func (m *Market) ListProviders() []Provider {
 	return out
 }
 
-// ListJobs returns all jobs sorted by ID.
+// ListJobs returns all jobs in chronological order by creation time, breaking
+// ties on ID so the order is stable across calls and restarts.
 func (m *Market) ListJobs() []Job {
 	m.jobsMu.RLock()
 	defer m.jobsMu.RUnlock()
@@ -300,6 +461,11 @@ func (m *Market) ListJobs() []Job {
 	for _, j := range m.jobs {
 		out = append(out, j)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
 	return out
 }

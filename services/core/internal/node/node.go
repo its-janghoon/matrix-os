@@ -40,22 +40,22 @@ type Config struct {
 
 // Node represents a Matrix node instance
 type Node struct {
-	ctx        context.Context
-	cancel     context.CancelFunc
-	config     *Config
-	p2pHost    *p2p.Host
-	transport  *transport.Transport
-	eventBus   *transport.EventBus
-	kvStore    *kv.Store
-	market     *market.Market
-	metrics    *metrics.Collector
+	ctx         context.Context
+	cancel      context.CancelFunc
+	config      *Config
+	p2pHost     *p2p.Host
+	transport   *transport.Transport
+	eventBus    *transport.EventBus
+	kvStore     *kv.Store
+	market      *market.Market
+	metrics     *metrics.Collector
 	adminServer *admin.Server
-	agents     map[string]*agent.Agent
-	agentsMu   sync.RWMutex
-	souls      map[string]*soul.Soul
-	soulsMu    sync.RWMutex
-	matrices   map[string]*matrix.Matrix
-	matricesMu sync.RWMutex
+	agents      map[string]*agent.Agent
+	agentsMu    sync.RWMutex
+	souls       map[string]*soul.Soul
+	soulsMu     sync.RWMutex
+	matrices    map[string]*matrix.Matrix
+	matricesMu  sync.RWMutex
 }
 
 // Initialize creates a new node configuration
@@ -142,9 +142,16 @@ func (n *Node) Start() error {
 	// Initialize compute marketplace on top of the shared KV store. The market
 	// is pure persistence/logic with no goroutines or sockets of its own; the
 	// node is the integration point that observes it via metrics.
-	n.market = market.NewMarket(n.kvStore)
-	n.metrics.RecordProviderCount(len(n.market.ListProviders()))
-	n.metrics.RecordActiveJobs(0)
+	mkt, err := market.NewMarket(n.kvStore)
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace: %w", err)
+	}
+	n.market = mkt
+	// The node observes the market through a metrics observer so internal/market
+	// never imports internal/metrics. Register the observer, then sync the
+	// initial gauges to whatever state was rehydrated from the KV store.
+	n.market.SetObserver(newMarketMetricsObserver(n.metrics))
+	n.market.SyncMetrics()
 
 	// Initialize P2P host
 	p2pHost, err := p2p.New(n.ctx, &p2p.Config{
