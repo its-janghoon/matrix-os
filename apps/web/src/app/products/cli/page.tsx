@@ -1,10 +1,28 @@
 'use client';
 
 import { Button } from '@/components/Button';
+import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { FiArrowRight, FiServer, FiTerminal } from 'react-icons/fi';
+
+// The terminal snippet shown on this page, and the exact command string the
+// copy button writes to the clipboard. These map one-to-one to commands the
+// matrix CLI actually supports (status, quickstart, fund, provider register,
+// job submit, wallet transfer).
+const CLI_SNIPPET = `$ matrix --help
+$ matrix status
+$ matrix quickstart
+$ matrix fund --account <acct> --amount 1000000
+$ matrix provider register --id p1 --capacity 100 --price 5
+$ matrix job submit --buyer <acct> --provider p1 --units 10
+$ matrix wallet transfer --to <acct> --amount 200`;
+
+// The clipboard payload strips the leading "$ " prompts so pasted lines run.
+const CLI_COMMANDS = CLI_SNIPPET.split('\n')
+  .map((line) => line.replace(/^\$ /, ''))
+  .join('\n');
 
 export default function CliPage() {
   return (
@@ -55,17 +73,16 @@ export default function CliPage() {
                 </div>
               </div>
               <div className='rounded-2xl border border-white/10 bg-black/60 p-5 font-mono text-sm shadow-lg'>
-                <div className='mb-3 flex items-center gap-1.5'>
-                  <span className='h-3 w-3 rounded-full bg-accent-300/70' />
-                  <span className='h-3 w-3 rounded-full bg-semantic-processing/70' />
-                  <span className='h-3 w-3 rounded-full bg-semantic-success/70' />
+                <div className='mb-3 flex items-center justify-between'>
+                  <div className='flex items-center gap-1.5'>
+                    <span className='h-3 w-3 rounded-full bg-accent-300/70' />
+                    <span className='h-3 w-3 rounded-full bg-semantic-processing/70' />
+                    <span className='h-3 w-3 rounded-full bg-semantic-success/70' />
+                  </div>
+                  <CopyButton value={CLI_COMMANDS} label='Copy CLI commands' />
                 </div>
                 <pre className='overflow-x-auto whitespace-pre-wrap break-words text-grayscale-300'>
-                  <code>{`$ matrix --help
-$ matrix status
-$ matrix provider register --id p1 --capacity 100 --price 5
-$ matrix job submit --buyer <acct> --provider p1 --units 10
-$ matrix wallet transfer --to <acct> --amount 200`}</code>
+                  <code>{CLI_SNIPPET}</code>
                 </pre>
               </div>
             </div>

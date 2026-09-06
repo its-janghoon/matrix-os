@@ -19,6 +19,53 @@ go install ./cmd/matrix
 
 Run `matrix --help` to see the full command tree.
 
+## Quickstart (zero to first job)
+
+Go from nothing to a funded account and a first completed compute job with a
+single copy-paste block. From `services/core`:
+
+```sh
+# 1. build the daemon and CLI
+go build -o matrixd ./cmd/matrixd
+go build -o matrix  ./cmd/matrix
+
+# 2. start a local dev node (writes ./config.yaml with a genesis reward pool,
+#    then boots on 127.0.0.1). For a local dev node, disable ACLs so the market
+#    API is open; leave them on and pass --api-key for anything exposed.
+./matrixd --init
+sed -i 's/enable_acls: true/enable_acls: false/' config.yaml   # dev only
+./matrixd &
+
+# 3. in the same or another shell, run the one-command demo loop
+./matrix quickstart
+```
+
+`matrix quickstart` drives the whole economic loop against the node and prints
+each step and the resulting balances:
+
+1. creates a local wallet at `~/.matrix/wallet.json` if you do not have one (the
+   buyer account);
+2. funds that wallet from the node's genesis reward pool via `FundAccount` (no
+   coins are minted; reward-pool MATRIX is moved through the treasury);
+3. registers a demo provider on the order book;
+4. submits a demo job (buyer buys compute units at the provider's price);
+5. completes/settles the job, moving native MATRIX buyer -> provider.
+
+Re-running is safe: the wallet is reused and the provider re-registered. Tune the
+demo with `--fund`, `--provider`, `--price`, `--capacity`, and `--units`, or point
+at a non-default node with `--addr host:9091`.
+
+Under the hood `quickstart` calls the same RPCs as the individual commands, so
+you can also run the loop by hand:
+
+```sh
+matrix fund --account <account-id> --amount 1000000
+matrix provider register --id quickstart-provider --capacity 100 --price 5
+matrix job submit --buyer <account-id> --provider quickstart-provider --units 10
+matrix job complete --id <job-id>
+matrix balance --account <account-id>
+```
+
 ## Global flags
 
 These persistent flags apply to every subcommand:
@@ -69,6 +116,15 @@ matrix job complete --id <job-id>
 
 # Cancel a job (returns reserved capacity).
 matrix job cancel --id <job-id>
+```
+
+### Funding
+
+```sh
+# Move native MATRIX from the node's genesis reward pool into an account so it
+# has spendable balance for paid jobs. No coins are minted; the supply cap is
+# respected. Prints the account's new balance.
+matrix fund --account <account-id> --amount 1000000
 ```
 
 ### Balances

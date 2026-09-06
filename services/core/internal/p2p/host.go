@@ -3,6 +3,9 @@ package p2p
 import (
 	"context"
 	"fmt"
+	"net"
+	"strconv"
+	"strings"
 
 	"github.com/libp2p/go-libp2p"
 	"github.com/libp2p/go-libp2p/core/host"
@@ -23,25 +26,13 @@ type Config struct {
 
 // New creates a new p2p host
 func New(ctx context.Context, cfg *Config) (*Host, error) {
-	// Parse the listen address (format: "0.0.0.0:9000" or just IP)
-	// Extract IP and port
-	var listenAddr multiaddr.Multiaddr
-	var err error
-
-	if cfg.ListenAddr == "" {
-		// Default to all interfaces on random port
-		listenAddr, err = multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
-	} else {
-		// Try to parse as multiaddr first
-		listenAddr, err = multiaddr.NewMultiaddr(cfg.ListenAddr)
-		if err != nil {
-			// If not a multiaddr, try to parse as IP:port
-			listenAddr, err = multiaddr.NewMultiaddr(fmt.Sprintf("/ip4/%s/tcp/0", cfg.ListenAddr))
-		}
-	}
-
+	// Resolve the listen address into a valid multiaddr. This accepts both the
+	// libp2p multiaddr form (e.g. "/ip4/127.0.0.1/tcp/9000") and the plain
+	// "host:port" form (e.g. "0.0.0.0:9000", the shape node.Config's default
+	// listen_addr uses); see listenMultiaddr for the conversion rules.
+	listenAddr, err := listenMultiaddr(cfg.ListenAddr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid listen address: %w", err)
+		return nil, fmt.Errorf("invalid listen address %q: %w", cfg.ListenAddr, err)
 	}
 
 	// Create libp2p host.
@@ -66,6 +57,59 @@ func New(ctx context.Context, cfg *Config) (*Host, error) {
 	return &Host{
 		host: h,
 	}, nil
+}
+
+// listenMultiaddr converts a configured listen address into a libp2p multiaddr.
+// It accepts three forms:
+//
+//   - empty string -> "/ip4/0.0.0.0/tcp/0" (all interfaces, random port)
+//   - a full multiaddr (starts with "/"), e.g. "/ip4/127.0.0.1/tcp/9000",
+//     which is parsed as-is
+//   - a plain "host:port" (e.g. "0.0.0.0:9000"), which is split with
+//     net.SplitHostPort and rebuilt into a /ip4|/ip6|/dns .../tcp/<port>
+//     multiaddr
+//
+// The plain host:port branch is what makes node.Config's default listen_addr
+// ("0.0.0.0:9000") boot: feeding host:port straight into a multiaddr template
+// (e.g. "/ip4/0.0.0.0:9000/tcp/0") is invalid, so it is parsed here first.
+func listenMultiaddr(listen string) (multiaddr.Multiaddr, error) {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		// Default to all interfaces on a random port.
+		return multiaddr.NewMultiaddr("/ip4/0.0.0.0/tcp/0")
+	}
+
+	// A full multiaddr is used verbatim.
+	if strings.HasPrefix(listen, "/") {
+		return multiaddr.NewMultiaddr(listen)
+	}
+
+	// Otherwise treat it as host:port and build the equivalent multiaddr.
+	host, portStr, err := net.SplitHostPort(listen)
+	if err != nil {
+		return nil, fmt.Errorf("expected a multiaddr or host:port: %w", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < 0 || port > 65535 {
+		return nil, fmt.Errorf("invalid port %q", portStr)
+	}
+	if host == "" {
+		// A bare ":9000" listens on all IPv4 interfaces.
+		host = "0.0.0.0"
+	}
+
+	var proto string
+	if ip := net.ParseIP(host); ip != nil {
+		if ip.To4() != nil {
+			proto = "ip4"
+		} else {
+			proto = "ip6"
+		}
+	} else {
+		// A hostname (not a literal IP) maps to the dns multiaddr protocol.
+		proto = "dns"
+	}
+	return multiaddr.NewMultiaddr(fmt.Sprintf("/%s/%s/tcp/%d", proto, host, port))
 }
 
 // Connect attempts to connect to a peer

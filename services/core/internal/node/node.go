@@ -110,7 +110,12 @@ type Node struct {
 func Initialize(configPath string) error {
 	// Create default configuration
 	config := &Config{}
-	config.Network.ListenAddr = "0.0.0.0:9000"
+	// Write a full libp2p multiaddr (not a bare host:port) so a freshly
+	// initialized node boots directly from this config. The p2p layer also
+	// accepts the plain host:port form, but the multiaddr form is unambiguous
+	// and documents exactly what the node listens on. Loopback keeps a dev node
+	// self-contained; operators can widen this to /ip4/0.0.0.0/tcp/9000.
+	config.Network.ListenAddr = "/ip4/127.0.0.1/tcp/9000"
 	config.Storage.Engine = "pebble"
 	config.Storage.Path = "./data"
 	config.Security.EnableACLs = true

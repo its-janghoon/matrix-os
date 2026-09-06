@@ -1,6 +1,7 @@
 'use client';
 
 import { Button } from '@/components/Button';
+import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import HeroBackdrop from '@/components/HeroBackdrop';
 import Navigation from '@/components/Navigation';
@@ -16,6 +17,15 @@ import {
   FiShoppingCart,
   FiTerminal,
 } from 'react-icons/fi';
+
+// The copy-paste quickstart: build the daemon + CLI, boot a local dev node, and
+// run the one-command zero-to-first-job loop. These commands match exactly what
+// the matrix CLI supports (matrixd --init/start, matrix quickstart).
+const QUICKSTART_COMMAND = [
+  'go build -o matrixd ./cmd/matrixd && go build -o matrix ./cmd/matrix',
+  './matrixd --init && ./matrixd &',
+  './matrix quickstart',
+].join('\n');
 
 // Six-card product overview. Each summary is condensed from the dedicated
 // /products/* page copy and links out to the full page.
@@ -106,6 +116,21 @@ export default function Home() {
                   Read the docs
                   <FiArrowRight className='ml-2 h-4 w-4' />
                 </Button>
+              </div>
+
+              {/* Copy-paste quickstart: zero to a funded account and a first job. */}
+              <div className='mx-auto mt-10 max-w-2xl rounded-2xl border border-white/10 bg-black/60 p-4 text-left font-mono text-sm shadow-lg backdrop-blur-sm'>
+                <div className='mb-3 flex items-center justify-between'>
+                  <span className='text-[11px] uppercase tracking-[0.12em] text-grayscale-500'>
+                    Quickstart: zero to first job
+                  </span>
+                  <CopyButton value={QUICKSTART_COMMAND} label='Copy quickstart commands' />
+                </div>
+                <pre className='overflow-x-auto whitespace-pre-wrap break-words text-grayscale-300'>
+                  <code>{`$ go build -o matrixd ./cmd/matrixd && go build -o matrix ./cmd/matrix
+$ ./matrixd --init && ./matrixd &
+$ ./matrix quickstart`}</code>
+                </pre>
               </div>
 
               {/* Hero stat strip */}
