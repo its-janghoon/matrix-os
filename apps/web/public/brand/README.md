@@ -18,8 +18,8 @@ no new colour added to the system:
 
 ## The concepts
 
-Round two, cut in the register the crypto/L1 genre actually uses: faceted solids,
-hexagons, isometric blocks, mitred corners, no round caps.
+All four are cut in the register the crypto/L1 genre actually uses: faceted
+solids, hexagons, isometric blocks, mitred corners, no round caps.
 
 **None of these copies the Ethereum mark.** A four-sided faceted diamond *is* that
 logo, so the solids here are a hexagon, a cube and a letterform instead - the
@@ -31,18 +31,6 @@ genre's vocabulary without its most recognisable shape.
 | `hex-quorum` | Hex Quorum | Six validators as six countable edges, five of them lit - five, not four, because a six-validator set commits on *more* than two thirds. |
 | `facet-m` | Facet M | The M re-cut as four flat facets, each stroke the same width by construction. |
 | `shard` | Shard | A hexagonal stone cut in six wedges, lit from the upper right. The one concept with no accent colour. |
-
-### Round one, kept for reference
-
-Drawn in soft rounded strokes, which read as developer tooling rather than an L1.
-`facet-m` is `lattice-m` re-cut in the new register.
-
-| Slug | Name | What it says |
-| --- | --- | --- |
-| `quorum` | Quorum | A >2/3 quorum closing over a committed block; the lit arc is exactly 240 of 360 degrees. |
-| `lattice-m` | Lattice M | An M drawn as a peer graph: five nodes, four links. |
-| `ecir-e` | ECIR E | An E monogram for the company on one geometric grid. |
-| `aperture` | Aperture | A square aperture closing on a running core. |
 
 ## Files per concept
 
@@ -102,16 +90,38 @@ python3 scripts/brand/gen_og.py shard     # public/og-image.png
 
 `generate.py` holds the geometry for every concept and emits all their variants, so
 a mark and its monochrome sibling can never drift apart. Edit the geometry there,
-never the SVGs by hand. It records, in each concept's docstring, the versions that
-were cut and why:
+never the SVGs by hand.
 
-- a fan-out that rendered as the system share icon
-- a converging-nodes mark that read as a trident
-- a rotational four-bar pinwheel that could read as a swastika
-- a two-square bridge that read as a UI toggle, then muddied at 16px
-- a gem cut as a crown over a rectangular girdle, which read as a house
-- an M whose hand-picked inner vertices gave the legs and diagonals different
-  weights
+### What got cut, and why
+
+Eleven concepts and revisions were dropped. Each was rejected after being
+*rendered* - none of these read wrong on paper, which is the whole point. This is
+the record, since the code that held it has been deleted:
+
+**A whole first round.** `quorum` (a >2/3 arc closing over a committed block),
+`lattice-m` (an M as a five-node peer graph), `ecir-e` (an E monogram) and
+`aperture` (a square frame closing on a core), all drawn in soft rounded strokes.
+Individually fine; together they read as developer tooling rather than an L1.
+`facet-m` is `lattice-m` re-cut in the angular register.
+
+**Individual concepts:**
+
+| Concept | Was | Why it went |
+| --- | --- | --- |
+| Fan-out | One job dispatched to three providers | Rendered as the system share icon - far too established a glyph to hand a brand |
+| One Ledger | Nodes converging on a single bar | Three legs meeting above a bar read as a trident, not consensus |
+| Bridge | Native and wrapped locked 1:1 around a shared escrow | Side by side the two squares read as a UI toggle; offset diagonally they muddied at 16px. Cut after two attempts rather than shipped weak |
+
+**Revisions within the surviving concepts:**
+
+| Version | Why it went |
+| --- | --- |
+| Aperture, four bars in 90&deg; rotational symmetry | A four-fold pinwheel of bars can read as a swastika. Rebuilt on reflective symmetry |
+| Shard, crown triangle over a rectangular girdle | Read as a house - a roof on a box. Recut as six wedges from the centre |
+| Facet M, outline from hand-picked inner vertices | The legs came out lighter than the diagonals, so the letter read as a clumsy slab. Every stroke is now one offset quad at a constant width |
+| Facet M, diagonals extended past the legs | Left a nub poking out of each apex that read as a rendering glitch. Only ends that meet another stroke are extended now |
+| Quorum, coral dim ring | Muddied to brown against the blue arc. The unlit third is now the same paint at low opacity |
+| Hex Quorum, 1.35 vertex trim | Opened the vertices so wide the hexagon became scattered dashes. It notches them now instead of severing them |
 
 Worth reading before proposing another concept. `concept_facet_m` also asserts its
 own bounds, because a mis-set stroke extension pushes a corner off-canvas silently
@@ -170,12 +180,16 @@ update the component's `FACES` together.
 - `manifest.json` carried `theme_color: #0B111B` and `background_color: #ffffff`,
   and `browserconfig.xml` a white `TileColor` - all predating the navy design
   system. All three are now `#060A16`.
+- `manifest.json` also still described a different company: **"ECIR Labs -
+  Making Tech Uncool"**, *"an inclusive research community that comprises people
+  from various backgrounds. We make tech fun and accessible."* That is what would
+  have appeared in the install prompt and under the home-screen icon. It now
+  matches the product, with `short_name` "Matrix OS" for the icon label.
+- The maskable icon entry is the 512 app icon, which is correct rather than
+  convenient: the mark's painted extent measures 58.4% of the icon as a diameter,
+  inside the 80% centre circle Android guarantees, and the ground is opaque navy
+  with no transparency.
 
 ### Still open
 
-- `manifest.json` still describes ECIR Labs as "an inclusive research community
-  ... we make tech fun and accessible", which contradicts the positioning in
-  `layout.tsx`. That is copy, not an asset, so it was left alone.
 - `public/png/logo.png` is an old raster logo that nothing in `src/` references.
-- Round one's four marks are still in this directory. Delete them once you are
-  sure none is wanted - `ecir-e` may still be useful as a company monogram.

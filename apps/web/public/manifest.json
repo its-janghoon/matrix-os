@@ -1,12 +1,19 @@
 {
-  "theme_color": "#060A16",
-  "background_color": "#060A16",
+  "id": "/",
+  "name": "Matrix OS by ECIR Labs",
+  "short_name": "Matrix OS",
+  "description": "A peer-to-peer marketplace for compute and LLM inference. Idle machines announce capacity over libp2p, and native MATRIX settles every job through leader-based BFT consensus on one global ledger.",
+  "lang": "en",
+  "dir": "ltr",
+  "categories": [
+    "developer",
+    "utilities"
+  ],
   "display": "standalone",
   "scope": "/",
   "start_url": "/",
-  "name": "ECIR Labs - Making Tech Uncool",
-  "short_name": "ECIR Labs",
-  "description": "ECIR Labs is an inclusive research community that comprises people from various backgrounds. We make tech fun and accessible.",
+  "theme_color": "#060A16",
+  "background_color": "#060A16",
   "icons": [
     {
       "src": "/android-icon-36x36.png",

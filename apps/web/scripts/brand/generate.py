@@ -90,86 +90,7 @@ def polar(cx, cy, r, deg):
 # Mono rendering replaces both with currentColor, so a concept's silhouette is
 # identical across variants and only the paint changes.
 
-def concept_quorum(slug):
-    cx = cy = 16.0
-    r = 11.0
-    # A block commits on a >2/3 quorum, so the lit arc is exactly 240 of 360
-    # degrees: the proportion IS the idea, not a decorative sweep.
-    start, sweep = -90.0, 240.0
-    x1, y1 = polar(cx, cy, r, start)
-    x2, y2 = polar(cx, cy, r, start + sweep)
-    large = 1 if sweep > 180 else 0
-    blk = 4.9  # side of the committed-block diamond
-    body = (
-        # The full validator set. The third that has not voted is the same ring
-        # held back, so it is the brand paint at low opacity rather than a second
-        # hue: a warm dim ring muddied to brown against the blue arc.
-        f'<circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="url(#{slug}-g)" '
-        f'stroke-opacity="0.22" stroke-width="3.4"/>'
-        # The quorum that carried the block.
-        f'<path d="M{x1:.3f} {y1:.3f} A{r} {r} 0 {large} 1 {x2:.3f} {y2:.3f}" '
-        f'fill="none" stroke="url(#{slug}-g)" stroke-width="3.4" stroke-linecap="round"/>'
-        # The committed block: a diamond, not a dot, so the mark does not read
-        # as an eye or a power button.
-        f'<rect x="{cx - blk / 2:.2f}" y="{cy - blk / 2:.2f}" width="{blk}" height="{blk}" '
-        f'rx="1" fill="ACCENT" transform="rotate(45 {cx} {cy})"/>'
-    )
-    return body, "A >2/3 quorum closing over a committed block."
 
-
-def concept_lattice_m(slug):
-    pts = [(6.5, 25.0), (6.5, 8.0), (16.0, 18.5), (25.5, 8.0), (25.5, 25.0)]
-    d = "M" + " L".join(f"{x:.1f} {y:.1f}" for x, y in pts)
-    dots = "".join(
-        f'<circle cx="{x:.1f}" cy="{y:.1f}" r="2.7" fill="{"ACCENT" if i == 1 else f"url(#{slug}-g)"}"/>'
-        for i, (x, y) in enumerate([pts[1], pts[2], pts[3]])
-    )
-    body = (
-        f'<path d="{d}" fill="none" stroke="url(#{slug}-g)" stroke-width="3.2" '
-        f'stroke-linecap="round" stroke-linejoin="round"/>{dots}'
-    )
-    return body, "An M drawn as a peer graph: five nodes, four links."
-
-
-def concept_ecir_e(slug):
-    t = 3.6           # bar thickness
-    x0, y0 = 6.2, 6.2
-    h, w, wm = 19.6, 19.6, 13.2
-    r = t / 2
-    body = (
-        f'<rect x="{x0}" y="{y0}" width="{t}" height="{h}" rx="{r}" fill="url(#{slug}-g)"/>'
-        f'<rect x="{x0}" y="{y0}" width="{w}" height="{t}" rx="{r}" fill="url(#{slug}-g)"/>'
-        f'<rect x="{x0}" y="{y0 + (h - t) / 2:.2f}" width="{wm}" height="{t}" rx="{r}" fill="ACCENT"/>'
-        f'<rect x="{x0}" y="{y0 + h - t:.2f}" width="{w}" height="{t}" rx="{r}" fill="url(#{slug}-g)"/>'
-    )
-    return body, "An E monogram for ECIR, built on one geometric grid."
-
-
-def concept_aperture(slug):
-    """A square frame broken at the corners, closing on a running core.
-
-    Two earlier versions were rejected at render time. A fan-out (one job
-    splitting to three providers) read as the system share icon, far too
-    established a glyph to use as a logo. Replacing it with four bars in
-    90-degree ROTATIONAL symmetry gave each side a tangential offset, and a
-    four-fold pinwheel of bars can read as a swastika, so the rotational bias is
-    gone: every bar is centred on its side and the symmetry is reflective.
-    """
-    t = 3.6
-    r = t / 2
-    ln = 15.0                  # bar length
-    lo = 16.0 - ln / 2         # tangential start, centred on the side
-    near, far = 5.4, 26.6      # the two bar offsets from the canvas edges
-    body = (
-        f'<rect x="{lo}" y="{near - r}" width="{ln}" height="{t}" rx="{r}" fill="url(#{slug}-g)"/>'
-        f'<rect x="{far - r}" y="{lo}" width="{t}" height="{ln}" rx="{r}" fill="url(#{slug}-g)"/>'
-        f'<rect x="{lo}" y="{far - r}" width="{ln}" height="{t}" rx="{r}" fill="url(#{slug}-g)"/>'
-        f'<rect x="{near - r}" y="{lo}" width="{t}" height="{ln}" rx="{r}" fill="url(#{slug}-g)"/>'
-        # The running core the frame closes on.
-        f'<rect x="{16 - 2.7}" y="{16 - 2.7}" width="5.4" height="5.4" rx="1" '
-        f'fill="ACCENT" transform="rotate(45 16 16)"/>'
-    )
-    return body, "A square aperture closing on a running core."
 
 
 
@@ -329,16 +250,10 @@ def concept_shard(slug):
 
 
 CONCEPTS = [
-    # Round 2: angular / faceted, the register the crypto genre uses.
     ("block", "Block", concept_block),
     ("hex-quorum", "Hex Quorum", concept_hex_quorum),
     ("facet-m", "Facet M", concept_facet_m),
     ("shard", "Shard", concept_shard),
-    # Round 1: rounded strokes, kept for reference.
-    ("quorum", "Quorum", concept_quorum),
-    ("lattice-m", "Lattice M", concept_lattice_m),
-    ("ecir-e", "ECIR E", concept_ecir_e),
-    ("aperture", "Aperture", concept_aperture),
 ]
 
 HEADER = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" width="{w}" height="{h}" fill="none" role="img" aria-label="{label}">'
