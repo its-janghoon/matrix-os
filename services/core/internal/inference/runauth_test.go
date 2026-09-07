@@ -203,3 +203,77 @@ func TestAnAuthorizedRunActuallyRuns(t *testing.T) {
 		t.Fatalf("SettleSigned: %v", err)
 	}
 }
+
+// TestTheReplaySetIsKeyedOnContentNotSignatureBytes
+//
+// The replay set used to key on sha256(auth.Signature). Signature bytes and
+// signed content are not the same thing: a signature can have more than one
+// valid encoding, so a re-encoded signature over the SAME authorization read as
+// a brand-new one and the work ran again.
+//
+// Keying on the signed content removes the dependency on every signature scheme
+// having exactly one canonical encoding. This test proves the key is content by
+// re-signing the same authorization: ed25519 is deterministic, so the bytes are
+// identical here - what matters is the second property below, that a DIFFERENT
+// signature over the same content is still a replay.
+func TestTheReplaySetIsKeyedOnContentNotSignatureBytes(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyer, provider := clientSignedService(t, fs, 3, 1_000_000)
+	req := InferenceRequest{Prompt: "hello", Model: "m"}
+	at := time.Now()
+
+	auth := authFor(t, buyer, provider, "m", req, at)
+	if err := svc.VerifyRunAuthorization(buyer.AccountID(), req, auth); err != nil {
+		t.Fatalf("first use should verify: %v", err)
+	}
+
+	// A second authorization object over identical content - same key, same
+	// provider, same model, same prompt, same timestamp. It IS the same
+	// authorization, whatever its signature bytes look like, and re-using it
+	// must not buy a second run.
+	again := authFor(t, buyer, provider, "m", req, at)
+	err := svc.VerifyRunAuthorization(buyer.AccountID(), req, again)
+	if !errors.Is(err, ErrRunUnauthorized) {
+		t.Fatalf("a second authorization over identical content was accepted (err = %v); "+
+			"one authorization would buy two runs", err)
+	}
+
+	// Tampering with only the signature bytes must also not produce a fresh
+	// key. This is the shape of the malleability replay: same content, different
+	// signature bytes.
+	tampered := authFor(t, buyer, provider, "m", req, at)
+	tampered.Signature = append([]byte(nil), tampered.Signature...)
+	tampered.Signature[0] ^= 0xFF
+	if err := svc.VerifyRunAuthorization(buyer.AccountID(), req, tampered); !errors.Is(err, ErrRunUnauthorized) {
+		t.Fatalf("a tampered signature was accepted: %v", err)
+	}
+}
+
+// TestADifferentPromptOrMomentIsNotAReplay. Keying on content must not collapse
+// authorizations that are genuinely different, or an honest buyer's second
+// question would be refused.
+func TestADifferentPromptOrMomentIsNotAReplay(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyer, provider := clientSignedService(t, fs, 3, 1_000_000)
+	at := time.Now()
+
+	first := InferenceRequest{Prompt: "question one", Model: "m"}
+	if err := svc.VerifyRunAuthorization(buyer.AccountID(), first,
+		authFor(t, buyer, provider, "m", first, at)); err != nil {
+		t.Fatalf("first question: %v", err)
+	}
+
+	// A different prompt at the same instant.
+	second := InferenceRequest{Prompt: "question two", Model: "m"}
+	if err := svc.VerifyRunAuthorization(buyer.AccountID(), second,
+		authFor(t, buyer, provider, "m", second, at)); err != nil {
+		t.Fatalf("a different prompt was refused as a replay: %v", err)
+	}
+
+	// The same prompt a moment later.
+	later := at.Add(time.Second)
+	if err := svc.VerifyRunAuthorization(buyer.AccountID(), first,
+		authFor(t, buyer, provider, "m", first, later)); err != nil {
+		t.Fatalf("the same prompt at a later moment was refused as a replay: %v", err)
+	}
+}

@@ -218,9 +218,23 @@ func (s *Service) VerifyRunAuthorization(buyer string, req InferenceRequest, aut
 		return err
 	}
 
-	// Replay: the same signature twice would be two runs for one authorization,
-	// which is the free work this whole file exists to prevent.
-	if !s.runAuth.accept(sha256.Sum256(auth.Signature), now, RunAuthorizationWindow) {
+	// Replay: the same authorization twice would be two runs for one
+	// authorization, which is the free work this whole file exists to prevent.
+	//
+	// Keyed on the SIGNED CONTENT, not the signature bytes. Those are not the
+	// same thing: an ECDSA signature has a malleable twin (r, n-s) that recovers
+	// the same signer, so a set keyed on signature bytes saw a re-encoded
+	// signature as a brand-new authorization and let the work run again.
+	// ethsig.RecoverAddress now rejects the high-S form, which closes that
+	// particular door - but keying on the content closes the whole doorway, and
+	// does not depend on every signature scheme this ever accepts having exactly
+	// one canonical encoding.
+	//
+	// The signing bytes carry the buyer's key, the provider, the model, the
+	// prompt digest and the timestamp, so two different buyers, prompts or
+	// moments are different keys. Two requests identical in all of those ARE the
+	// same authorization, and refusing the second is the point.
+	if !s.runAuth.accept(sha256.Sum256(auth.SigningBytes(req)), now, RunAuthorizationWindow) {
 		return fmt.Errorf("%w: this authorization has already been used", ErrRunUnauthorized)
 	}
 	return nil

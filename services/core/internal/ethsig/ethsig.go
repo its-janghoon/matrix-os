@@ -121,6 +121,20 @@ func RecoverAddress(digest, sig []byte) (Address, error) {
 		// and rejecting one of them rejects half the ecosystem.
 		v += 27
 	}
+	// Reject the upper half of the S range (EIP-2). For any valid signature
+	// (r, s) there is a second one (r, n-s) that recovers the SAME address, so
+	// without this check every signature has a twin that verifies just as well.
+	//
+	// It matters because it is an inconsistency between two verifiers of the
+	// same signature: WrappedMatrix.sol._recover rejects high-S and this did
+	// not, so a signature Solidity refuses was accepted here. It also made
+	// anything keyed on the signature BYTES weaker than it looked - a replay set
+	// keyed that way sees a malleated twin as a new signature.
+	if isHighS(sig[32:64]) {
+		return zero, fmt.Errorf("%w: high-S signature (EIP-2): use the canonical low-S form",
+			ErrInvalidSignature)
+	}
+
 	// dcrd's RecoverCompact wants <v><r><s>, not the <r><s><v> Ethereum uses.
 	compact := make([]byte, SignatureLen)
 	compact[0] = v
@@ -151,4 +165,29 @@ func SignDigest(priv *secp256k1.PrivateKey, digest []byte) ([]byte, error) {
 	copy(out[32:64], compact[33:65])
 	out[64] = compact[0]
 	return out, nil
+}
+
+// secp256k1HalfOrder is (n-1)/2 for the secp256k1 group order n. A signature
+// with s above this is the non-canonical twin of one below it. Same constant
+// WrappedMatrix.sol compares against.
+var secp256k1HalfOrder = [32]byte{
+	0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+	0x5D, 0x57, 0x6E, 0x73, 0x57, 0xA4, 0x50, 0x1D,
+	0xDF, 0xE9, 0x2F, 0x46, 0x68, 0x1B, 0x20, 0xA0,
+}
+
+// isHighS reports whether a 32-byte big-endian s is above (n-1)/2. Compared
+// bytewise rather than via big.Int so it is constant in shape and allocates
+// nothing.
+func isHighS(s []byte) bool {
+	if len(s) != 32 {
+		return true // a malformed s is not canonical
+	}
+	for i := 0; i < 32; i++ {
+		if s[i] != secp256k1HalfOrder[i] {
+			return s[i] > secp256k1HalfOrder[i]
+		}
+	}
+	return false // exactly the half order is allowed, matching Solidity's >
 }
