@@ -423,7 +423,7 @@ func TestEvidenceReachesNodesThatDidNotWitnessIt(t *testing.T) {
 	for i, nd := range nodes {
 		records, _ := nd.evidence.ByValidator(offender.acct.AccountID())
 		for _, eq := range records {
-			if err := eq.Verify(nd.engine.validators); err != nil {
+			if err := eq.Verify(nd.engine.vset()); err != nil {
 				t.Fatalf("node %d stored evidence that does not verify: %v", i, err)
 			}
 		}

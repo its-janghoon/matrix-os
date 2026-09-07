@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -100,6 +102,25 @@ type Config struct {
 	// Evidence, when non-nil, persists proof of equivocation. Without it the
 	// engine still detects and gossips an offence but forgets it on restart.
 	Evidence *EvidenceStore
+	// Sets, when non-nil, persists the validator set the chain has arrived at
+	// and the changes waiting for an epoch boundary. Without it a node forgets
+	// an admitted validator on restart and starts rejecting its votes, so a
+	// deployment that allows set changes needs this.
+	Sets *SetStore
+	// EpochLength is how many committed blocks pass between set changes taking
+	// effect. Zero means DefaultEpochLength.
+	EpochLength uint64
+	// ApprovedSetChanges is this operator's approval list, in the form
+	// "add:<hex public key>" or "remove:<account id>".
+	//
+	// It is local policy, and deliberately not part of consensus: this node will
+	// not PREVOTE for a block carrying a change that is not on its list, which
+	// is how an operator vetoes. If the network commits it anyway, this node
+	// applies it - a vote is a veto attempt and the committed chain is the fact.
+	// An empty list means this node votes against every set change, which is the
+	// safe default: without it, one validator could propose removing all the
+	// others and the rest would vote for it without ever looking.
+	ApprovedSetChanges []string
 	// OnEquivocation, when non-nil, is called once per newly-discovered offence.
 	// It is how an operator finds out; the engine itself takes no action, because
 	// removing a validator is not yet something the protocol can do.
@@ -113,13 +134,19 @@ type Config struct {
 // Receive loops for proposals, votes, block sync and head announcements follow
 // the transport goroutine + ctx-cancellation pattern used by marketexchange.
 type Engine struct {
-	transport   Transport
-	validators  *ValidatorSet
-	chain       *BlockChain
-	ledger      *market.Ledger
-	self        *token.Account
-	selfID      string
-	isValidator bool
+	transport Transport
+	// validatorSet is the set in force right now, held atomically because it is
+	// no longer fixed: a committed set change replaces it at an epoch boundary
+	// while receive loops are reading it. Read it through vset().
+	validatorSet atomic.Pointer[ValidatorSet]
+	chain        *BlockChain
+	ledger       *market.Ledger
+	self         *token.Account
+	selfID       string
+	// isValidator is atomic because the epoch boundary flips it (a set change can
+	// admit or eject this node) while the receive loops and the driver read it
+	// outside e.mu. Read it with Load, never directly.
+	isValidator atomic.Bool
 
 	proposeInterval      time.Duration
 	roundTimeout         time.Duration
@@ -128,6 +155,15 @@ type Engine struct {
 	onCommit             CommitObserver
 	evidence             *EvidenceStore
 	onEquivocation       func(eq *Equivocation)
+	sets                 *SetStore
+	epochLength          uint64
+	approvedChanges      map[string]struct{}
+	// approvedSpecs is the same allow-list in parsed form. A node does not only
+	// vote for the changes its operator approved, it also PROPOSES them: without
+	// that, approving a change would have no effect until some other node
+	// happened to propose exactly the same one, and the first operator to approve
+	// an ejection would be waiting on the very validator they are ejecting.
+	approvedSpecs []SetChange
 
 	mu sync.Mutex
 	// mempool holds submitted-but-not-yet-committed transactions in submission
@@ -215,9 +251,23 @@ type Engine struct {
 	lastSyncRequest time.Time
 	// lastHeadAnnounce is when this node last announced its committed height.
 	lastHeadAnnounce time.Time
+	// lastSetChangeSubmit rate-limits re-offering the set changes this operator
+	// approved, and setChangeNonce keeps each offer a distinct transaction so a
+	// retry is not silently deduped against the offer that was voted down.
+	lastSetChangeSubmit time.Time
+	setChangeNonce      uint64
+	// setChangeOffered records when each approved change was last put to the
+	// network, keyed by its spec string. A change is offered again only after
+	// several rounds, which is long enough for the previous offer to have
+	// committed or been voted down: re-offering one that is still in flight would
+	// commit the same change twice.
+	setChangeOffered map[string]time.Time
 	// seenEquivocations dedups reports when no evidence store is configured, so a
 	// gossiped offence is not re-announced on every echo.
 	seenEquivocations map[string]struct{}
+	// pendingChanges are validator-set changes carried by committed blocks that
+	// have not reached an epoch boundary yet.
+	pendingChanges []SetChange
 	// peerHeight is the greatest committed height any peer has announced. Above
 	// our own height it is direct evidence that we are behind, which the other
 	// signals only reveal while the network is busy.
@@ -243,7 +293,6 @@ func New(cfg Config) (*Engine, error) {
 	}
 	e := &Engine{
 		transport:            cfg.Transport,
-		validators:           cfg.Validators,
 		chain:                cfg.Chain,
 		ledger:               cfg.Ledger,
 		self:                 cfg.Self,
@@ -254,24 +303,51 @@ func New(cfg Config) (*Engine, error) {
 		onCommit:             cfg.OnCommit,
 		evidence:             cfg.Evidence,
 		onEquivocation:       cfg.OnEquivocation,
+		sets:                 cfg.Sets,
+		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
+		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
 		committedTxs:         make(map[string]struct{}),
 		appliedTxs:           make(map[string]bool),
 		settleWaiters:        make(map[string][]chan struct{}),
+		setChangeOffered:     make(map[string]time.Time),
 		proposals:            make(map[string]*Block),
 		prevotes:             make(map[uint64]map[string]map[string]Vote),
 		precommits:           make(map[uint64]map[string]map[string]Vote),
 		futureProposals:      make(map[string]*futureBlock),
 		futureVotes:          make(map[uint64]map[string]map[string]Vote),
 	}
+	for _, c := range cfg.ApprovedSetChanges {
+		spec, err := ParseChangeSpec(c)
+		if err != nil {
+			// Fail the node rather than ignore the entry: an operator who mistyped an
+			// approval would otherwise believe they had agreed to a change their node
+			// will in fact vote against.
+			return nil, fmt.Errorf("consensus: approved set change %q: %w", c, err)
+		}
+		e.approvedChanges[strings.ToLower(spec.String())] = struct{}{}
+		e.approvedSpecs = append(e.approvedSpecs, spec)
+	}
+	e.validatorSet.Store(cfg.Validators)
 	if cfg.Self != nil {
 		e.selfID = cfg.Self.AccountID()
-		e.isValidator = cfg.Validators.Contains(e.selfID)
+		e.isValidator.Store(cfg.Validators.Contains(e.selfID))
 	}
 	return e, nil
 }
 
+// vset returns the validator set in force. It is a method rather than a field
+// read because the set changes underneath the receive loops.
+func (e *Engine) vset() *ValidatorSet { return e.validatorSet.Load() }
+
 func orDurationC(v, d time.Duration) time.Duration {
+	if v > 0 {
+		return v
+	}
+	return d
+}
+
+func orUint64C(v, d uint64) uint64 {
 	if v > 0 {
 		return v
 	}
@@ -306,6 +382,27 @@ func (e *Engine) Start(ctx context.Context) error {
 	e.height = length
 	e.headHash = head
 	e.round = 0
+	// Resume the set the CHAIN arrived at, not the one config was written with:
+	// a node that had admitted a validator must not forget it on restart and
+	// start rejecting that validator's votes.
+	if e.sets != nil {
+		saved, at, err := e.sets.LoadActive()
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		if saved != nil {
+			e.validatorSet.Store(saved)
+			e.isValidator.Store(e.selfID != "" && saved.Contains(e.selfID))
+			fmt.Printf("consensus: resumed validator set of %d from height %d\n", saved.Len(), at)
+		}
+		pending, err := e.sets.LoadPending()
+		if err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		e.pendingChanges = pending
+	}
 	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 	e.mu.Unlock()
 
@@ -434,6 +531,7 @@ func (e *Engine) driver(ctx context.Context) {
 		case <-ticker.C:
 			e.maybeAnnounceHead(ctx)
 			e.maybeRequestSync(ctx)
+			e.maybeProposeApprovedChanges()
 			e.tick(ctx)
 		}
 	}
@@ -486,7 +584,7 @@ func (e *Engine) tick(ctx context.Context) {
 	height := e.height
 	if time.Now().After(e.roundDeadline) {
 		expired := e.round
-		if e.isValidator {
+		if e.isValidator.Load() {
 			if _, voted := e.selfVoteAtLocked(VoteTypePrevote, expired); !voted {
 				pending = append(pending, pendingVote{typ: VoteTypePrevote, round: expired})
 			}
@@ -499,7 +597,7 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 
 	// Only the leader proposes, only if this node is a validator with a key.
-	if !e.isValidator || !e.validators.IsLeader(e.selfID, e.round) {
+	if !e.isValidator.Load() || !e.vset().IsLeader(e.selfID, e.round) {
 		e.mu.Unlock()
 		e.flushPendingVotes(ctx, height, pending)
 		return
@@ -606,9 +704,18 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		if _, done := e.committedTxs[mempoolKey(&e.mempool[i])]; done {
 			continue
 		}
+		// A set change that is no longer valid - a duplicate of one already in
+		// force, or one from an account that has since left the set - would make
+		// the whole block invalid. Leave it behind rather than poison a proposal
+		// with it; pruneStaleSetChangesLocked clears it from the mempool.
+		if IsSetChangeRecipient(e.mempool[i].To) {
+			if err := e.verifySetChangeLocked(&e.mempool[i], e.height); err != nil {
+				continue
+			}
+		}
 		txs = append(txs, e.mempool[i])
 	}
-	if len(txs) == 0 {
+	if len(txs) == 0 && !e.mustAdvanceToEpochBoundaryLocked() {
 		return nil, nil
 	}
 
@@ -630,7 +737,7 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 // Callers must hold e.mu.
 func (e *Engine) polkaCertificateLocked(round uint64, hkey string) *PolkaCertificate {
 	byVoter := e.prevotes[round][hkey]
-	if len(byVoter) < e.validators.Quorum() {
+	if len(byVoter) < e.vset().Quorum() {
 		return nil
 	}
 	votes := make([]Vote, 0, len(byVoter))
@@ -665,7 +772,45 @@ func (e *Engine) ingestProposal(ctx context.Context, b *Block, round uint64, pol
 	if data, err := json.Marshal(prop); err == nil {
 		_ = e.transport.Publish(ctx, TopicProposal, data)
 	}
+	// A set change gets ONE proposal. If the network does not approve it, the
+	// block will not reach a polka, and a leader that kept re-including the same
+	// change would waste every round it leads - which is a stall a single
+	// validator could cause on purpose. Re-proposing is then a deliberate act:
+	// submit it again.
+	e.dropSetChangesFromMempool(b)
 	e.prevoteFor(ctx, b, round, support)
+}
+
+// dropSetChangesFromMempool forgets the set-change transactions a block we just
+// proposed carried. If the block commits, the change is in the chain regardless;
+// if it does not, the change is not retried automatically.
+func (e *Engine) dropSetChangesFromMempool(b *Block) {
+	var keys []string
+	for i := range b.Txs {
+		if IsSetChangeRecipient(b.Txs[i].To) {
+			keys = append(keys, mempoolKey(&b.Txs[i]))
+		}
+	}
+	if len(keys) == 0 {
+		return
+	}
+	drop := make(map[string]struct{}, len(keys))
+	for _, k := range keys {
+		drop[k] = struct{}{}
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	kept := e.mempool[:0]
+	for i := range e.mempool {
+		k := mempoolKey(&e.mempool[i])
+		if _, remove := drop[k]; remove {
+			delete(e.mempoolSet, k)
+			continue
+		}
+		kept = append(kept, e.mempool[i])
+	}
+	e.mempool = append([]token.Transaction(nil), kept...)
 }
 
 // handleProposal validates a received proposal and, if it is usable at the
@@ -718,11 +863,11 @@ func (e *Engine) prevoteFor(ctx context.Context, b *Block, round uint64, support
 // keeps a non-leader from filling every node's proposal cache with values at
 // will; it does not decide anything about the block's validity.
 func (e *Engine) verifyProposalEnvelope(p *Proposal) error {
-	pub, ok := e.validators.PublicKey(p.ProposerID)
+	pub, ok := e.vset().PublicKey(p.ProposerID)
 	if !ok {
 		return ErrNotValidator
 	}
-	if !e.validators.IsLeader(p.ProposerID, p.Round) {
+	if !e.vset().IsLeader(p.ProposerID, p.Round) {
 		return ErrWrongLeader
 	}
 	if err := p.VerifySignature(pub); err != nil {
@@ -822,11 +967,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		return ErrPrevHashMismatch
 	}
 	// Proposer must be a validator and the correct leader for the block's round.
-	pub, ok := e.validators.PublicKey(b.ProposerID)
+	pub, ok := e.vset().PublicKey(b.ProposerID)
 	if !ok {
 		return ErrNotValidator
 	}
-	if !e.validators.IsLeader(b.ProposerID, b.Round) {
+	if !e.vset().IsLeader(b.ProposerID, b.Round) {
 		return ErrWrongLeader
 	}
 	if err := b.VerifySignature(pub); err != nil {
@@ -843,6 +988,14 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		if b.Txs[i].To == "" {
 			return fmt.Errorf("%w: tx %d empty recipient", ErrInvalidMessage, i)
 		}
+		if IsSetChangeRecipient(b.Txs[i].To) {
+			if err := e.verifySetChangeLocked(&b.Txs[i], b.Height); err != nil {
+				// Both sentinels are wrapped: callers match ErrInvalidMessage to
+				// reject the block and ErrNotValidator (or the parse error) to say
+				// why, so the reason is not flattened into a string.
+				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+			}
+		}
 		key := mempoolKey(&b.Txs[i])
 		// Reject a block that replays an already-committed transaction: an honest
 		// validator will not vote for it, so a malicious leader cannot double-apply
@@ -857,6 +1010,95 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		seenInBlock[key] = struct{}{}
 	}
 	return nil
+}
+
+// verifySetChangeLocked checks a validator-set change carried by a block.
+//
+// These rules are part of consensus, so every node must reach the same verdict:
+// the change has to parse, it has to come from a current validator, and the set
+// it would produce has to be usable. Anything else makes the block invalid, not
+// merely unpopular. Whether a well-formed change SHOULD pass is a separate,
+// local question - see approvesChangesLocked. Callers must hold e.mu.
+func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) error {
+	change, err := ParseSetChange(tx.To, height)
+	if err != nil {
+		return err
+	}
+	// Only a sitting validator may put a set change to the network. Without this
+	// any account could fill blocks with proposals for the set.
+	sender := tx.SenderID()
+	if !e.vset().Contains(sender) {
+		return fmt.Errorf("%w: set change submitted by %s, who is not a validator",
+			ErrNotValidator, sender)
+	}
+	// A set change is not a transfer. Requiring zero value keeps the reserved
+	// recipients from doubling as a way to move credits into an address no key
+	// can ever spend from.
+	if tx.Amount != 0 {
+		return fmt.Errorf("%w: a validator set change must carry no value, got %d", ErrInvalidMessage, tx.Amount)
+	}
+	// The result must be a usable set: applying it together with everything
+	// already pending must not empty the set or overflow it.
+	combined := append(append([]SetChange(nil), e.pendingChanges...), change)
+	next, err := e.vset().WithChanges(combined)
+	if err != nil {
+		return err
+	}
+	// A change that alters nothing is invalid, not merely useless. Judge it
+	// against the set that WILL be in force - the current set plus everything
+	// already pending - so "remove X" followed by "add X" is still a real change
+	// while a second copy of the same admission is not. Without this rule a
+	// re-offered change could commit after the first copy had already taken
+	// effect, and each no-op copy would put the chain through another epoch of
+	// empty blocks to apply nothing.
+	projected, err := e.vset().WithChanges(e.pendingChanges)
+	if err != nil {
+		// Unreachable: the pending changes were each validated against a usable
+		// result when they committed. Fall back to the combined result, which is
+		// known good.
+		projected = next
+	}
+	if change.InForce(projected) {
+		return fmt.Errorf("%w: %s is already in force", ErrInvalidMessage, change)
+	}
+	return nil
+}
+
+// setChangesInLocked extracts the changes a block carries. Callers must hold
+// e.mu.
+func (e *Engine) setChangesInLocked(b *Block) []SetChange {
+	var out []SetChange
+	for i := range b.Txs {
+		if !IsSetChangeRecipient(b.Txs[i].To) {
+			continue
+		}
+		change, err := ParseSetChange(b.Txs[i].To, b.Height)
+		if err != nil {
+			// Unreachable for a block that passed verification, and skipping is the
+			// safe reading if it ever is reached.
+			continue
+		}
+		out = append(out, change)
+	}
+	return out
+}
+
+// approvesChangesLocked reports whether this operator has approved every change
+// in a block.
+//
+// This is the veto. It is local policy on purpose: the protocol cannot decide
+// whether admitting a particular key is a good idea, so each operator lists the
+// changes they will vote for and their node prevotes nil on anything else. A
+// change therefore needs a quorum of operators to have listed it - which is
+// what stops one validator from proposing the removal of all the others and
+// having it wave through. Callers must hold e.mu.
+func (e *Engine) approvesChangesLocked(changes []SetChange) bool {
+	for _, c := range changes {
+		if _, ok := e.approvedChanges[strings.ToLower(c.String())]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // mayPrevoteLocked decides whether this node may prevote a block that differs
@@ -878,7 +1120,7 @@ func (e *Engine) mayPrevoteLocked(hkey string, polka *PolkaCertificate) error {
 		return fmt.Errorf("%w: locked on %s, proposal %s carries no polka certificate",
 			ErrInvalidMessage, e.lockedHash, hkey)
 	}
-	if err := polka.Verify(e.validators); err != nil {
+	if err := polka.Verify(e.vset()); err != nil {
 		return fmt.Errorf("%w: invalid polka certificate: %v", ErrInvalidMessage, err)
 	}
 	if polka.Height != e.height {
@@ -920,7 +1162,7 @@ func (e *Engine) acceptProposal(b *Block, round uint64, polka *PolkaCertificate)
 	// see the polka even if we missed the raw prevote gossip. This is also how a
 	// node learns which value it must propose when it becomes leader.
 	if polka != nil {
-		if err := polka.Verify(e.validators); err == nil && polka.Height == e.height {
+		if err := polka.Verify(e.vset()); err == nil && polka.Height == e.height {
 			for i := range polka.Votes {
 				v := polka.Votes[i]
 				e.recordVoteLocked(&v)
@@ -945,6 +1187,16 @@ func (e *Engine) acceptProposal(b *Block, round uint64, polka *PolkaCertificate)
 			return false, nil
 		}
 		e.locked = false
+	}
+
+	// The operator's veto on validator-set changes. The block is valid and
+	// cached; this node just will not support it.
+	if changes := e.setChangesInLocked(b); len(changes) > 0 && !e.approvesChangesLocked(changes) {
+		for _, c := range changes {
+			fmt.Printf("consensus: refusing to vote for a block that would %s "+
+				"(not in consensus.approved_changes)\n", c)
+		}
+		return false, nil
 	}
 	return true, nil
 }
@@ -1056,7 +1308,7 @@ func (e *Engine) castPrecommit(ctx context.Context, hash []byte, round uint64) {
 // to two conflicting blocks at one height, which is exactly what quorum
 // intersection needs to make divergence impossible.
 func (e *Engine) castVoteMsg(ctx context.Context, typ VoteType, hash []byte, round uint64) {
-	if !e.isValidator {
+	if !e.isValidator.Load() {
 		return
 	}
 	hkey := fmt.Sprintf("%x", hash)
@@ -1124,7 +1376,7 @@ func (e *Engine) onVotes(ctx context.Context) {
 // position on the record instead of waiting out a timeout.
 func (e *Engine) processPrevoteQuorum(ctx context.Context) {
 	e.mu.Lock()
-	quorum := e.validators.Quorum()
+	quorum := e.vset().Quorum()
 	var (
 		polkaRound uint64
 		polkaHash  string
@@ -1184,7 +1436,7 @@ func (e *Engine) handleVote(ctx context.Context, msg transport.Message) {
 		return
 	}
 	// The voter must be a validator (only validator votes count toward quorum).
-	if !e.validators.Contains(v.VoterID) {
+	if !e.vset().Contains(v.VoterID) {
 		return
 	}
 	e.tallyVote(&v)
@@ -1247,7 +1499,7 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 		e.mu.Unlock()
 		return
 	}
-	quorum := e.validators.Quorum()
+	quorum := e.vset().Quorum()
 	var (
 		winner      *Block
 		winnerRound uint64
@@ -1350,7 +1602,7 @@ func isNilVoteHashKey(hkey string) bool {
 // permanent-stall condition: nothing in the ordinary flow will ever deliver
 // that body again. Callers must hold e.mu.
 func (e *Engine) quorumWithoutBodyLocked() bool {
-	quorum := e.validators.Quorum()
+	quorum := e.vset().Quorum()
 	for _, byHash := range e.precommits {
 		for hkey, voters := range byHash {
 			if len(voters) < quorum || isNilVoteHashKey(hkey) {
@@ -1404,7 +1656,7 @@ func (e *Engine) maybeRequestSync(ctx context.Context) {
 // than with the fixed validator set. A follower learns it is behind from the
 // validators' announcements, which is the same information.
 func (e *Engine) maybeAnnounceHead(ctx context.Context) {
-	if !e.isValidator {
+	if !e.isValidator.Load() {
 		return
 	}
 	e.mu.Lock()
@@ -1430,7 +1682,7 @@ func (e *Engine) maybeAnnounceHead(ctx context.Context) {
 // than to invent an enforcement path that only some nodes would apply and
 // thereby split the network.
 func (e *Engine) reportEquivocation(ctx context.Context, eq *Equivocation, gossip bool) {
-	if err := eq.Verify(e.validators); err != nil {
+	if err := eq.Verify(e.vset()); err != nil {
 		// Either not really equivocation, or not from a validator. Either way it
 		// is not evidence.
 		return
@@ -1616,7 +1868,7 @@ func (e *Engine) applySyncedBlock(ctx context.Context, cb *CommittedBlock) {
 		if v.Height != b.Height || !bytesEqual(v.BlockHash, hash) {
 			continue
 		}
-		if !e.validators.Contains(v.VoterID) {
+		if !e.vset().Contains(v.VoterID) {
 			continue
 		}
 		if err := v.Verify(); err != nil {
@@ -1678,6 +1930,14 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
 		for i := range b.Txs {
 			tx := &b.Txs[i]
+			if IsSetChangeRecipient(tx.To) {
+				// A set change carries no value (block validation enforces that) and its
+				// recipient is a reserved marker, not an account. Transferring zero to it
+				// would only bring a phantom balance key into existence, so the ledger is
+				// left alone; the change itself is applied at the epoch boundary.
+				applied[mempoolKey(tx)] = true
+				continue
+			}
 			sender := tx.SenderID()
 			bal, err := ltx.Balance(sender)
 			if err != nil {
@@ -1795,6 +2055,20 @@ func (e *Engine) advanceHeight(committed *Block) {
 	}
 	e.mempool = append([]token.Transaction(nil), kept...)
 
+	// Collect any validator-set changes this block carried. They wait for the
+	// next epoch boundary, so the set is stable for a run of heights and every
+	// node switches at the same height.
+	if changes := e.setChangesInLocked(committed); len(changes) > 0 {
+		e.pendingChanges = append(e.pendingChanges, changes...)
+		if err := e.sets.SavePending(e.pendingChanges); err != nil {
+			fmt.Printf("consensus: could not persist pending set changes: %v\n", err)
+		}
+		for _, c := range changes {
+			fmt.Printf("consensus: committed set change at height %d: %s (takes effect at the next epoch)\n",
+				committed.Height, c)
+		}
+	}
+
 	e.height = committed.Height + 1
 	e.headHash = committed.Hash()
 	e.round = 0
@@ -1829,8 +2103,202 @@ func (e *Engine) advanceHeight(committed *Block) {
 			delete(e.futureVotes, h)
 		}
 	}
+	e.applyEpochBoundaryLocked()
+	// Now that the height, the pending changes and (at a boundary) the set are
+	// all up to date, drop the set-change transactions the chain has overtaken.
+	// Left in the mempool they would make every block carrying them invalid.
+	e.pruneStaleSetChangesLocked()
 	e.committing = false
 }
+
+// pruneStaleSetChangesLocked drops the set-change transactions in the mempool
+// that can no longer commit: a duplicate of a change already in force or
+// already pending, and one whose submitter has left the validator set. Such a
+// transaction makes any block carrying it invalid, so it is not merely useless
+// - left in place it would be proposed again and again by whichever node holds
+// it. Callers must hold e.mu.
+func (e *Engine) pruneStaleSetChangesLocked() {
+	kept := e.mempool[:0]
+	for i := range e.mempool {
+		if IsSetChangeRecipient(e.mempool[i].To) {
+			if err := e.verifySetChangeLocked(&e.mempool[i], e.height); err != nil {
+				delete(e.mempoolSet, mempoolKey(&e.mempool[i]))
+				continue
+			}
+		}
+		kept = append(kept, e.mempool[i])
+	}
+	e.mempool = append([]token.Transaction(nil), kept...)
+}
+
+// applyEpochBoundaryLocked swaps in the new validator set when the height just
+// entered starts an epoch. Callers must hold e.mu.
+//
+// Every node crosses the boundary at the same height and applies the same
+// changes in the same order, because both come from the committed chain. That
+// is the whole reason changes wait: applying them the moment they commit would
+// have nodes switching sets at whatever moment each one happened to apply the
+// block, and a leader schedule that differs by one height is a fork.
+func (e *Engine) applyEpochBoundaryLocked() {
+	if len(e.pendingChanges) == 0 || e.epochLength == 0 {
+		return
+	}
+	if e.height%e.epochLength != 0 {
+		return
+	}
+
+	next, err := e.vset().WithChanges(e.pendingChanges)
+	if err != nil {
+		// Every change was checked when its block was validated, so this should be
+		// unreachable. If it happens, keeping the current set is the only safe
+		// move: dropping to an unusable set would end the chain.
+		fmt.Printf("consensus: refusing an unusable validator set at height %d: %v\n", e.height, err)
+		e.pendingChanges = nil
+		if err := e.sets.SavePending(nil); err != nil {
+			fmt.Printf("consensus: could not clear pending set changes: %v\n", err)
+		}
+		return
+	}
+
+	applied := e.pendingChanges
+	e.pendingChanges = nil
+	e.validatorSet.Store(next)
+	wasValidator := e.isValidator.Load()
+	nowValidator := e.selfID != "" && next.Contains(e.selfID)
+	e.isValidator.Store(nowValidator)
+
+	if err := e.sets.SaveActive(next, e.height); err != nil {
+		fmt.Printf("consensus: could not persist the new validator set: %v\n", err)
+	}
+	if err := e.sets.SavePending(nil); err != nil {
+		fmt.Printf("consensus: could not clear pending set changes: %v\n", err)
+	}
+
+	for _, c := range applied {
+		fmt.Printf("consensus: validator set change in force at height %d: %s\n", e.height, c)
+	}
+	fmt.Printf("consensus: validator set is now %d members, quorum %d\n", next.Len(), next.Quorum())
+	if wasValidator && !nowValidator {
+		fmt.Printf("consensus: this node is no longer a validator; it will follow and apply blocks but not vote\n")
+	}
+	if !wasValidator && nowValidator {
+		fmt.Printf("consensus: this node is now a validator and will propose and vote\n")
+	}
+
+	// The per-height voting state was reset by the caller for the new height, but
+	// the round-robin schedule just changed under us, so the current round's
+	// leader is a different validator. Nothing else to do: the driver picks that
+	// up on its next tick.
+}
+
+// maybeProposeApprovedChanges submits the validator-set changes this operator
+// approved and that have not taken effect yet, so an approval is an action and
+// not just a vote.
+//
+// It re-submits on a slow cadence because a change only commits once a QUORUM of
+// operators has approved it, and operators do not edit their configs
+// simultaneously. The first node to approve an ejection proposes a block the
+// others vote down; it keeps offering the change, and the moment enough peers
+// have approved it too, the next proposal carries it through. Without the
+// retry, the change would be lost to whoever approved it first.
+//
+// A change already in force, already waiting for the epoch boundary, or already
+// sitting in this node's mempool is skipped, so a spec left in the config after
+// it has been applied costs nothing.
+func (e *Engine) maybeProposeApprovedChanges() {
+	if !e.isValidator.Load() || e.self == nil {
+		return
+	}
+
+	e.mu.Lock()
+	if len(e.approvedSpecs) == 0 {
+		e.mu.Unlock()
+		return
+	}
+	// One attempt per round timeout: often enough that an approval lands within a
+	// few blocks of the quorum reaching it, rare enough that a change nobody else
+	// has approved does not fill every proposal.
+	if !e.lastSetChangeSubmit.IsZero() && time.Since(e.lastSetChangeSubmit) < e.roundTimeout {
+		e.mu.Unlock()
+		return
+	}
+	e.lastSetChangeSubmit = time.Now()
+
+	vs := e.vset()
+	pending := make(map[string]struct{}, len(e.pendingChanges))
+	for _, c := range e.pendingChanges {
+		pending[c.String()] = struct{}{}
+	}
+	inMempool := make(map[string]struct{}, len(e.mempool))
+	for i := range e.mempool {
+		if IsSetChangeRecipient(e.mempool[i].To) {
+			inMempool[e.mempool[i].To] = struct{}{}
+		}
+	}
+
+	// A proposal is dropped from the mempool after one attempt (see
+	// dropSetChangesFromMempool), so an offer that was voted down leaves no trace
+	// to dedup against. Wait several rounds before offering again: long enough
+	// that the previous offer has either committed or lost its vote.
+	const offerBackoffRounds = 4
+	var todo []SetChange
+	for _, spec := range e.approvedSpecs {
+		key := spec.String()
+		if spec.InForce(vs) {
+			continue
+		}
+		if _, waiting := pending[key]; waiting {
+			continue
+		}
+		if _, queued := inMempool[spec.Recipient()]; queued {
+			continue
+		}
+		if last, offered := e.setChangeOffered[key]; offered && time.Since(last) < offerBackoffRounds*e.roundTimeout {
+			continue
+		}
+		e.setChangeOffered[key] = time.Now()
+		todo = append(todo, spec)
+	}
+	nonce := e.setChangeNonce
+	e.setChangeNonce += uint64(len(todo))
+	e.mu.Unlock()
+
+	for i, spec := range todo {
+		// Zero value: a set change moves no credits, and block validation refuses
+		// one that tries to.
+		if _, err := e.SubmitAccountTransfer(e.self, spec.Recipient(), 0, nonce+uint64(i)); err != nil {
+			fmt.Printf("consensus: could not offer the approved set change %s: %v\n", spec, err)
+		}
+	}
+}
+
+// mustAdvanceToEpochBoundaryLocked reports whether the chain has to keep
+// producing blocks even with nothing to put in them. Callers must hold e.mu.
+//
+// A committed set change takes effect at the next epoch boundary, and a height
+// only exists once a block commits. On an idle chain no blocks are produced, so
+// without this a change would commit and then wait forever for a boundary the
+// chain never reaches - an admitted validator that never joins, and an
+// equivocating one that is never ejected, purely because the network is quiet.
+//
+// The exception is bounded: at most one empty block per height between the
+// commit and the boundary, and the boundary clears the pending changes (even
+// when applying them fails), so this can never become a permanent stream of
+// empty blocks.
+func (e *Engine) mustAdvanceToEpochBoundaryLocked() bool {
+	return len(e.pendingChanges) > 0
+}
+
+// PendingSetChanges returns the changes waiting for the next epoch boundary.
+func (e *Engine) PendingSetChanges() []SetChange {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]SetChange(nil), e.pendingChanges...)
+}
+
+// EpochLength is how many committed blocks pass between set changes taking
+// effect.
+func (e *Engine) EpochLength() uint64 { return e.epochLength }
 
 // reconcileToChainHead resets in-memory height/head to the persisted committed
 // chain head. It is used when a commit attempt failed because the chain already
@@ -1882,4 +2350,4 @@ func (e *Engine) Chain() *BlockChain { return e.chain }
 func (e *Engine) Ledger() *market.Ledger { return e.ledger }
 
 // ValidatorSet returns the fixed validator set.
-func (e *Engine) ValidatorSet() *ValidatorSet { return e.validators }
+func (e *Engine) ValidatorSet() *ValidatorSet { return e.vset() }

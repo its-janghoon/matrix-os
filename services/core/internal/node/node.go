@@ -115,6 +115,24 @@ type Config struct {
 		// consensus suitable for a solo/dev node. Every node configured with the
 		// same list derives the identical round-robin leader schedule.
 		Validators []string `yaml:"validators"`
+		// EpochLength is how many committed blocks make an epoch. A validator-set
+		// change carried by a committed block takes effect at the next height that
+		// is a multiple of this number, so every node applies it at the SAME
+		// height and no node's leader schedule diverges from its peers'. It must be
+		// identical on every node; zero means consensus.DefaultEpochLength.
+		EpochLength uint64 `yaml:"epoch_length"`
+		// ApprovedChanges is this operator's local allow-list of validator-set
+		// changes, as the change strings the engine prints ("add:<hex pubkey>" or
+		// "remove:<account id>"). A change is only committed if a quorum of
+		// validators votes for the block carrying it, and a node whose operator has
+		// not listed the change refuses to vote for that block. So membership needs
+		// agreement out of band rather than one node's say-so, which is the point:
+		// a stranger cannot join the set, and a validator cannot be ejected, unless
+		// the operators of a quorum have each said yes here.
+		//
+		// Leaving this empty means this node approves nothing, which is the safe
+		// default for a running network.
+		ApprovedChanges []string `yaml:"approved_changes"`
 	} `yaml:"consensus"`
 	Genesis GenesisConfig `yaml:"genesis"`
 }
@@ -265,6 +283,13 @@ func Initialize(configPath string) error {
 	// The Console's Vite dev server, which is the browser origin that actually
 	// needs this on a fresh node. Anything else is opted into explicitly.
 	config.Connect.AllowedOrigins = []string{"http://127.0.0.1:5173", "http://localhost:5173"}
+	// Spell out the epoch length rather than leaving it zero: every node in a
+	// network must agree on it, so it belongs in the file where an operator can
+	// see and copy it. Approve no set changes by default - a node that
+	// pre-approved membership changes would vote to admit validators its operator
+	// never agreed to.
+	config.Consensus.EpochLength = consensus.DefaultEpochLength
+	config.Consensus.ApprovedChanges = nil
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -512,9 +537,11 @@ func (n *Node) Start() error {
 	}
 	// Equivocation evidence: a validator that votes two ways in one round is the
 	// one Byzantine act this protocol can prove, and until this store existed the
-	// proof was discarded. The engine records and gossips it; acting on it is an
-	// operator decision, because the validator set is fixed at startup and a node
-	// that ejected a validator on its own would simply fork away from the others.
+	// proof was discarded. The engine records and gossips it; ejecting the
+	// offender is still an operator decision, because a node that removed a
+	// validator on its own authority would fork away from its peers - but the
+	// removal itself now goes through the chain (see Sets below), so the network
+	// can eject a validator without a coordinated restart.
 	n.evidence = consensus.NewEvidenceStore(n.kvStore)
 	consensusEngine, err := consensus.New(consensus.Config{
 		Transport:  n.transport,
@@ -523,10 +550,19 @@ func (n *Node) Start() error {
 		Ledger:     n.market.Ledger(),
 		Self:       consensusAccount,
 		Evidence:   n.evidence,
+		// The validator set is chain state, not a startup constant: Sets persists
+		// the set the committed chain arrived at, so a restart resumes the set the
+		// network agreed on rather than snapping back to whatever this file says.
+		// consensus.validators is therefore the GENESIS set - it seeds a fresh
+		// store and is ignored once the chain has changed the set.
+		Sets:               consensus.NewSetStore(n.kvStore),
+		EpochLength:        n.config.Consensus.EpochLength,
+		ApprovedSetChanges: n.config.Consensus.ApprovedChanges,
 		OnEquivocation: func(eq *consensus.Equivocation) {
-			fmt.Printf("consensus: validator %s equivocated at height %d round %d; "+
-				"evidence stored. Remove it from consensus.validators on every node and restart them.\n",
-				eq.VoterID, eq.Height, eq.Round)
+			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored. "+
+				"Eject it by having a quorum of operators list \"remove:%s\" under consensus.approved_changes "+
+				"and submitting the change (matrix validator remove --id %s).\n",
+				eq.VoterID, eq.Height, eq.Round, eq.VoterID, eq.VoterID)
 		},
 	})
 	if err != nil {
