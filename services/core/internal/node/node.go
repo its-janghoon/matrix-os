@@ -232,6 +232,23 @@ func effectiveUnbonding(cfg StakeConfig) uint64 {
 	return consensus.DefaultUnbondingPeriod
 }
 
+// recommendedProviderEmissionPerBlock is the per-block provider emission a
+// generated config ships with, in native base units. It is the token proposal's
+// recommended schedule, chosen so the pool spends about 40% of the native supply
+// cap over its half-life and no more.
+//
+// The total ever paid by a right-shift (halving) schedule is about
+// 1.44 * PerBlock * HalfLife. With the default half-life of
+// consensus.DefaultProviderEmissionHalfLife (1,000,000 blocks):
+//
+//	1.44 * 280_000_000_000 * 1_000_000 == 4.032e17 base units
+//
+// which is ~40% of token.NativeMaxSupply (1e18 base units), matching the
+// provider allocation in docs/proposals/token-and-bridge-policy.md. An operator
+// who wants a different budget edits consensus.rewards.per_block (0 disables the
+// emission entirely).
+const recommendedProviderEmissionPerBlock uint64 = 280_000_000_000
+
 // RewardsConfig configures the provider emission from the genesis pool.
 //
 // The token policy allocates a share of the pool to compute providers. This is
@@ -448,10 +465,29 @@ func Initialize(configPath string) error {
 	// consensus.fee_basis_points; the engine still refuses any value above the
 	// cap at startup rather than silently clamping it.
 	config.Consensus.FeeBasisPoints = consensus.MaxFeeBasisPoints
-	// And no provider emission. Both are monetary policy, and a node that
-	// started paying out the genesis pool because that was the default would be
-	// making that policy on the operator's behalf.
-	config.Consensus.Rewards = RewardsConfig{}
+	// Provider emission set to the recommended schedule in a generated config.
+	// Like the fee, this is monetary policy the operator decided explicitly (the
+	// CTO's "as recommended" answer): a node that started paying out the genesis
+	// pool because that was the default would be making that policy on the
+	// operator's behalf, so the number lives here in the file rather than in the
+	// engine, and an operator who wants no emission sets consensus.rewards.per_block
+	// to 0 (the engine's zero-value default remains emission-free either way).
+	//
+	// The schedule is sized to the token proposal's provider allocation: the total
+	// ever paid is about 1.44 * PerBlock * HalfLife, so at the recommended per-block
+	// figure and a 1,000,000-block half-life it is about
+	// 1.44 * 2.8e11 * 1e6 == 4.03e17 base units, i.e. ~40% of the 1e18 native supply
+	// cap (config.Genesis.RewardPool == token.NativeMaxSupply funds it). See
+	// recommendedProviderEmissionPerBlock for the arithmetic.
+	//
+	// ApprovedProviders stays empty on purpose: a registration needs a QUORUM of
+	// operators to list a provider (the same as admitting a validator), so an empty
+	// registry pays nothing until this operator adds one. The emission is armed but
+	// idle until then.
+	config.Consensus.Rewards = RewardsConfig{
+		PerBlock: recommendedProviderEmissionPerBlock,
+		HalfLife: consensus.DefaultProviderEmissionHalfLife,
+	}
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
