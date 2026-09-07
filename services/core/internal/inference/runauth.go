@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -90,8 +91,23 @@ func (a *RunAuthorization) SigningBytes(req InferenceRequest) []byte {
 	return buf
 }
 
-// BuyerID returns the account the authorization is for.
+// IsEth reports whether this authorization is signed by an Ethereum key, which
+// is decided by the key's length: 20 bytes is an address, 32 is an ed25519
+// public key.
+func (a *RunAuthorization) IsEth() bool {
+	return len(a.PublicKey) == ethsig.AddressLen
+}
+
+// BuyerID returns the account the authorization is for, in whichever form its
+// key implies.
 func (a *RunAuthorization) BuyerID() string {
+	if a.IsEth() {
+		addr, err := ethsig.AddressFromBytes(a.PublicKey)
+		if err != nil {
+			return ""
+		}
+		return token.EthAccountID(addr)
+	}
 	return token.AccountIDFromPublicKey(a.PublicKey)
 }
 
@@ -180,20 +196,15 @@ func (s *runAuthSeen) accept(key [32]byte, now time.Time, window time.Duration) 
 // VerifyRunAuthorization checks that auth authorises req for buyer, and that it
 // has not been seen before. It is the whole gate: a caller that passes this has
 // proved it holds the buyer's key and is asking for this exact work now.
+//
+// It accepts either kind of key. A 32-byte PublicKey is an ed25519 account and
+// the signature covers SigningBytes; a 20-byte one is an Ethereum address and
+// the signature is an ecrecover over the EIP-712 digest, because MetaMask signs
+// typed data and never arbitrary bytes. Which kind it is comes from the key's
+// LENGTH, matching how token.Transaction tells its two senders apart.
 func (s *Service) VerifyRunAuthorization(buyer string, req InferenceRequest, auth *RunAuthorization) error {
 	if auth == nil {
 		return fmt.Errorf("%w: no authorization supplied", ErrRunUnauthorized)
-	}
-	if len(auth.PublicKey) != ed25519.PublicKeySize {
-		return fmt.Errorf("%w: public key must be %d bytes", ErrRunUnauthorized, ed25519.PublicKeySize)
-	}
-	if len(auth.Signature) != ed25519.SignatureSize {
-		return fmt.Errorf("%w: signature must be %d bytes", ErrRunUnauthorized, ed25519.SignatureSize)
-	}
-	// The account is DERIVED from the key, so this is what stops a caller from
-	// naming an account it does not hold.
-	if got := auth.BuyerID(); !strings.EqualFold(got, buyer) {
-		return fmt.Errorf("%w: authorized by %s, but the buyer is %s", ErrRunUnauthorized, got, buyer)
 	}
 
 	now := nowUTC()
@@ -203,15 +214,63 @@ func (s *Service) VerifyRunAuthorization(buyer string, req InferenceRequest, aut
 			ErrRunUnauthorized, signed.UTC().Format(time.RFC3339), RunAuthorizationWindow)
 	}
 
-	message := auth.SigningBytes(req)
-	if !ed25519.Verify(auth.PublicKey, message, auth.Signature) {
-		return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
+	if err := s.verifySignature(buyer, req, auth); err != nil {
+		return err
 	}
 
 	// Replay: the same signature twice would be two runs for one authorization,
 	// which is the free work this whole file exists to prevent.
 	if !s.runAuth.accept(sha256.Sum256(auth.Signature), now, RunAuthorizationWindow) {
 		return fmt.Errorf("%w: this authorization has already been used", ErrRunUnauthorized)
+	}
+	return nil
+}
+
+// verifySignature checks the signature and that it authorises `buyer`,
+// dispatching on the key kind.
+func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunAuthorization) error {
+	if auth.IsEth() {
+		addr, err := ethsig.AddressFromBytes(auth.PublicKey)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrRunUnauthorized, err)
+		}
+		// The account is DERIVED from the address, so a caller cannot name an
+		// account it does not control.
+		if got := token.EthAccountID(addr); !strings.EqualFold(got, buyer) {
+			return fmt.Errorf("%w: authorized by %s, but the buyer is %s", ErrRunUnauthorized, got, buyer)
+		}
+		if len(auth.Signature) != ethsig.SignatureLen {
+			return fmt.Errorf("%w: an ethereum signature must be %d bytes, got %d",
+				ErrRunUnauthorized, ethsig.SignatureLen, len(auth.Signature))
+		}
+		digest := requestDigest(req)
+		message, err := token.EthRunAuthorizationDigest(addr, auth.Provider, auth.Model, digest[:], auth.Timestamp)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrRunUnauthorized, err)
+		}
+		recovered, err := ethsig.RecoverAddress(message, auth.Signature)
+		if err != nil {
+			return fmt.Errorf("%w: %v", ErrRunUnauthorized, err)
+		}
+		if recovered != addr {
+			return fmt.Errorf("%w: signed by %s, but the authorization claims %s",
+				ErrRunUnauthorized, recovered.Hex(), addr.Hex())
+		}
+		return nil
+	}
+
+	if len(auth.PublicKey) != ed25519.PublicKeySize {
+		return fmt.Errorf("%w: a key must be %d bytes (ed25519) or %d (an ethereum address), got %d",
+			ErrRunUnauthorized, ed25519.PublicKeySize, ethsig.AddressLen, len(auth.PublicKey))
+	}
+	if len(auth.Signature) != ed25519.SignatureSize {
+		return fmt.Errorf("%w: signature must be %d bytes", ErrRunUnauthorized, ed25519.SignatureSize)
+	}
+	if got := auth.BuyerID(); !strings.EqualFold(got, buyer) {
+		return fmt.Errorf("%w: authorized by %s, but the buyer is %s", ErrRunUnauthorized, got, buyer)
+	}
+	if !ed25519.Verify(auth.PublicKey, auth.SigningBytes(req), auth.Signature) {
+		return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
 	}
 	return nil
 }

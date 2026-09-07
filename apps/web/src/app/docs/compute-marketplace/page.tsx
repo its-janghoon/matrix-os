@@ -217,6 +217,53 @@ r = client.chat.completions.create(
                     </p>
                   </div>
 
+                  {/* Wallets */}
+                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Wallets, and MetaMask</h2>
+                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      MetaMask works fully for <strong>wMATRIX</strong>: it is a standard ERC-20 with EIP-2612
+                      permit, so holding, sending, approving and swapping it need nothing from us. What MetaMask
+                      cannot do is sign a NATIVE transaction, because native accounts are ed25519 and MetaMask is
+                      secp256k1. That is a structural mismatch, and it is the same one Solana, Near, Aptos and Sui
+                      all have.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      Rather than leave people with two wallets, a native account can be controlled by an Ethereum
+                      key. There are two kinds of account now:
+                    </p>
+                    <ul className='text-gray-100 space-y-2 list-disc pl-6 mb-4'>
+                      <li>
+                        <code>&lt;64 hex&gt;</code> - an ed25519 account, unchanged byte for byte.
+                      </li>
+                      <li>
+                        <code>eth:0x&lt;40 hex&gt;</code> - controlled by that Ethereum address. It funds, spends and
+                        reads like any other account.
+                      </li>
+                    </ul>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      An eth account signs <strong>EIP-712 typed data</strong>, which is the only thing MetaMask
+                      signs, and is also what makes the prompt readable rather than a hex blob. The domain carries no
+                      chainId and no verifyingContract - claiming an EVM chain id we do not own would squat on
+                      someone else&apos;s domain separator - so a signature made here has no meaning on any EVM
+                      chain.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      The two kinds are told apart by the ACCOUNT ID, not by a field in the signed payload.
+                      That matters: adding a scheme byte to the canonical transaction bytes would have invalidated
+                      every ed25519 signature ever produced and re-hashed every committed block. The digests are
+                      pinned against ethers v6&apos;s own output in the tests, because agreeing with a real Ethereum
+                      library is the only thing that proves a wallet will produce a signature the node accepts.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-0'>
+                      For an ed25519 wallet there is now a 12-word BIP-39 recovery phrase and an encrypted keystore,
+                      derived at the SLIP-0010 path <code>m/44&apos;/9004&apos;/0&apos;/0&apos;</code>. See the{' '}
+                      <a href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
+                        CLI reference
+                      </a>
+                      .
+                    </p>
+                  </div>
+
                   {/* Console */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Matrix Console</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>

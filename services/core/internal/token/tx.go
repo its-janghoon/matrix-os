@@ -5,6 +5,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 )
 
 // Errors related to transaction validation.
@@ -41,8 +43,27 @@ type Transaction struct {
 }
 
 // SenderID returns the sender's stable account identifier derived from From.
+//
+// It dispatches on the LENGTH of From, which is what tells the two account kinds
+// apart: 32 bytes is an ed25519 public key, 20 bytes is an Ethereum address. The
+// discriminator is deliberately not a field in the signed payload - see eth.go -
+// because adding one would change every ed25519 signature ever produced.
 func (t *Transaction) SenderID() string {
+	if len(t.From) == ethsig.AddressLen {
+		addr, err := ethsig.AddressFromBytes(t.From)
+		if err != nil {
+			return ""
+		}
+		return EthAccountID(addr)
+	}
 	return AccountIDFromPublicKey(t.From)
+}
+
+// SenderIsEth reports whether this transfer is from an Ethereum-controlled
+// account, and therefore verified with ecrecover over an EIP-712 digest rather
+// than with ed25519 over SigningBytes.
+func (t *Transaction) SenderIsEth() bool {
+	return len(t.From) == ethsig.AddressLen
 }
 
 // SigningBytes returns the canonical, deterministic serialization of the
@@ -111,6 +132,12 @@ func (t *Transaction) Sign(priv ed25519.PrivateKey) error {
 // signed field (Amount, Nonce, To, PrevHash, ...) invalidates the signature and
 // causes Verify to fail.
 func (t *Transaction) Verify() error {
+	// An Ethereum-controlled sender has a different signable payload, because
+	// MetaMask signs EIP-712 typed data and never arbitrary bytes. The ed25519
+	// path below is untouched.
+	if t.SenderIsEth() {
+		return t.VerifyEthTransfer()
+	}
 	if len(t.From) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: sender key must be %d bytes", ErrInvalidTransaction, ed25519.PublicKeySize)
 	}

@@ -8,7 +8,8 @@ import (
 
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
-	"golang.org/x/crypto/sha3"
+
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 )
 
 // Errors related to attestation signing and verification.
@@ -57,15 +58,11 @@ func ParseAddress(s string) (Address, error) {
 	return addr, nil
 }
 
-// keccak256 returns the Ethereum keccak256 (NOT the FIPS SHA3-256) hash of the
-// concatenated inputs. sha3.NewLegacyKeccak256 uses the original Keccak padding
-// that Ethereum's abi/ecrecover stack relies on.
+// keccak256 delegates to internal/ethsig, which owns the one implementation.
+// internal/token needs the same primitive and cannot import this package
+// (bridge imports token), so a second copy of it would have lived there.
 func keccak256(parts ...[]byte) []byte {
-	h := sha3.NewLegacyKeccak256()
-	for _, p := range parts {
-		h.Write(p)
-	}
-	return h.Sum(nil)
+	return ethsig.Keccak256(parts...)
 }
 
 // Attestor is a validator's secp256k1 signing identity for the Ethereum side of
@@ -156,28 +153,12 @@ func addressFromPubKey(pub *secp256k1.PublicKey) Address {
 // sig is the 65-byte r || s || v layout returned by SignDigest. It returns
 // ErrInvalidSignature when the signature is malformed or does not recover.
 func RecoverAddress(digest, sig []byte) (Address, error) {
-	var zero Address
-	if len(digest) != 32 {
-		return zero, fmt.Errorf("%w: digest must be 32 bytes", ErrInvalidSignature)
-	}
-	if len(sig) != 65 {
-		return zero, fmt.Errorf("%w: signature must be 65 bytes, got %d", ErrInvalidSignature, len(sig))
-	}
-	v := sig[64]
-	if v < 27 {
-		// Accept both the {0,1} and {27,28} conventions for v.
-		v += 27
-	}
-	// dcrd RecoverCompact wants <v><r><s> with v as produced by SignCompact.
-	compact := make([]byte, 65)
-	compact[0] = v
-	copy(compact[1:33], sig[0:32])
-	copy(compact[33:65], sig[32:64])
-	pub, _, err := ecdsa.RecoverCompact(compact, digest)
+	got, err := ethsig.RecoverAddress(digest, sig)
 	if err != nil {
-		return zero, fmt.Errorf("%w: %v", ErrInvalidSignature, err)
+		// Keep this package's own error identity, which its callers match on.
+		return Address{}, fmt.Errorf("%w: %v", ErrInvalidSignature, err)
 	}
-	return addressFromPubKey(pub), nil
+	return Address(got), nil
 }
 
 // leftPad32 returns b left-padded with zero bytes to 32 bytes. It panics if b is
