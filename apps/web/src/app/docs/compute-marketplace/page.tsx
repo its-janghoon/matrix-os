@@ -49,7 +49,7 @@ export default function ComputeMarketplaceDocs() {
                   <TokenBridge />
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                      <li><strong>Lock to mint</strong> — native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
+                      <li><strong>Lock to mint</strong> - native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
                       <li>
                         <strong>Burn to unlock</strong> - burning wMATRIX emits an on-chain Burned event. A watcher
                         inside the node polls Ethereum for those events past a confirmation depth, keeps a persisted
@@ -92,11 +92,11 @@ export default function ComputeMarketplaceDocs() {
                     </p>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
                       <li>
-                        <strong>Local runner</strong> — serve a model from your own hardware through an Ollama-style
+                        <strong>Local runner</strong> - serve a model from your own hardware through an Ollama-style
                         local HTTP API. A GPU-free echo backend runs the whole flow for testing.
                       </li>
                       <li>
-                        <strong>Provider-API proxy</strong> — proxy requests through an OpenAI-compatible API. The key
+                        <strong>Provider-API proxy</strong> - proxy requests through an OpenAI-compatible API. The key
                         is read from an environment variable and never hardcoded or committed.
                       </li>
                     </ul>
