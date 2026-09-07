@@ -26,6 +26,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 )
 
 // Errors related to account identity and key handling.
@@ -86,6 +88,33 @@ func ParsePublicKey(data []byte) (ed25519.PublicKey, error) {
 	pub := make(ed25519.PublicKey, ed25519.PublicKeySize)
 	copy(pub, data)
 	return pub, nil
+}
+
+// ParseSenderKey parses the sender key an RPC carries, accepting EITHER kind of
+// account: 32 bytes is an ed25519 public key, 20 bytes is an Ethereum address.
+//
+// It exists because the two RPCs that take a client-signed transfer
+// (SubmitSignedTransfer and SettleInferenceJob) used ParsePublicKey, which
+// requires 32 bytes - so an Ethereum-controlled account was refused at the
+// handler with "expected 32 bytes, got 20" before any signature was checked.
+// The returned value is the Transaction.From to use, and Verify dispatches on
+// its length.
+func ParseSenderKey(data []byte) ([]byte, error) {
+	switch len(data) {
+	case ed25519.PublicKeySize:
+		pub, err := ParsePublicKey(data)
+		if err != nil {
+			return nil, err
+		}
+		return pub, nil
+	case ethsig.AddressLen:
+		out := make([]byte, ethsig.AddressLen)
+		copy(out, data)
+		return out, nil
+	default:
+		return nil, fmt.Errorf("%w: a sender key is %d bytes (ed25519) or %d (an ethereum address), got %d",
+			ErrInvalidPublicKey, ed25519.PublicKeySize, ethsig.AddressLen, len(data))
+	}
 }
 
 // ParsePublicKeyHex parses a hex-encoded account ID back into an ed25519 public

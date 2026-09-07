@@ -170,7 +170,8 @@ func (s *Service) SettleInferenceJob(ctx context.Context, req *inferencev1.Settl
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	pub, err := token.ParsePublicKey(req.GetFromPublicKey())
+	// Either kind of account: 32 bytes ed25519, 20 bytes an Ethereum address.
+	pub, err := token.ParseSenderKey(req.GetFromPublicKey())
 	if err != nil {
 		return nil, mapInferenceError(err)
 	}

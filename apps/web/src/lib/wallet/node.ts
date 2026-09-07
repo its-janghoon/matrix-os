@@ -12,8 +12,8 @@
  * says so in those words rather than leaving a blank screen.
  */
 
-import { fromBase64, paymentSigningBytes, runAuthorizationSigningBytes, toBase64, type Message } from './signing';
-import type { Wallet } from './wallet';
+import { fromBase64, toBase64 } from './signing';
+import type { Message, Signer } from './signer';
 
 const MARKET = 'matrix.market.v1.MarketService';
 const INFERENCE = 'matrix.inference.v1.InferenceService';
@@ -158,6 +158,12 @@ export async function providerFor(endpoint: string, model: string): Promise<stri
 /**
  * Runs an inference and pays for it with the page's own key.
  *
+ * It takes a Signer rather than a key, so the same code path serves a
+ * browser-held ed25519 key and MetaMask. MetaMask cannot sign arbitrary bytes -
+ * only EIP-712 typed data - so the decision of WHAT to sign has to sit inside
+ * the signer, which is also what lets its prompt say "Transfer: 26 to gpu-1"
+ * instead of showing a hex blob.
+ *
  * Two signatures, in order, because they answer different questions:
  *
  *   1. a RUN AUTHORIZATION, before any work happens, proving this page controls
@@ -174,55 +180,50 @@ export async function providerFor(endpoint: string, model: string): Promise<stri
  */
 export async function chat(
   endpoint: string,
-  wallet: Wallet,
+  signer: Signer,
   input: { model: string; messages: Message[] },
 ): Promise<Settled> {
   const provider = await providerFor(endpoint, input.model);
   const timestamp = BigInt(Date.now()) * 1_000_000n;
 
-  const authBytes = await runAuthorizationSigningBytes({
-    fromPublicKey: wallet.publicKey,
+  const auth = await signer.signRunAuthorization({
     provider,
     model: input.model,
-    timestamp,
     messages: input.messages,
+    timestamp,
   });
-  const authSignature = await wallet.sign(authBytes);
 
   const ran = await rpc(endpoint, INFERENCE, 'RunInferenceJob', {
-    buyer: wallet.accountId,
+    buyer: signer.accountId,
     provider,
     model: input.model,
     messages: input.messages.map((m) => ({ role: `CHAT_ROLE_${m.role.toUpperCase()}`, content: m.content })),
     unitsEstimate: '4096',
     authorization: {
-      publicKey: toBase64(wallet.publicKey),
-      timestamp: String(timestamp),
-      signature: toBase64(authSignature),
+      publicKey: toBase64(auth.publicKey),
+      timestamp: String(auth.timestamp),
+      signature: toBase64(auth.signature),
     },
   });
 
   const payment = obj(ran.payment);
-  const prevHash = fromBase64(str(payment.prevHash));
-  const paymentBytes = paymentSigningBytes({
-    fromPublicKey: wallet.publicKey,
+  const signed = await signer.signPayment({
     to: str(payment.to),
     amount: big(payment.amount),
     nonce: big(payment.nonce),
     timestamp: big(payment.timestamp),
-    prevHash,
+    prevHash: fromBase64(str(payment.prevHash)),
   });
-  const paymentSignature = await wallet.sign(paymentBytes);
 
   const settled = await rpc(endpoint, INFERENCE, 'SettleInferenceJob', {
     id: str(payment.jobId),
-    fromPublicKey: toBase64(wallet.publicKey),
+    fromPublicKey: toBase64(signed.fromPublicKey),
     to: str(payment.to),
     amount: String(big(payment.amount)),
     nonce: String(big(payment.nonce)),
     timestamp: String(big(payment.timestamp)),
     prevHash: str(payment.prevHash),
-    signature: toBase64(paymentSignature),
+    signature: toBase64(signed.signature),
   });
 
   const job = obj(settled.job);

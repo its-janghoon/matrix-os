@@ -13,7 +13,10 @@ import {
   type Settled,
 } from '@/lib/wallet/node';
 import type { Message } from '@/lib/wallet/signing';
-import { createWallet, forgetWallet, loadWallet, walletSupported, type Wallet } from '@/lib/wallet/wallet';
+import { browserSigner } from '@/lib/wallet/browserSigner';
+import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
+import type { Signer } from '@/lib/wallet/signer';
+import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
 
 /**
  * A chat client that holds its own key.
@@ -43,7 +46,7 @@ const FIELD =
   'outline-none focus:border-gray-500';
 
 export default function ChatPage() {
-  const [wallet, setWallet] = useState<Wallet | null>(null);
+  const [signer, setSigner] = useState<Signer | null>(null);
   const [checking, setChecking] = useState(true);
   const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
   const [balance, setBalance] = useState<bigint | null>(null);
@@ -56,9 +59,12 @@ export default function ChatPage() {
   const bottom = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
+    // Only the browser key can be picked up automatically. MetaMask needs an
+    // explicit connect, because silently reading an account a user has not
+    // authorised for this page is exactly what a wallet prompt exists to stop.
     void loadWallet()
-      .then(setWallet)
-      .catch(() => setWallet(null))
+      .then((w) => setSigner(w ? browserSigner(w) : null))
+      .catch(() => setSigner(null))
       .finally(() => setChecking(false));
   }, []);
 
@@ -68,12 +74,12 @@ export default function ChatPage() {
   const reload = useCallback(() => setReloads((n) => n + 1), []);
 
   useEffect(() => {
-    if (!wallet) return;
+    if (!signer) return;
     let live = true;
 
     void (async () => {
       try {
-        const [bal, offers] = await Promise.all([getBalance(endpoint, wallet.accountId), listModels(endpoint)]);
+        const [bal, offers] = await Promise.all([getBalance(endpoint, signer.accountId), listModels(endpoint)]);
         if (!live) return;
         setProblem('');
         setBalance(bal);
@@ -87,14 +93,14 @@ export default function ChatPage() {
     return () => {
       live = false;
     };
-  }, [wallet, endpoint, reloads]);
+  }, [signer, endpoint, reloads]);
 
   useEffect(() => {
     bottom.current?.scrollIntoView({ behavior: 'smooth' });
   }, [turns, busy]);
 
   const send = async () => {
-    if (!wallet || draft.trim() === '' || model === '' || busy) return;
+    if (!signer || draft.trim() === '' || model === '' || busy) return;
 
     // The transcript that gets signed is the whole conversation, so the model
     // sees the context and the signature covers exactly what was sent.
@@ -110,9 +116,9 @@ export default function ChatPage() {
     setProblem('');
 
     try {
-      const settled = await chat(endpoint, wallet, { model, messages: history });
+      const settled = await chat(endpoint, signer, { model, messages: history });
       setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled }]);
-      setBalance(await getBalance(endpoint, wallet.accountId));
+      setBalance(await getBalance(endpoint, signer.accountId));
     } catch (err) {
       setProblem(reportProblem(err));
     } finally {
@@ -139,19 +145,24 @@ export default function ChatPage() {
           <header>
             <h1 className='mb-2 text-3xl font-bold text-white'>Chat, paying with your own key</h1>
             <p className='text-gray-300'>
-              This page holds an ed25519 key generated in your browser and signs with it. The node never has it, no
-              API key is involved, and nothing you type is stored here.
+              Your own key signs every message, with MetaMask or with a key this page generates. The node never has
+              it, no API key is involved, and nothing you type is stored here.
             </p>
           </header>
 
-          {!wallet ? <NoWallet onCreate={setWallet} /> : null}
+          {!signer ? <NoWallet onReady={setSigner} /> : null}
 
-          {wallet ? (
+          {signer ? (
             <>
               <section className={CARD}>
                 <div className='mb-4 space-y-1'>
-                  <p className='text-sm text-gray-400'>Your account</p>
-                  <p className='break-all font-mono text-sm text-gray-100'>{wallet.accountId}</p>
+                  <p className='text-sm text-gray-400'>
+                    Your account{' '}
+                    <span className='text-gray-500'>
+                      ({signer.kind === 'metamask' ? 'MetaMask' : 'a key in this browser'})
+                    </span>
+                  </p>
+                  <p className='break-all font-mono text-sm text-gray-100'>{signer.accountId}</p>
                 </div>
                 <label className='mb-1 block text-sm text-gray-400' htmlFor='endpoint'>
                   Node endpoint
@@ -180,17 +191,20 @@ export default function ChatPage() {
                   <button
                     className='text-gray-500 underline hover:text-gray-300'
                     onClick={async () => {
-                      await forgetWallet();
-                      setWallet(null);
+                      // Only the browser key is ours to destroy. Disconnecting
+                      // MetaMask drops our handle on it and nothing else, which
+                      // is the honest thing for a wallet we do not own.
+                      if (signer.kind === 'browser') await forgetWallet();
+                      setSigner(null);
                       setTurns([]);
                       setBalance(null);
                     }}
                   >
-                    forget this wallet
+                    {signer.kind === 'metamask' ? 'disconnect' : 'forget this wallet'}
                   </button>
                 </div>
 
-                {balance === 0n ? <Funding account={wallet.accountId} /> : null}
+                {balance === 0n ? <Funding account={signer.accountId} /> : null}
               </section>
 
               {problem !== '' ? (
@@ -246,7 +260,7 @@ export default function ChatPage() {
                 </button>
               </section>
 
-              <Caveats />
+              <Caveats kind={signer.kind} />
             </>
           ) : null}
         </div>
@@ -255,44 +269,87 @@ export default function ChatPage() {
   );
 }
 
-function NoWallet({ onCreate }: { onCreate: (w: Wallet) => void }) {
+function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
   const [problem, setProblem] = useState('');
 
-  if (!walletSupported()) {
-    return (
-      <section className={CARD}>
-        <p className='text-gray-300'>
-          This browser cannot hold a wallet here. It needs IndexedDB and WebCrypto, and WebCrypto only works in a
-          secure context - so open this page over https, or on localhost.
-        </p>
-      </section>
-    );
-  }
+  // Whether a wallet extension is present is checked ON CLICK, not during
+  // render: window.ethereum does not exist in the server render, so reading it
+  // there would make the two renders disagree. Checking on click also means the
+  // button can say WHY it did not work, which a disabled button cannot.
+  const canHoldAKey = walletSupported();
 
   return (
-    <section className={CARD}>
-      <p className='mb-4 text-gray-300'>
-        No wallet in this browser yet. Creating one generates an ed25519 keypair whose private half is{' '}
-        <strong>non-extractable</strong>: this page can ask it to sign, but no script can read the key material, and
-        it never leaves your browser.
-      </p>
-      <p className='mb-4 text-sm text-gray-400'>
-        There is no backup, and there cannot be - a key that could be written down would not be non-extractable. Clear
-        this site&apos;s data and the account is gone with whatever it held.
-      </p>
-      <button
-        className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black'
-        onClick={async () => {
-          try {
-            onCreate(await createWallet());
-          } catch (err) {
-            setProblem(err instanceof Error ? err.message : String(err));
-          }
-        }}
-      >
-        Create a wallet
-      </button>
-      {problem !== '' ? <p className='mt-3 text-sm text-red-300'>{problem}</p> : null}
+    <section className={`${CARD} space-y-6`}>
+      <div>
+        <h2 className='mb-2 text-lg font-semibold text-white'>Choose a wallet</h2>
+        <p className='text-sm text-gray-400'>
+          Either way the node never holds your key: it verifies your signature and settles.
+        </p>
+      </div>
+
+      <div className='rounded-lg border border-gray-800 p-4'>
+        <h3 className='mb-2 font-semibold text-gray-100'>MetaMask</h3>
+        <p className='mb-3 text-sm text-gray-400'>
+          Your Ethereum address controls a native account (<code>eth:0x...</code>). MetaMask cannot sign the
+          chain&apos;s ordinary ed25519 transactions, so these are signed as EIP-712 typed data instead - which is
+          also why the prompt shows what you are approving rather than a hex blob.
+        </p>
+        <p className='mb-3 text-sm text-gray-400'>
+          This is the account that survives: it works anywhere MetaMask is installed, and clearing this site&apos;s
+          data does not touch it.
+        </p>
+        <button
+          className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black'
+          onClick={async () => {
+            if (!metamaskAvailable()) {
+              setProblem('No wallet extension is installed on this page. Install MetaMask, or use a browser key below.');
+              return;
+            }
+            try {
+              onReady(await connectMetamask());
+            } catch (err) {
+              setProblem(err instanceof Error ? err.message : String(err));
+            }
+          }}
+        >
+          Connect MetaMask
+        </button>
+      </div>
+
+      <div className='rounded-lg border border-gray-800 p-4'>
+        <h3 className='mb-2 font-semibold text-gray-100'>A key in this browser</h3>
+        {canHoldAKey ? (
+          <>
+            <p className='mb-3 text-sm text-gray-400'>
+              An ed25519 keypair generated here, whose private half is <strong>non-extractable</strong>: this page
+              can ask it to sign, but no script can read the key material.
+            </p>
+            <p className='mb-3 text-sm text-gray-400'>
+              There is no backup, and there cannot be - a key that could be written down would not be
+              non-extractable. Clear this site&apos;s data and the account is gone with whatever it held.
+            </p>
+            <button
+              className='rounded-lg border border-gray-600 px-5 py-2 text-sm font-semibold text-gray-100'
+              onClick={async () => {
+                try {
+                  onReady(browserSigner(await createWallet()));
+                } catch (err) {
+                  setProblem(err instanceof Error ? err.message : String(err));
+                }
+              }}
+            >
+              Create a browser wallet
+            </button>
+          </>
+        ) : (
+          <p className='text-sm text-gray-400'>
+            This browser cannot hold a key here. It needs IndexedDB and WebCrypto, and WebCrypto only works in a
+            secure context - so open this page over https, or on localhost.
+          </p>
+        )}
+      </div>
+
+      {problem !== '' ? <p className='text-sm text-red-300'>{problem}</p> : null}
     </section>
   );
 }
@@ -352,15 +409,23 @@ function Transcript({
   );
 }
 
-function Caveats() {
+function Caveats({ kind }: { kind: Signer['kind'] }) {
   return (
     <section className='rounded-xl border border-gray-800 p-6 text-sm text-gray-400'>
       <h2 className='mb-3 text-base font-semibold text-gray-200'>What this does and does not protect</h2>
       <ul className='list-disc space-y-2 pl-5'>
-        <li>
-          Your key is non-extractable, so no script can read it and use it elsewhere. It can still ask this page&apos;s
-          key to sign while the page is open - non-extractability is not a hardware signer.
-        </li>
+        {kind === 'metamask' ? (
+          <li>
+            Your key is in MetaMask, and this page never sees it. Every signature is EIP-712 typed data, so the
+            prompt shows what you are approving; read it, because approving one is how the money moves.
+          </li>
+        ) : (
+          <li>
+            Your key is non-extractable, so no script can read it and use it elsewhere. It can still ask this
+            page&apos;s key to sign while the page is open - non-extractability is not a hardware signer. And there
+            is no backup: clear this site&apos;s data and the account is gone.
+          </li>
+        )}
         <li>
           <strong>Your prompt is not private.</strong> The provider runs the model on their hardware, so they see it.
           This page stores nothing; that is a different claim.

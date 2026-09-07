@@ -29,7 +29,7 @@ const DB_VERSION = 1;
 const STORE = 'keys';
 const KEY_ID = 'account';
 
-/** A wallet: the account id, the public key bytes, and a signer. */
+/** A wallet: the account id, the public key bytes, and a raw signer. */
 export interface Wallet {
   /** The account id, which is the hex of the public key. */
   accountId: string;

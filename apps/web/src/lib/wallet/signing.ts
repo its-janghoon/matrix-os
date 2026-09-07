@@ -19,13 +19,12 @@
 /** Must match inference.runAuthDomain on the node. */
 const RUN_AUTH_DOMAIN = 'matrix/inference/run-authorization/v1';
 
-/** The chat roles, in the wire spelling the node's digest uses. */
-export type Role = 'system' | 'user' | 'assistant';
+// Role and Message live in signer.ts, so there is one definition of what a chat
+// turn is rather than two that can drift in their spelling of a role - and the
+// role spelling is inside the signed digest.
+export type { Message, Role } from './signer';
 
-export interface Message {
-  role: Role;
-  content: string;
-}
+import type { Message } from './signer';
 
 function utf8(value: string): Uint8Array {
   return new TextEncoder().encode(value);
