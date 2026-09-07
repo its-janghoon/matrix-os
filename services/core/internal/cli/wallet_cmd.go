@@ -7,6 +7,8 @@ import (
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
@@ -300,7 +302,7 @@ leaves the local wallet.`,
 				Timestamp:     tx.Timestamp,
 			})
 			if err != nil {
-				return mapErr(opts.Addr, err)
+				return transferSubmitError(opts, tx, err)
 			}
 			return printTransaction(cmd.OutOrStdout(), opts.JSON, resp.GetTransaction())
 		},
@@ -317,12 +319,18 @@ leaves the local wallet.`,
 // ListTransactions from index 0 so it works regardless of any server-side page
 // cap.
 //
-// A signed transfer settles through consensus now, where replay protection
-// comes from the engine's committed-transaction dedup set rather than a strict
-// monotonic per-sender nonce. A count-derived nonce is still monotonic per
-// sender, which keeps otherwise-identical repeated transfers distinct; a rare
-// racing transfer that reuses a nonce is simply a distinct transaction (the
-// timestamp differs) and both commit independently.
+// A count-derived nonce is monotonic per sender, which keeps otherwise-identical
+// repeated transfers distinct.
+//
+// WHAT THIS COMMENT USED TO SAY, AND WHY IT WAS WRONG. It said "a rare racing
+// transfer that reuses a nonce is simply a distinct transaction (the timestamp
+// differs) and both commit independently". That was true of the code and it was
+// a double payment: the count only advances when a transfer COMMITS, so a
+// second transfer signed while the first is still pending reads the same nonce,
+// and both used to commit and both moved money. Consensus now refuses a second,
+// different transfer at a nonce the sender has spent or has pending
+// (consensus.ErrNonceAlreadyUsed), so the reuse is an error instead of a second
+// payment - which is what makes the deadline case below safe to retry.
 func deriveNonce(ctx context.Context, client marketv1.MarketServiceClient, senderID string) (nonce uint64, err error) {
 	var (
 		start     uint64
@@ -353,4 +361,53 @@ func deriveNonce(ctx context.Context, client marketv1.MarketServiceClient, sende
 		}
 	}
 	return senderTxs, nil
+}
+
+// transferSubmitError turns a SubmitSignedTransfer failure into a message that
+// says what actually happened to the money.
+//
+// WHY THIS EXISTS. A DeadlineExceeded here does NOT mean the transfer failed. It
+// means the client stopped waiting: the transfer is signed, submitted, and in
+// the mempool, and it commits when the next block carrying it does. Reporting it
+// as a bare "DeadlineExceeded: context deadline exceeded" made a committed
+// transfer look failed, and the natural response - run it again - used to sign a
+// SECOND transfer at the same nonce, because the nonce is derived from committed
+// transfers and nothing had committed yet. Both then committed and the sender
+// paid twice.
+//
+// Consensus now refuses the second transfer, so the double payment is gone. This
+// removes the reason to attempt it: the message names the nonce, says the
+// transfer may still commit, and says how to check rather than inviting a
+// re-run.
+func transferSubmitError(opts *globalOptions, tx *token.Transaction, err error) error {
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.DeadlineExceeded {
+		return mapErr(opts.Addr, err)
+	}
+	return fmt.Errorf(`the transfer was submitted but did not commit within %s, so this command stopped waiting.
+It was NOT rejected: it is signed and in the node's mempool, and it commits when a block carrying it does.
+
+  from   %s
+  to     %s
+  amount %d
+  nonce  %d
+
+Do NOT run this command again to "retry" - that signs a different transfer, and
+the node will refuse it because this nonce is already pending. Instead check
+whether it committed:
+
+  matrix tx list --addr %s
+
+and if it is there, it is done. If the network is simply slower than the default
+wait, use a longer --timeout`,
+		effectiveTimeout(opts), tx.SenderID(), tx.To, tx.Amount, tx.Nonce, opts.Addr)
+}
+
+// effectiveTimeout reports the wait this invocation actually used, so the
+// message quotes the real number rather than the default.
+func effectiveTimeout(opts *globalOptions) time.Duration {
+	if opts.Timeout > 0 {
+		return opts.Timeout
+	}
+	return defaultTimeout
 }

@@ -993,13 +993,40 @@ func (n *Node) Start() error {
 				"to a staked validator set.\n")
 		}
 	}
+	// The bridge is built BEFORE the engine because the engine needs something
+	// that can release escrow for a quorum-attested burn. Which kind of bridge it
+	// is depends on the validator set: a single node applies unlocks itself, a
+	// set gets a consensus-ordered bridge whose unlocks arrive through the engine
+	// (see newConfiguredBridgeForSet). validatorSet is already built above, so the
+	// decision is made from the same set the engine will run with rather than
+	// from the config list.
+	nodeBridge, err := newConfiguredBridgeForSet(n.market.Ledger(), n.kvStore, n.config.Bridge, validatorSet.Len())
+	if err != nil {
+		return fmt.Errorf("failed to initialize bridge: %w", err)
+	}
+	n.bridge = nodeBridge
+	if nodeBridge != nil {
+		how := "this node applies unlocks directly (single-node network)"
+		if nodeBridge.IsConsensusOrdered() {
+			how = fmt.Sprintf("unlocks require a quorum of the %d validators to attest, "+
+				"and are applied by consensus", validatorSet.Len())
+		}
+		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d; %s.\n",
+			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID, how)
+	}
+	var burnUnlocker consensus.BurnUnlocker
+	if nodeBridge != nil && nodeBridge.IsConsensusOrdered() {
+		burnUnlocker = attestedUnlockTranslator{bridge: nodeBridge}
+	}
+
 	consensusEngine, err := consensus.New(consensus.Config{
-		Transport:  n.transport,
-		Validators: validatorSet,
-		Chain:      consensus.NewBlockChain(n.kvStore),
-		Ledger:     n.market.Ledger(),
-		Self:       consensusAccount,
-		Evidence:   n.evidence,
+		BurnUnlocker: burnUnlocker,
+		Transport:    n.transport,
+		Validators:   validatorSet,
+		Chain:        consensus.NewBlockChain(n.kvStore),
+		Ledger:       n.market.Ledger(),
+		Self:         consensusAccount,
+		Evidence:     n.evidence,
 		// The validator set is chain state, not a startup constant: Sets persists
 		// the set the committed chain arrived at, so a restart resumes the set the
 		// network agreed on rather than snapping back to whatever this file says.
@@ -1174,15 +1201,7 @@ func (n *Node) Start() error {
 	// burn->unlock watcher for the same bridge is wired further down (it needs
 	// the node context and runs in the background); only the bridge object itself
 	// is needed here to back GetBridgeReconciliation.
-	nodeBridge, err := newConfiguredBridge(n.market.Ledger(), n.kvStore, n.config.Bridge)
-	if err != nil {
-		return fmt.Errorf("failed to initialize bridge: %w", err)
-	}
-	n.bridge = nodeBridge
-	if nodeBridge != nil {
-		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d.\n",
-			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID)
-	}
+	// nodeBridge was built above, before the engine, because the engine needs it.
 	// The reconciler is nil when no bridge is configured, so
 	// GetBridgeReconciliation reports FailedPrecondition rather than an empty
 	// snapshot. When present it stamps the committed consensus height onto the
@@ -1462,9 +1481,21 @@ func (n *Node) Start() error {
 	// newConfiguredBridgeWatcher takes bridge.Applier, so pass a typed nil-safe
 	// value: a nil *bridge.Bridge in an interface is non-nil, which would defeat
 	// the builder's own "no bridge configured" check.
+	//
+	// On a validator set the watcher does NOT get the bridge. It gets an applier
+	// that submits this node's attestation, and escrow moves only when a quorum
+	// of the set has attested to the same burn, account and amount. Handing it
+	// the bridge there would release collateral on this node's ledger and nowhere
+	// else, which is the divergence this whole path exists to avoid - and the
+	// consensus-ordered bridge refuses ProcessBurn outright, so the mistake would
+	// fail loudly rather than silently fork.
 	var applier bridge.Applier
 	if nodeBridge != nil {
-		applier = nodeBridge
+		if nodeBridge.IsConsensusOrdered() {
+			applier = consensusAttestingApplier{engine: n.consensus}
+		} else {
+			applier = nodeBridge
+		}
 	}
 	watcher, err := newConfiguredBridgeWatcher(
 		applier,

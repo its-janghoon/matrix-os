@@ -48,6 +48,12 @@ var (
 	ErrZeroAmount = errors.New("bridge: amount must be positive")
 	// ErrEmptyID is returned when a burn event carries an empty id.
 	ErrEmptyID = errors.New("bridge: id must not be empty")
+	// ErrConsensusOrdered is returned when ProcessBurn is called on a bridge
+	// whose unlocks must come through the consensus engine.
+	ErrConsensusOrdered = errors.New("bridge: this bridge is consensus-ordered")
+	// ErrNotConsensusOrdered is returned when ApplyAttestedUnlock is called on a
+	// bridge that applies burns directly.
+	ErrNotConsensusOrdered = errors.New("bridge: this bridge is not consensus-ordered")
 )
 
 // LockEvent is the persisted record of a native MATRIX lock. It is the evidence
@@ -103,6 +109,18 @@ type Bridge struct {
 	store  *kv.Store
 	params AttestationParams
 
+	// consensusOrdered makes the unlock half arrive through the consensus engine
+	// instead of being applied by whichever node saw the burn.
+	//
+	// WHY IT IS A MODE AND NOT A CHOICE PER CALL. ProcessBurn takes b.mu and then
+	// the ledger critical section; ApplyAttestedUnlock is called from INSIDE the
+	// consensus apply path, which already holds the ledger critical section. Two
+	// orders over the same two locks is a deadlock waiting for the one run where
+	// both paths are live at once, so they are made mutually exclusive here
+	// rather than by comment: a consensus-ordered bridge refuses ProcessBurn
+	// outright, and a direct bridge refuses ApplyAttestedUnlock.
+	consensusOrdered bool
+
 	mu sync.Mutex // guards the read-modify-write of bridge counters/sequence
 }
 
@@ -113,6 +131,24 @@ type Bridge struct {
 func New(ledger *market.Ledger, store *kv.Store, params AttestationParams) *Bridge {
 	return &Bridge{ledger: ledger, store: store, params: params}
 }
+
+// NewConsensusOrdered builds a Bridge whose unlock half is applied by the
+// consensus engine once a quorum of validators has attested to the burn, rather
+// than by whichever node's watcher saw it first.
+//
+// This is what a validator SET needs. A per-node relayer moves escrowed
+// collateral on one node's ledger and nowhere else, so the nodes' escrow
+// balances and their 1:1 backing invariant diverge - the same divergence that
+// made FundAccount unsafe on a multi-validator network, except this one moves
+// real collateral. On such a bridge ProcessBurn is refused; unlocks arrive only
+// through ApplyAttestedUnlock.
+func NewConsensusOrdered(ledger *market.Ledger, store *kv.Store, params AttestationParams) *Bridge {
+	return &Bridge{ledger: ledger, store: store, params: params, consensusOrdered: true}
+}
+
+// IsConsensusOrdered reports whether this bridge expects its unlocks through
+// consensus.
+func (b *Bridge) IsConsensusOrdered() bool { return b.consensusOrdered }
 
 // Params returns the attestation parameters this bridge signs against.
 func (b *Bridge) Params() AttestationParams { return b.params }
@@ -272,48 +308,116 @@ func (b *Bridge) ProcessBurn(burn BurnEvent) error {
 		return ErrZeroAmount
 	}
 
+	if b.consensusOrdered {
+		return fmt.Errorf("%w: burn %s must be attested by a quorum and applied through the "+
+			"consensus engine, not by this node alone", ErrConsensusOrdered, burn.ID)
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	burnKey := burnPrefix + hex.EncodeToString(sha256Sum([]byte(burn.ID)))
 	return b.ledger.Atomically(func(ltx market.LedgerTx) error {
-		existing, err := b.store.Get([]byte(burnKey))
-		if err != nil {
-			return fmt.Errorf("bridge: read burn marker: %w", err)
-		}
-		if existing != nil {
-			return fmt.Errorf("%w: %s", ErrBurnAlreadyProcessed, burn.ID)
-		}
-
-		unlocked, err := b.readUint64(unlockedTTLKey)
-		if err != nil {
-			return err
-		}
-
-		// Release from escrow back to the user (fails if escrow lacks funds,
-		// which would indicate a reconciliation violation upstream).
-		if err := ltx.Transfer(EscrowAccount, burn.ToAccount, native); err != nil {
-			return fmt.Errorf("bridge: unlock %d to %q: %w", native, burn.ToAccount, err)
-		}
-
 		payload, err := json.Marshal(burn)
 		if err != nil {
 			return fmt.Errorf("bridge: marshal burn event: %w", err)
 		}
-
-		batch := b.store.NewBatch()
-		defer batch.Close()
-		if err := batch.Set([]byte(burnKey), payload, nil); err != nil {
-			return fmt.Errorf("bridge: stage burn marker: %w", err)
-		}
-		if err := batch.Set([]byte(unlockedTTLKey), encodeU64(unlocked+native), nil); err != nil {
-			return fmt.Errorf("bridge: stage unlocked total: %w", err)
-		}
-		if err := batch.Commit(pebble.Sync); err != nil {
-			return fmt.Errorf("bridge: commit burn: %w", err)
-		}
-		return nil
+		return b.releaseLocked(ltx, BurnIDHash(burn.ID), burn.ToAccount, native, payload, burn.ID)
 	})
+}
+
+// BurnIDHash is the stable, fixed-width identifier a burn is tracked by: the hex
+// sha256 of its "txHash:logIndex" id. The consensus-ordered path carries this
+// rather than the raw id because it goes in a transaction recipient, which needs
+// a bounded, delimiter-free encoding, and because two validators attesting the
+// same burn must produce byte-identical recipients or their attestations cannot
+// be counted as being about the same thing.
+func BurnIDHash(burnID string) string {
+	return hex.EncodeToString(sha256Sum([]byte(burnID)))
+}
+
+// ApplyAttestedUnlock releases escrowed native MATRIX for a burn that a quorum
+// of validators has attested to, using the caller's ledger transaction.
+//
+// It is called from the consensus apply path, which already holds the ledger
+// critical section - so it must NOT open its own, and must not take b.mu either
+// (see the consensusOrdered field doc for why mixing the two lock orders is a
+// deadlock). That path is single-threaded per node and a consensus-ordered
+// bridge refuses ProcessBurn, so nothing else is mutating these counters.
+//
+// It is idempotent on burnIDHash: an already-released burn returns
+// ErrBurnAlreadyProcessed and changes nothing, which is what lets every node
+// apply the same committed block and reach the same escrow balance even if the
+// attestation quorum is reached twice.
+func (b *Bridge) ApplyAttestedUnlock(ltx market.LedgerTx, burnIDHash, toAccount string, native uint64) error {
+	if !b.consensusOrdered {
+		return fmt.Errorf("%w: this bridge applies burns directly; use ProcessBurn", ErrNotConsensusOrdered)
+	}
+	if burnIDHash == "" {
+		return ErrEmptyID
+	}
+	if toAccount == "" {
+		return fmt.Errorf("bridge: burn recipient must not be empty: %w", token.ErrInvalidAccountID)
+	}
+	if native == 0 {
+		return ErrZeroAmount
+	}
+	payload, err := json.Marshal(attestedUnlock{
+		BurnIDHash:   burnIDHash,
+		ToAccount:    toAccount,
+		NativeAmount: native,
+	})
+	if err != nil {
+		return fmt.Errorf("bridge: marshal attested unlock: %w", err)
+	}
+	return b.releaseLocked(ltx, burnIDHash, toAccount, native, payload, burnIDHash)
+}
+
+// attestedUnlock is the processed-marker payload the consensus path writes. The
+// raw burn id is not available to it (the recipient carries the hash), so the
+// record holds exactly what consensus agreed on.
+type attestedUnlock struct {
+	BurnIDHash   string `json:"burn_id_hash"`
+	ToAccount    string `json:"to_account"`
+	NativeAmount uint64 `json:"native_amount"`
+}
+
+// releaseLocked is the one place escrow is released, shared by the direct and
+// the consensus-ordered paths so they cannot drift: the same replay marker, the
+// same escrow debit, the same unlocked-total increment, staged in one batch.
+// The caller supplies the ledger transaction and whatever serialization it holds.
+func (b *Bridge) releaseLocked(ltx market.LedgerTx, burnIDHash, toAccount string, native uint64, marker []byte, idForError string) error {
+	burnKey := burnPrefix + burnIDHash
+	existing, err := b.store.Get([]byte(burnKey))
+	if err != nil {
+		return fmt.Errorf("bridge: read burn marker: %w", err)
+	}
+	if existing != nil {
+		return fmt.Errorf("%w: %s", ErrBurnAlreadyProcessed, idForError)
+	}
+
+	unlocked, err := b.readUint64(unlockedTTLKey)
+	if err != nil {
+		return err
+	}
+
+	// Release from escrow back to the user (fails if escrow lacks funds, which
+	// would indicate a reconciliation violation upstream).
+	if err := ltx.Transfer(EscrowAccount, toAccount, native); err != nil {
+		return fmt.Errorf("bridge: unlock %d to %q: %w", native, toAccount, err)
+	}
+
+	batch := b.store.NewBatch()
+	defer batch.Close()
+	if err := batch.Set([]byte(burnKey), marker, nil); err != nil {
+		return fmt.Errorf("bridge: stage burn marker: %w", err)
+	}
+	if err := batch.Set([]byte(unlockedTTLKey), encodeU64(unlocked+native), nil); err != nil {
+		return fmt.Errorf("bridge: stage unlocked total: %w", err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("bridge: commit burn: %w", err)
+	}
+	return nil
 }
 
 func sha256Sum(b []byte) []byte {

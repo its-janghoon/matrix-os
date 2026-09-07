@@ -2,14 +2,17 @@ package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/big"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
+	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/marketapi"
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // This file wires the lock-and-mint bridge into matrixd as a node subsystem.
@@ -102,6 +105,20 @@ func (c BridgeConfig) bridgeEnabled() bool { return c.Contract != "" }
 // the contract address and chain id up front so a misconfigured deployment
 // fails at startup rather than producing attestations no contract will accept.
 func newConfiguredBridge(ledger *market.Ledger, store *kv.Store, cfg BridgeConfig) (*bridge.Bridge, error) {
+	return newConfiguredBridgeForSet(ledger, store, cfg, 1)
+}
+
+// newConfiguredBridgeForSet is newConfiguredBridge with the validator count,
+// which decides who is allowed to apply an unlock.
+//
+// On a single-node network the watcher applies the escrow release itself, which
+// is correct there: one ledger, one authority. On a validator SET that would
+// move collateral on one node's ledger and nowhere else, splitting the escrow
+// balance and the 1:1 backing invariant across nodes - the same divergence that
+// made FundAccount unsafe, except this one moves real collateral rather than
+// reward-pool allocation. So a set gets a consensus-ordered bridge: the watcher
+// attests, and escrow is released by the engine once a quorum agrees.
+func newConfiguredBridgeForSet(ledger *market.Ledger, store *kv.Store, cfg BridgeConfig, validators int) (*bridge.Bridge, error) {
 	if !cfg.bridgeEnabled() {
 		if cfg.Watch.Enabled {
 			return nil, fmt.Errorf("bridge: watch is enabled but bridge.contract is not set")
@@ -119,7 +136,59 @@ func newConfiguredBridge(ledger *market.Ledger, store *kv.Store, cfg BridgeConfi
 		ChainID:        big.NewInt(cfg.ChainID),
 		BridgeContract: contract,
 	}
+	if validators > 1 {
+		return bridge.NewConsensusOrdered(ledger, store, params), nil
+	}
 	return bridge.New(ledger, store, params), nil
+}
+
+// The consensus-ordered unlock is wired as TWO small adapters rather than one,
+// because one would be a dependency cycle: the engine needs something that can
+// release escrow, and the thing that submits attestations needs the engine.
+// Splitting them by direction breaks it - each half needs only what already
+// exists when it is built.
+
+// attestedUnlockTranslator is the consensus.BurnUnlocker half: the engine calls
+// it once a quorum has attested, from inside its own ledger critical section.
+// It needs only the bridge, so it can be handed to the engine at construction.
+//
+// Its whole job beyond delegation is translating the bridge's
+// already-processed sentinel into the one the consensus interface contract
+// names. That is what lets the engine tell a late attestation (ordinary, and a
+// no-op) from a real failure without importing the bridge or matching on error
+// text.
+type attestedUnlockTranslator struct {
+	bridge *bridge.Bridge
+}
+
+func (t attestedUnlockTranslator) ApplyAttestedUnlock(ltx market.LedgerTx, burnIDHash, toAccount string, native uint64) error {
+	err := t.bridge.ApplyAttestedUnlock(ltx, burnIDHash, toAccount, native)
+	if errors.Is(err, bridge.ErrBurnAlreadyProcessed) {
+		return fmt.Errorf("%w: %s", consensus.ErrBurnAlreadyReleased, burnIDHash)
+	}
+	return err
+}
+
+// consensusAttestingApplier is the bridge.Applier half, given to the watcher on
+// a validator set: instead of releasing escrow, it submits this node's
+// attestation that the burn happened. Escrow moves when a quorum of the set has
+// attested to the same burn, account and amount - never on this node's word
+// alone.
+type consensusAttestingApplier struct {
+	engine *consensus.Engine
+}
+
+func (a consensusAttestingApplier) ProcessBurn(burn bridge.BurnEvent) error {
+	native, err := token.ERC20ToNative(burn.ERC20Amount)
+	if err != nil {
+		return err
+	}
+	_, err = a.engine.SubmitBurnAttestation(consensus.BurnUnlock{
+		BurnIDHash:   bridge.BurnIDHash(burn.ID),
+		ToAccount:    burn.ToAccount,
+		NativeAmount: native,
+	})
+	return err
 }
 
 // newConfiguredBridgeWatcher builds the burn->unlock Watcher for the configured

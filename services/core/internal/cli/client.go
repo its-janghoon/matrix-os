@@ -169,4 +169,13 @@ func mapErr(addr string, err error) error {
 }
 
 // defaultTimeout is the fallback per-RPC timeout when --timeout is unset.
-const defaultTimeout = 10 * time.Second
+//
+// It is 60s, not 10s. A read finishes in milliseconds either way; what this
+// number really governs is the commands that WAIT for consensus to commit
+// something - a signed transfer, a settled job. 10s was shorter than a commit
+// takes on a real network with a round timeout and leader rotation, so those
+// commands routinely reported a transfer that did commit as
+// "DeadlineExceeded: context deadline exceeded". That reads as a failure, and
+// the natural response of running it again used to sign a second transfer at
+// the same nonce and pay twice.
+const defaultTimeout = 60 * time.Second

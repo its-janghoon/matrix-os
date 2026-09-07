@@ -79,6 +79,10 @@ type Config struct {
 	Transport Transport
 	// Validators is the fixed validator set (required).
 	Validators *ValidatorSet
+	// BurnUnlocker releases bridge escrow for a burn a quorum has attested to.
+	// Optional: nil means no bridge, and attestations are then tallied but
+	// release nothing, so a node without a bridge still agrees with its peers.
+	BurnUnlocker BurnUnlocker
 	// Chain is the committed-block ledger (required).
 	Chain *BlockChain
 	// Ledger is the market ledger committed transactions are applied to
@@ -319,6 +323,21 @@ type Engine struct {
 	// node computes the identical set.
 	committedNonces map[string]struct{}
 	mempoolNonces   map[string]struct{}
+	// burnAttestations tallies which validators have attested to each burn
+	// unlock, keyed by the reserved recipient (which IS the burn's identity) and
+	// then by attesting validator id. Escrow is released on the block where the
+	// attesting voting power crosses quorum.
+	//
+	// Rehydrated from the committed chain at startup, exactly as committedTxs and
+	// committedNonces are, so the tally is a function of committed state and
+	// every node - including one with no Ethereum endpoint, which cannot verify a
+	// burn at all - reaches the same release at the same height.
+	burnAttestations map[string]map[string]struct{}
+	// burnUnlocker releases escrow. Nil when no bridge is configured, in which
+	// case attestations are counted and recorded but release nothing, which is
+	// the honest behaviour for a node that has no bridge: the tally still agrees
+	// with its peers.
+	burnUnlocker BurnUnlocker
 	// appliedTxs records, per committed transaction dedup key, whether the
 	// transfer actually MOVED credits (true) or was deterministically skipped at
 	// apply time because the sender could not afford it (false). It lets a caller
@@ -395,6 +414,13 @@ type Engine struct {
 	// lastHeadAnnounce is when this node last announced its committed height.
 	lastHeadAnnounce time.Time
 	// lastSetChangeSubmit rate-limits re-offering the set changes this operator
+	// burnAttestNonce keeps each burn attestation this node submits a distinct
+	// transaction. It is a counter of its own for the same reason the others are:
+	// nothing coordinates these with the account's real transfer nonces, so they
+	// are exempt from the uniqueness rule (see nonceKey) and only have to differ
+	// from each other.
+	burnAttestNonce uint64
+
 	// approved, and setChangeNonce keeps each offer a distinct transaction so a
 	// retry is not silently deduped against the offer that was voted down.
 	lastSetChangeSubmit time.Time
@@ -472,6 +498,8 @@ func New(cfg Config) (*Engine, error) {
 		mempoolSet:         make(map[string]struct{}),
 		committedNonces:    make(map[string]struct{}),
 		mempoolNonces:      make(map[string]struct{}),
+		burnAttestations:   make(map[string]map[string]struct{}),
+		burnUnlocker:       cfg.BurnUnlocker,
 		committedTxs:       make(map[string]struct{}),
 		appliedTxs:         make(map[string]bool),
 		settleWaiters:      make(map[string][]chan struct{}),
@@ -617,6 +645,9 @@ func (e *Engine) Start(ctx context.Context) error {
 			if nk, checked := nonceKey(&b.Txs[i]); checked {
 				e.committedNonces[nk] = struct{}{}
 			}
+			if IsBurnUnlockRecipient(b.Txs[i].To) {
+				e.recordBurnAttestationLocked(b.Txs[i].To, b.Txs[i].SenderID())
+			}
 		}
 		e.mu.Unlock()
 	}
@@ -742,7 +773,7 @@ func mempoolKey(tx *token.Transaction) string {
 // operations; each already has its own validation (verifyStakeTxLocked,
 // verifySetChangeLocked, verifyProviderChangeLocked) and its own dedup.
 func nonceKey(tx *token.Transaction) (string, bool) {
-	if IsStakeRecipient(tx.To) || IsSetChangeRecipient(tx.To) || IsProviderChangeRecipient(tx.To) {
+	if IsReservedRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
@@ -1256,6 +1287,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		}
 		if IsProviderChangeRecipient(b.Txs[i].To) {
 			if err := e.verifyProviderChangeLocked(&b.Txs[i]); err != nil {
+				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+			}
+		}
+		if IsBurnUnlockRecipient(b.Txs[i].To) {
+			if err := e.verifyBurnUnlockLocked(&b.Txs[i]); err != nil {
 				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
 			}
 		}
@@ -2471,6 +2507,22 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = true
 				continue
 			}
+			if IsBurnUnlockRecipient(tx.To) {
+				// An attestation carries no value either. Tallying it may cross
+				// quorum, in which case escrow is released HERE, inside the same
+				// critical section that moves this block's transfers: the release
+				// and the block land together or not at all.
+				// applyBurnAttestation logs what it releases. The amount is
+				// deliberately NOT fed into feesTaken or credited: escrow is
+				// collateral going back to its owner, not value the protocol
+				// created or charged, and crediting it would pay the provider
+				// emission for someone withdrawing their own coins.
+				if err := e.applyBurnAttestation(ltx, tx); err != nil {
+					return err
+				}
+				applied[mempoolKey(tx)] = true
+				continue
+			}
 			sender := tx.SenderID()
 			bal, err := ltx.Balance(sender)
 			if err != nil {
@@ -3246,18 +3298,31 @@ type CommittedTransfer struct {
 	Timestamp int64
 }
 
-// isHistoryTransfer reports whether a committed transaction is an ordinary
-// value transfer that belongs in the transaction history, as opposed to a
-// reserved-recipient consensus operation (a bond, a withdrawal, or a validator
-// set change) that carries protocol state rather than a user-visible payment.
-// It is the same recipient-namespace test the apply path uses to tell a
-// transfer from a stake/set-change operation, so the history shows exactly the
-// transfers that moved (or were skipped trying to move) native MATRIX.
+// IsReservedRecipient reports whether a recipient names a consensus operation
+// rather than an account: a bond or withdrawal, a validator set change, a
+// provider registry change, or a burn unlock attestation.
+//
+// It is ONE list on purpose. This test is needed in several places that must all
+// agree - the transaction history, the sender-nonce rule, the apply path - and
+// when each site kept its own list they drifted: the history's list named only
+// stake and set changes, so provider registry changes leaked into
+// `matrix tx list` as phantom zero-value payments to an id nobody holds a key
+// for, and a burn attestation would have done the same. Adding a namespace here
+// now updates every site at once.
+func IsReservedRecipient(to string) bool {
+	return IsStakeRecipient(to) ||
+		IsSetChangeRecipient(to) ||
+		IsProviderChangeRecipient(to) ||
+		IsBurnUnlockRecipient(to)
+}
+
+// isHistoryTransfer reports whether a committed transaction is an ordinary value
+// transfer that belongs in the transaction history, as opposed to a
+// reserved-recipient consensus operation that carries protocol state rather than
+// a user-visible payment. So the history shows exactly the transfers that moved
+// (or were skipped trying to move) native MATRIX.
 func isHistoryTransfer(tx *token.Transaction) bool {
-	if IsStakeRecipient(tx.To) || IsSetChangeRecipient(tx.To) {
-		return false
-	}
-	return true
+	return !IsReservedRecipient(tx.To)
 }
 
 // CommittedTransfers returns value transfers from the committed block chain in
