@@ -1,6 +1,7 @@
 # Handoff
 
-State of `main` as of `cb4db0c`. Everything below was run, not inferred; where
+State of `main` as of `cb4db0c`, plus the product-surface work on
+`claude/handoff-md-checklist-s0ptw1` through `f3511c9`. Everything below was run, not inferred; where
 something is unverified it says so.
 
 ## Build and check
@@ -200,6 +201,13 @@ acts:
   registering a provider needs an operator quorum. Until then the emission is
   armed and pays nothing.
 - **Agent metering price is 0** (unmetered) until set.
+- **The HTTP rate limit is armed at 600/minute, burst 120** in a generated
+  config (`connect.rate_limit_per_minute` / `rate_limit_burst`). Raise it for an
+  endpoint serving many callers; zero turns it off.
+- **An API key spends from no account until one is set.** `account` under
+  `security.api_keys` is what makes a key usable on `/v1/chat/completions`, and
+  the node must hold that account's signing key to settle for it. Leaving it
+  empty is the safe default and means that key cannot buy inference.
 - **Permissioned vs. open launch is a config switch** - currently permissioned,
   stake off. Turning on stake means choosing `min_bond` / `unbonding_period`.
 
@@ -208,90 +216,89 @@ issuing entity, and the audit budget. A real mainnet/testnet bridge deploy still
 needs the operator's funded key, an RPC endpoint, and an external audit; the
 contracts are undeployed by design (45 hardhat tests pass locally).
 
-## Pending: the product surface
+## The product surface: what landed
 
-Consensus and the token are done enough to build on. What is missing is the three
-ways a person actually reaches the network: a provider selling compute, a
-developer calling an API, and an end user in a dApp. Every item below was checked
-against `main`, not remembered.
+All four items that were pending here are done, on
+`claude/handoff-md-checklist-s0ptw1`. Each was verified against a running node
+and, where a protocol was involved, against a real third-party client.
 
-### a. A provider cannot join without editing Go
+**a. A provider joins from config** (`c8b7def`). `market.Provider.Models`
+(normalized: trimmed, lowercased, de-duplicated, sorted) plus
+`market.ProvidersForModel`, which returns providers advertising a model that
+still have capacity, cheapest first with ties on ID. And `inference.backends`, a
+config list (id, kind, base_url, api_key_env, models, capacity, price_per_unit)
+that registers each backend twice at start: in the inference registry as what
+fulfills the job, and on the order book as a provider that can reserve capacity
+and be paid. A `model` filter on ListProviders, `--models` on `matrix provider
+register`, and `models` on the SDK's Provider. The model list is signed with the
+rest of a ProviderAnnouncement, entry count length-prefixed alongside the
+entries.
 
-The market side works: `RegisterProvider` (RPC, SDK, and `matrix provider
-register --id --capacity --price`) takes a provider with a capacity and a unit
-price. Two things block a real one.
+**b. The OpenAI protocol is served** (`59fb383`). `internal/openaiapi` serves
+`POST /v1/chat/completions` and `GET /v1/models` on the node's existing HTTP
+endpoint, sharing its listener, origin list and key policy. The three things the
+protocol does not carry: who pays comes from `admin.APIKey.Account` (a key with
+no account is refused rather than having its buyer guessed), which provider
+comes from the model, and the reservation is a generous estimate because the
+settled charge is clamped to it. `inference.InferenceJob.Usage` now retains the
+reported token counts alongside `Units` - work done vs. what was paid - and is
+on the inference proto too. Streaming is refused, not faked. Verified with the
+real `openai` Python SDK: `models.list()`, a completion that billed and settled
+(13 tokens x price 2 = 26 base units moved), and an unknown model surfacing as a
+typed `NotFoundError`.
 
-- **An inference backend can only be registered in-process.** `node.Config`'s
-  `inference:` block has exactly two fields, `addr` and `echo_provider`, and its
-  own comment says a real deployment "must be registered out of band via
-  `GetInference().Registry()`". Someone with a GPU box or spare API credits has
-  to write Go and rebuild the node.
-- **A provider never declares which models it serves.** `market.Provider` is
-  `ID`, `Capacity`, `PricePerUnit`, `Available`. `InferenceJob.Model` is echoed
-  back off the backend's response; it is not routing data. There is nothing to
-  route a model request on.
+**c. A buyer can pay with their own key** (`f3511c9`). `RunInferenceJob` /
+`SettleInferenceJob`. Pre-signing cannot work - `token.Transaction` signs over an
+exact amount and the price of an inference is not knowable until the work is
+done - so the primitive is sign-the-invoice: run the model, return the exact
+transfer to sign, withhold the completion until it is signed. Withholding IS the
+enforcement; the provider's exposure is one job per defecting buyer, bounded by
+the affordability check at reservation time. Every signable field must match the
+invoice, because a transfer of one base unit to an account the buyer controls
+verifies perfectly. `ExpireUnpaid` releases the reservation of a job nobody
+signs for, swept every 30s. SDK: `paymentSigningBytes` produces the canonical
+bytes and leaves signing to the caller's wallet, held to the node's encoding by
+a golden vector. Verified on a node holding no key for the buyer, including the
+contrast: the hosted path fails "no signing account" for that same buyer.
 
-Needs: an `inference.backends` config list (id, kind, base_url, api_key_env,
-models, price_per_unit) registered through the existing
-`inference.Registry.RegisterFromConfig`, and a `models` field on `Provider` (a
-proto change) set by `RegisterProvider`.
+**d. The HTTP endpoint is rate limited** (`0d93243`). A token bucket per caller,
+keyed on the credential where one is presented and the remote address otherwise
+(the credential is fingerprinted, not stored). Idle buckets are evicted. A
+generated config arms 600/minute with a burst of 120; zero disables it. CORS is
+outermost so a 429 still carries headers a browser can read, the refusal uses
+the caller's own envelope, and preflights are not counted. It also fixed a CORS
+bug (b) introduced: `Access-Control-Allow-Methods` was POST-only, so a browser
+preflight for the GET `/v1/models` route failed.
 
-Nothing else about a provider is missing. Earnings already work: billing is
-token-based (`UnitsFor(usage)` over the backend's reported `prompt_tokens` /
-`completion_tokens`), it settles buyer -> provider through consensus, and the
-emission is armed. Cashing out is the bridge, which is built and undeployed.
+**A correction to what this file said before.** It claimed `connectapi`'s
+`AllowedOrigins` "default is `"*"`". That was a misreading of the package's doc
+comment: `matrixd -init` writes two localhost dev origins, and an empty list
+means no browser may call at all. The origin policy was already deny-by-default;
+only the missing rate limit was real.
 
-### b. Nothing serves an OpenAI-compatible route
+## Still pending on the product surface
 
-`OpenAIBackend` *calls* `/v1/chat/completions`; nothing *serves* it. A developer
-cannot reach us by changing `base_url` in the openai SDK, which is the one thing
-that makes an inference API adoptable. Today they must name a provider id and
-make two calls (`SubmitInferenceJob`, then `FulfillInferenceJob`).
+**A `matrix inference` flag for the client-signed path.** The CLI still drives
+`SubmitInferenceJob` + `FulfillInferenceJob`, which is fine there - it holds the
+wallet key locally, so the hosted path is the honest one for it. A
+`--client-signed` flag would mostly exercise the new path by hand.
 
-Needs: a `POST /v1/chat/completions` handler mapping the request onto
-submit+fulfill and the response onto the OpenAI shape; model -> provider
-selection (which needs (a)); and streaming. `connectapi` rejects streaming
-methods by design and the protos declare none, so streaming is its own piece of
-work.
+**Streaming.** `connectapi` rejects streaming methods by design and the protos
+declare none, so token-by-token output is its own piece of work: a server-stream
+RPC plus Connect streaming framing, and on the OpenAI route the SSE `data:`
+frames a client expects. Right now `"stream": true` is refused.
 
-Latency is already handled: `INFERENCE_JOB_STATUS_SETTLING` exists so the
-completion can return before the settlement commits.
+**A browser wallet and a top-up relayer.** `token.Account` is a single ed25519
+keypair, so generating one in the browser and sealing it with a passkey is
+natural, and (c) means the node no longer needs that key. Nothing does it yet. A
+top-up flow also needs a relayer turning USDC into native MATRIX (DEX buy, then
+`WrappedMatrix.burn`) so the word "wMATRIX" never reaches a user.
 
-### c. The node signs for the user, so wallet login means nothing
-
-`node.signingAccts` holds buyer signing keys, and the compute, inference and
-agent-metering coordinators all sign on the buyer's behalf; `node.go` states the
-intent plainly ("custody is one decision for the whole node"). On a node the user
-runs themselves that is right. On a public endpoint it makes the operator a
-custodian, and in a dApp it means the user's wallet is not what authorises the
-spend.
-
-`SubmitSignedTransfer` is now the pattern to copy in the other direction: the
-client signs, the node verifies and relays into consensus, and
-`node/transfer_settlement.go` says it "deliberately mirrors the compute/inference
-settlement model". The inference path should mirror it back - a buyer-signed
-payment authorisation submitted with the job.
-
-A browser needs one more thing: `connectapi` requires a valid API key on *every*
-method, reads included, and a browser cannot hold a secret. Reads should be open
-and writes signature-authorised.
-
-### d. No browser wallet, and no rate limiting anywhere
-
-`token.Account` is a single ed25519 keypair, so generating one in the browser and
-sealing it with a passkey is natural. Nothing does it yet. A top-up flow also
-needs a relayer that turns USDC into native MATRIX (DEX buy, then
-`WrappedMatrix.burn`) so the words "wMATRIX" never reach the user.
-
-Searching `services/core` for `rate.Limiter` or `RateLimit` finds nothing.
-`maxRequestBytes` (4 MiB) is the only bound, and `connectapi`'s `AllowedOrigins`
-default is `"*"`, which its own comment calls "the wrong one for a public
-deployment". Both need fixing before any endpoint is public.
-
-### Order
-
-`a -> b -> c -> d`. (a) first because without providers there is nothing for (b)
-or (c) to sell, and it is a proto field plus a config parser.
+**Open reads on the public endpoint.** `connectapi` still requires a valid key on
+every method, reads included. A browser cannot hold a secret, so a public RPC
+wants reads open and writes signature-authorised. Deliberately not changed here:
+opening reads by default would widen what an unauthenticated caller can see on
+every existing node, so it should arrive as config an operator turns on.
 
 ## Product decisions made this session
 
