@@ -79,6 +79,15 @@ message Job {
 // quorum), so the transaction history is the ordered sequence of committed
 // transfers - the same on every node - rather than a per-node hash chain.
 message Transaction {
+    // Retired fields from the pre-consensus per-node token.Chain representation.
+    // Field numbers 1 and 6 were deliberately re-purposed in lockstep (height ->
+    // index, the hash bytes -> block_height) when value transfers moved to
+    // consensus; every in-tree consumer was migrated together. Field 8 (the old
+    // timestamp slot, now field 7) is retired outright. The old names are
+    // reserved so they can never be accidentally re-added at a different number,
+    // which would let a stale client silently mis-map a field.
+    reserved 8;
+    reserved "height", "hash", "prev_hash";
     // Stable zero-based position of this transfer in the consensus transfer
     // history (block order, then transaction order within the block). It only
     // grows and is identical on every node. Used as the index for
@@ -226,6 +235,10 @@ message GetTransactionResponse {
 // ListTransactionsRequest reads committed transfers from the consensus
 // transaction history in order.
 message ListTransactionsRequest {
+    // start_height was the pre-consensus token.Chain height cursor; field 1 is
+    // re-purposed as start_index. The old name is reserved against accidental
+    // re-add at a different number.
+    reserved "start_height";
     // Zero-based index to start from (inclusive).
     uint64 start_index = 1;
     // Maximum number of transfers to return. Zero means no explicit limit (the
@@ -235,6 +248,9 @@ message ListTransactionsRequest {
 
 // ListTransactionsResponse returns committed transfers and the total count.
 message ListTransactionsResponse {
+    // chain_length was the pre-consensus token.Chain length; field 2 is
+    // re-purposed as total. The old name is reserved against accidental re-add.
+    reserved "chain_length";
     // Transfers in ascending index (commit) order.
     repeated Transaction transactions = 1;
     // Total number of committed transfers in the consensus history.
