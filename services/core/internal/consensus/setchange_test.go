@@ -4,10 +4,13 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/libp2p/go-libp2p/core/peer"
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -983,4 +986,115 @@ func TestASetChangeReachesItsEpochBoundaryOnAnIdleChain(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 		return nodes[0].engine.Height() == before
 	})
+}
+
+// --- ejecting a validator caught equivocating ---------------------------
+
+// TestProvenEquivocationEjectsTheOffender is what the evidence store was
+// missing a use for: proof of a double vote used to be recorded and printed,
+// and nothing could act on it because the set was fixed at startup. Now the
+// network removes the offender itself.
+func TestProvenEquivocationEjectsTheOffender(t *testing.T) {
+	nodes, stop := setChangeCluster(t, 4, 2)
+	defer stop()
+
+	offender := nodes[1]
+	offenderID := offender.acct.AccountID()
+
+	// Two votes from the offender's key for different blocks at one height,
+	// round and phase. No honest validator produces this pair.
+	a := buildVote(t, offender.acct, 0, 0, hashOf(0xE1))
+	b := buildVote(t, offender.acct, 0, 0, hashOf(0xE2))
+	relay := nodes[0].bus.endpoint(peer.ID("offender-relay"))
+	for _, v := range []Vote{a, b} {
+		data, err := json.Marshal(&v)
+		if err != nil {
+			t.Fatalf("marshal vote: %v", err)
+		}
+		if err := relay.Publish(context.Background(), TopicVote, data); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	waitFor(t, 20*time.Second, "the equivocating validator to be ejected everywhere", func() bool {
+		for _, nd := range nodes {
+			if nd.engine.vset().Contains(offenderID) {
+				return false
+			}
+		}
+		return true
+	})
+
+	for i, nd := range nodes {
+		vs := nd.engine.vset()
+		if vs.Len() != 3 {
+			t.Fatalf("node %d has %d validators, want 3 after the ejection", i, vs.Len())
+		}
+		// The removal is chain state, so a restart must not bring the offender
+		// back.
+		saved, _, err := nd.sets.LoadActive()
+		if err != nil {
+			t.Fatalf("node %d LoadActive: %v", i, err)
+		}
+		if saved == nil || saved.Contains(offenderID) {
+			t.Fatalf("node %d did not persist the ejection", i)
+		}
+	}
+
+	// The remaining three keep committing: quorum for a set of three is three,
+	// and all three are honest and present.
+	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
+	defer stopTraffic()
+	before := nodes[0].engine.Height()
+	waitFor(t, 15*time.Second, "the chain to keep committing without the offender", func() bool {
+		return nodes[0].engine.Height() > before
+	})
+}
+
+// And an operator who would rather investigate than have the network act can
+// turn it off.
+func TestEjectionCanBeTurnedOff(t *testing.T) {
+	off := false
+	nodes, stop := newCluster(t, 4, func(c *Config) {
+		c.ProposeInterval = 4 * time.Millisecond
+		c.RoundTimeout = 40 * time.Millisecond
+		c.EpochLength = 2
+		c.EjectEquivocators = &off
+	})
+	defer stop()
+
+	offender := nodes[1]
+	offenderID := offender.acct.AccountID()
+
+	a := buildVote(t, offender.acct, 0, 0, hashOf(0xE3))
+	b := buildVote(t, offender.acct, 0, 0, hashOf(0xE4))
+	relay := nodes[0].bus.endpoint(peer.ID("offender-relay-off"))
+	for _, v := range []Vote{a, b} {
+		data, err := json.Marshal(&v)
+		if err != nil {
+			t.Fatalf("marshal vote: %v", err)
+		}
+		if err := relay.Publish(context.Background(), TopicVote, data); err != nil {
+			t.Fatalf("publish: %v", err)
+		}
+	}
+
+	// The offence is still recorded - turning ejection off must not turn
+	// detection off, or an operator would have nothing to investigate.
+	waitFor(t, 10*time.Second, "the offence to be recorded", func() bool {
+		records, err := nodes[0].evidence.ByValidator(offenderID)
+		return err == nil && len(records) > 0
+	})
+
+	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
+	defer stopTraffic()
+	waitFor(t, 15*time.Second, "the chain to keep committing", func() bool {
+		return nodes[0].engine.Height() >= 6
+	})
+
+	for i, nd := range nodes {
+		if !nd.engine.vset().Contains(offenderID) {
+			t.Fatalf("node %d ejected the offender with eject_equivocators off", i)
+		}
+	}
 }

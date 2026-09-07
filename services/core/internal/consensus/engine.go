@@ -121,9 +121,23 @@ type Config struct {
 	// safe default: without it, one validator could propose removing all the
 	// others and the rest would vote for it without ever looking.
 	ApprovedSetChanges []string
+	// EjectEquivocators, when nil or true, has this node vote to REMOVE a
+	// validator it holds proof equivocated, and offer that removal itself.
+	//
+	// Unlike an admission this needs no entry in ApprovedSetChanges, and that is
+	// not a shortcut: equivocation evidence is self-proving. It is two votes for
+	// different blocks at one height, round and phase, both signed by the
+	// offender's own key, and every node verifies them itself rather than taking
+	// a peer's word. An honest validator cannot produce such a pair, so there is
+	// no operator judgement left to make - which is exactly what an admission,
+	// where the judgement is the whole point, does not have.
+	//
+	// Set it false on a network where an operator would rather investigate an
+	// offence than have the network eject the offender on its own.
+	EjectEquivocators *bool
 	// OnEquivocation, when non-nil, is called once per newly-discovered offence.
-	// It is how an operator finds out; the engine itself takes no action, because
-	// removing a validator is not yet something the protocol can do.
+	// It is how an operator finds out, in addition to whatever the network does
+	// about it.
 	OnEquivocation func(eq *Equivocation)
 }
 
@@ -164,6 +178,9 @@ type Engine struct {
 	// happened to propose exactly the same one, and the first operator to approve
 	// an ejection would be waiting on the very validator they are ejecting.
 	approvedSpecs []SetChange
+	// ejectEquivocators is whether proven equivocation is grounds for this node
+	// to vote for, and offer, the offender's removal.
+	ejectEquivocators bool
 
 	mu sync.Mutex
 	// mempool holds submitted-but-not-yet-committed transactions in submission
@@ -304,6 +321,7 @@ func New(cfg Config) (*Engine, error) {
 		evidence:             cfg.Evidence,
 		onEquivocation:       cfg.OnEquivocation,
 		sets:                 cfg.Sets,
+		ejectEquivocators:    cfg.EjectEquivocators == nil || *cfg.EjectEquivocators,
 		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
 		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
@@ -327,6 +345,18 @@ func New(cfg Config) (*Engine, error) {
 		}
 		e.approvedChanges[strings.ToLower(spec.String())] = struct{}{}
 		e.approvedSpecs = append(e.approvedSpecs, spec)
+	}
+	// Evidence already on disk is still evidence. A node that recorded an
+	// offence, was restarted before the network ejected the offender, and then
+	// forgot about it would silently go back to voting against the removal.
+	if e.ejectEquivocators && cfg.Evidence != nil {
+		records, err := cfg.Evidence.All()
+		if err != nil {
+			return nil, fmt.Errorf("consensus: read stored equivocation evidence: %w", err)
+		}
+		for i := range records {
+			e.approveRemovalLocked(records[i].VoterID)
+		}
 	}
 	e.validatorSet.Store(cfg.Validators)
 	if cfg.Self != nil {
@@ -1676,11 +1706,16 @@ func (e *Engine) maybeAnnounceHead(ctx context.Context) {
 // reportEquivocation verifies, records and (when it is new to us) gossips proof
 // that a validator voted two ways.
 //
-// The engine deliberately does NOT punish. Removing a validator is not
-// something this protocol can do yet - the set is fixed at startup - so the
-// honest thing is to make the offence known and let an operator act, rather
-// than to invent an enforcement path that only some nodes would apply and
-// thereby split the network.
+// It also acts on it, when EjectEquivocators is on: the offender's removal
+// becomes a change this node votes for and offers. That is sound only because
+// the evidence proves itself - both votes carry the offender's own signature,
+// and this node checks them rather than trusting whoever sent them - so every
+// honest node reaches the same conclusion from the same proof instead of some
+// of them applying an enforcement rule the others do not.
+//
+// The removal still goes through consensus and still waits for an epoch
+// boundary. Nothing here changes the set directly: a node that ejected a
+// validator on its own authority would fork away from its peers.
 func (e *Engine) reportEquivocation(ctx context.Context, eq *Equivocation, gossip bool) {
 	if err := eq.Verify(e.vset()); err != nil {
 		// Either not really equivocation, or not from a validator. Either way it
@@ -1716,6 +1751,20 @@ func (e *Engine) reportEquivocation(ctx context.Context, eq *Equivocation, gossi
 
 	fmt.Printf("consensus: EQUIVOCATION by validator %s at height %d round %d (%s): "+
 		"two signed votes for different blocks\n", eq.VoterID, eq.Height, eq.Round, eq.Type)
+
+	// Act on it. The set is no longer fixed at startup, so the offence has a
+	// remedy the protocol can carry: this node approves the offender's removal
+	// and starts offering it, and every other node holding the same evidence
+	// does too. A quorum of them commits the removal, and it takes effect at the
+	// next epoch boundary like any other set change. The offender's own vote
+	// against it is one vote.
+	if e.ejectEquivocators {
+		e.mu.Lock()
+		e.approveRemovalLocked(eq.VoterID)
+		e.mu.Unlock()
+		fmt.Printf("consensus: voting to eject %s; the removal takes effect at an epoch boundary "+
+			"once a quorum of validators holding the same evidence has committed it\n", eq.VoterID)
+	}
 
 	if e.onEquivocation != nil {
 		e.onEquivocation(eq)
@@ -2287,6 +2336,20 @@ func (e *Engine) maybeProposeApprovedChanges() {
 // empty blocks.
 func (e *Engine) mustAdvanceToEpochBoundaryLocked() bool {
 	return len(e.pendingChanges) > 0
+}
+
+// approveRemovalLocked makes the ejection of validatorID a change this node
+// will vote for and offer, exactly as if the operator had listed it under
+// consensus.approved_changes. It is idempotent. Callers must hold e.mu - except
+// in New, before any goroutine exists.
+func (e *Engine) approveRemovalLocked(validatorID string) {
+	change := SetChange{Kind: SetChangeRemove, ValidatorID: validatorID}
+	key := strings.ToLower(change.String())
+	if _, already := e.approvedChanges[key]; already {
+		return
+	}
+	e.approvedChanges[key] = struct{}{}
+	e.approvedSpecs = append(e.approvedSpecs, change)
 }
 
 // PendingSetChanges returns the changes waiting for the next epoch boundary.

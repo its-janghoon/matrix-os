@@ -133,6 +133,19 @@ type Config struct {
 		// Leaving this empty means this node approves nothing, which is the safe
 		// default for a running network.
 		ApprovedChanges []string `yaml:"approved_changes"`
+		// EjectEquivocators, unset or true, has this node vote to remove a
+		// validator it holds proof equivocated - two votes for different blocks at
+		// one height, round and phase, both signed by that validator's own key -
+		// and offer that removal itself. No entry in approved_changes is needed,
+		// because there is no judgement left to make: the evidence proves itself
+		// and every node checks it rather than trusting a peer, so honest nodes all
+		// reach the same conclusion. An honest validator cannot produce such a
+		// pair.
+		//
+		// Set it false on a network where an operator would rather investigate an
+		// offence than have the network eject the offender. Detection, recording
+		// and gossip are unaffected either way.
+		EjectEquivocators *bool `yaml:"eject_equivocators"`
 	} `yaml:"consensus"`
 	Genesis GenesisConfig `yaml:"genesis"`
 }
@@ -290,6 +303,10 @@ func Initialize(configPath string) error {
 	// never agreed to.
 	config.Consensus.EpochLength = consensus.DefaultEpochLength
 	config.Consensus.ApprovedChanges = nil
+	// Spelled out rather than left null so the knob is visible in the file an
+	// operator reads. True is the default either way.
+	ejectEquivocators := true
+	config.Consensus.EjectEquivocators = &ejectEquivocators
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -537,11 +554,12 @@ func (n *Node) Start() error {
 	}
 	// Equivocation evidence: a validator that votes two ways in one round is the
 	// one Byzantine act this protocol can prove, and until this store existed the
-	// proof was discarded. The engine records and gossips it; ejecting the
-	// offender is still an operator decision, because a node that removed a
-	// validator on its own authority would fork away from its peers - but the
-	// removal itself now goes through the chain (see Sets below), so the network
-	// can eject a validator without a coordinated restart.
+	// proof was discarded. The engine records it, gossips it, and - unless
+	// consensus.eject_equivocators is false - votes to remove the offender
+	// through the chain, which takes effect at the next epoch boundary once a
+	// quorum of validators holding the same evidence has committed it. No node
+	// changes the set on its own authority; that would fork it away from its
+	// peers.
 	n.evidence = consensus.NewEvidenceStore(n.kvStore)
 	consensusEngine, err := consensus.New(consensus.Config{
 		Transport:  n.transport,
@@ -558,11 +576,10 @@ func (n *Node) Start() error {
 		Sets:               consensus.NewSetStore(n.kvStore),
 		EpochLength:        n.config.Consensus.EpochLength,
 		ApprovedSetChanges: n.config.Consensus.ApprovedChanges,
+		EjectEquivocators:  n.config.Consensus.EjectEquivocators,
 		OnEquivocation: func(eq *consensus.Equivocation) {
-			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored. "+
-				"Eject it by having a quorum of operators list \"remove:%s\" under consensus.approved_changes "+
-				"and submitting the change (matrix validator remove --id %s).\n",
-				eq.VoterID, eq.Height, eq.Round, eq.VoterID, eq.VoterID)
+			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+
+				"consensus/evidence/ in this node's database.\n", eq.VoterID, eq.Height, eq.Round)
 		},
 	})
 	if err != nil {
