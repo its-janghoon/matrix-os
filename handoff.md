@@ -695,6 +695,66 @@ Each of these cost real time this session.
   inference provider that could not take a job, the stale-binary confusion, and
   the `/download` rate limit were all invisible to a green test suite.
 
+## Adversarial pass: what an attacker could take
+
+Five findings, all fixed, all with a test that fails without the fix. Each was
+reachable by an account with no privileges.
+
+**1. A permanent chain halt from one signed transaction.** Critical.
+`Engine.Submit` accepted anything with a valid signature and a non-empty
+recipient; block validation is far stricter. Anything in that gap reached the
+mempool and could never be in a valid block, and the mempool only drops what
+COMMITS - so one transfer of value to `market/provider/add/anything` made every
+leader propose a block every validator refused, forever. The root cause was a
+reserved-namespace list kept separately at four sites; block building already
+had this guard, for two namespaces only, with a comment that literally said
+"rather than poison a proposal with it". `verifyReservedRecipientLocked` is now
+the one list, used by block validation, block building and `Submit`.
+
+**2. A buyer could make a provider work for one unit's pay.** High.
+`unitsEstimate` is the client's own number and is what the affordability check
+runs against; `FulfillJob` then clamps the charge DOWN to it. Correct as buyer
+protection, unguarded on the other side: a 90,000-byte prompt against a 1-unit
+reservation, from an account holding the price of one unit. `MinUnitsFor` bounds
+the work against the reservation from what is knowable before running.
+
+**3. An account with no balance could exhaust every node's memory.** High.
+`Submit` cannot check affordability (that is decided at apply time), and the
+mempool had no cap. Nonces 0, 1, 2, ... all passed. Now capped, with an explicit
+`ErrMempoolFull` so an honest sender can tell back-pressure from rejection.
+
+**4. The Go and Solidity verifiers disagreed about the same signature.**
+`WrappedMatrix.sol` rejects high-S (EIP-2); `ethsig.RecoverAddress` did not. So
+a signature Solidity refuses was accepted on the Go side - in the one package
+that exists so there is a single implementation of this check.
+
+**5. The run-authorization replay set keyed on signature bytes, not content.**
+A re-encoded signature over the same authorization read as a new one. Now keyed
+on the signed content, which does not depend on every signature scheme having
+exactly one canonical encoding.
+
+### Checked and found sound
+
+- **The provider emission**: saturating weights, a `big.Int` share, the budget
+  clamped to the pool, truncation leaving the remainder behind. Deterministic
+  and overflow-safe.
+- **Provider registry changes**: amount must be zero, sender must be a
+  validator, and each voter checks its own `approved_providers` before voting.
+  A stranger cannot register themselves and start drawing the emission.
+- **`FeeFor`**: split into quotient and remainder so it cannot overflow, and
+  asserts the fee never exceeds the amount.
+- **`public_reads`**: the `Get*`/`List*` rule looked like the "derived from a
+  name" hazard the file's own comment warns about - but
+  `TestReadClassificationIsPinned` enumerates the real service descriptors and
+  pins the exact split, so a mutating `GetFoo` fails the build rather than
+  becoming world-callable. A change here was started and reverted: the design is
+  already defended, and reporting it as a finding would have been wrong.
+
+### Not covered by this pass
+
+Timing side channels, the WASM agent sandbox, the p2p layer's own DoS surface
+(libp2p defaults), and gas/resource accounting for agent execution.
+
 ## Non-blocking notes
 
 Known and accepted, not blocking:
