@@ -1,6 +1,6 @@
 module github.com/ecirlabs/matrix-core
 
-go 1.24.2
+go 1.25.0
 
 require (
 	github.com/cockroachdb/pebble v1.1.5
@@ -121,6 +121,7 @@ require (
 	github.com/rogpeppe/go-internal v1.10.0 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.9 // indirect
+	github.com/tyler-smith/go-bip39 v1.1.0 // indirect
 	github.com/wlynxg/anet v0.0.5 // indirect
 	go.uber.org/dig v1.18.0 // indirect
 	go.uber.org/fx v1.23.0 // indirect
@@ -131,7 +132,8 @@ require (
 	golang.org/x/mod v0.23.0 // indirect
 	golang.org/x/net v0.35.0 // indirect
 	golang.org/x/sync v0.11.0 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
+	golang.org/x/term v0.45.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 	golang.org/x/tools v0.30.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240604185151-ef581f913117 // indirect

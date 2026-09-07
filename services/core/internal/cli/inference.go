@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"github.com/spf13/cobra"
@@ -167,7 +168,7 @@ func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in cli
 	if err != nil {
 		return nil, err
 	}
-	acct, err := loadWallet(path)
+	acct, err := loadWallet(path, passphrasePrompt(os.Stderr, "Passphrase for "+path))
 	if err != nil {
 		return nil, err
 	}

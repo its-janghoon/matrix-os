@@ -3,9 +3,12 @@ package cli
 import (
 	"fmt"
 	"io"
+	"os"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
+
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // Quickstart defaults. They are intentionally small, self-explanatory values so
@@ -82,15 +85,30 @@ treasury. Re-running is safe: the wallet is reused and the provider re-registere
 			if err != nil {
 				return err
 			}
-			acct, err := loadWallet(path)
-			if err != nil {
-				created, cerr := createWallet(path)
+			// Whether to create is decided by the file's ABSENCE, not by a failed
+			// load. Falling through on any error meant a wrong passphrase tried to
+			// create a wallet, failed because the file existed, and reported
+			// "could not load or create" - which sends you looking for a missing
+			// file rather than at what you typed.
+			var acct *token.Account
+			if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+				passphrase, perr := newPassphrase(cmd.ErrOrStderr())
+				if perr != nil {
+					return perr
+				}
+				created, phrase, cerr := createEncryptedWallet(path, passphrase)
 				if cerr != nil {
-					return fmt.Errorf("could not load or create a wallet at %s: %w", path, cerr)
+					return fmt.Errorf("could not create a wallet at %s: %w", path, cerr)
 				}
 				acct = created
 				fmt.Fprintf(out, "1. wallet created at %s\n", path)
+				fmt.Fprintf(out, "   recovery phrase (write it down, shown once): %s\n", phrase)
 			} else {
+				loaded, lerr := loadWallet(path, passphrasePrompt(cmd.ErrOrStderr(), "Passphrase for "+path))
+				if lerr != nil {
+					return lerr
+				}
+				acct = loaded
 				fmt.Fprintf(out, "1. using existing wallet at %s\n", path)
 			}
 			buyer := acct.AccountID()

@@ -50,11 +50,16 @@ matrix job cancel --id <job-id>      # releases the reserved capacity, charges n
 matrix balance --account <account-id>
 matrix fund --account <account-id> --amount 1000000   # from the genesis reward pool`;
 
-const WALLET = `matrix wallet create           # refuses to overwrite an existing file
-matrix wallet show             # the account id (which is the public key)
-matrix wallet balance
-matrix wallet transfer --to <recipient-account-id> --amount 200
+const WALLET = `matrix wallet create           # encrypted, and shows a 12-word recovery phrase once
+matrix wallet import           # restore that phrase (omit --mnemonic to be asked)
+matrix wallet show             # the account id. No passphrase: it is a public value
+matrix wallet balance          # likewise
+matrix wallet transfer --to <recipient-account-id> --amount 200   # this one unlocks
 
+# The passphrase comes from MATRIX_WALLET_PASSPHRASE when set, otherwise a
+# prompt that does not echo. A non-interactive caller must set the variable;
+# the tool refuses to read a passphrase off a pipe.
+#
 # every wallet command takes --wallet to use a file other than ~/.matrix/wallet.json`;
 
 const INFERENCE = `matrix inference submit \\
@@ -174,8 +179,22 @@ export default function MatrixCliDocs() {
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Wallet</h2>
                   <p className='mb-4 text-gray-300'>
                     An ed25519 keypair at <code className='text-white'>~/.matrix/wallet.json</code>, mode{' '}
-                    <code className='text-white'>0600</code>. The private key is never printed or logged: a transfer
-                    is signed locally and only the public key, the signature and the transfer fields go to the node.
+                    <code className='text-white'>0600</code> and <strong>encrypted</strong> under a passphrase you
+                    choose (scrypt, then AES-256-GCM). The private key is never printed or logged: a transfer is
+                    signed locally and only the public key, the signature and the transfer fields go to the node.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    <code className='text-white'>create</code> shows a 12-word BIP-39 recovery phrase, once. It is
+                    the only way to restore the account if the file is lost, and it is derived at the standard
+                    SLIP-0010 ed25519 path <code className='text-white'>m/44&apos;/9004&apos;/0&apos;/0&apos;</code>,
+                    so it also restores in other wallets that implement it. A mistyped word fails BIP-39&apos;s
+                    checksum and is refused, rather than silently deriving a different, empty account.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    Wallets written before this existed stored the key in the clear. They are still read, so nothing
+                    is stranded, but every command that signs with one prints a warning: there is no migration a tool
+                    can do unasked, because it cannot invent a passphrase. Restore the phrase with{' '}
+                    <code className='text-white'>wallet import</code>, or move the balance to a new wallet.
                   </p>
                   <CodeSample label='shell' code={WALLET} />
 

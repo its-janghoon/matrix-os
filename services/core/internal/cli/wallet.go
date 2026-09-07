@@ -74,9 +74,113 @@ func createWallet(path string) (*token.Account, error) {
 	return acct, nil
 }
 
-// loadWallet reads and decodes a wallet file into an Account (including the
-// private key needed for signing).
-func loadWallet(path string) (*token.Account, error) {
+// createEncryptedWallet writes an encrypted keystore derived from a BIP-39
+// recovery phrase, and returns the account and the phrase so the caller can show
+// it once. It refuses to overwrite an existing file for the same reason
+// createWallet does.
+//
+// This is what `matrix wallet create` does now. The plaintext form it replaces
+// put the private key in a file at mode 0600 and nothing more: anyone who could
+// read that file owned the account, and losing it lost the account outright
+// because there was no phrase to write down.
+func createEncryptedWallet(path, passphrase string) (*token.Account, string, error) {
+	if _, err := os.Stat(path); err == nil {
+		return nil, "", fmt.Errorf("wallet already exists at %s (refusing to overwrite)", path)
+	} else if !os.IsNotExist(err) {
+		return nil, "", fmt.Errorf("cannot stat %s: %w", path, err)
+	}
+
+	phrase, err := token.NewMnemonic()
+	if err != nil {
+		return nil, "", err
+	}
+	acct, err := token.AccountFromMnemonic(phrase, "")
+	if err != nil {
+		return nil, "", err
+	}
+	if err := writeKeystore(path, acct, passphrase, true); err != nil {
+		return nil, "", err
+	}
+	return acct, phrase, nil
+}
+
+// importEncryptedWallet writes an encrypted keystore for an account restored
+// from a recovery phrase.
+func importEncryptedWallet(path, phrase, passphrase string) (*token.Account, error) {
+	if _, err := os.Stat(path); err == nil {
+		return nil, fmt.Errorf("wallet already exists at %s (refusing to overwrite)", path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("cannot stat %s: %w", path, err)
+	}
+	acct, err := token.AccountFromMnemonic(phrase, "")
+	if err != nil {
+		return nil, err
+	}
+	if err := writeKeystore(path, acct, passphrase, true); err != nil {
+		return nil, err
+	}
+	return acct, nil
+}
+
+func writeKeystore(path string, acct *token.Account, passphrase string, fromMnemonic bool) error {
+	ks, err := token.EncryptKeystore(acct, passphrase, fromMnemonic)
+	if err != nil {
+		return err
+	}
+	data, err := token.MarshalKeystore(ks)
+	if err != nil {
+		return fmt.Errorf("failed to encode keystore: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return fmt.Errorf("failed to create wallet directory %s: %w", filepath.Dir(path), err)
+	}
+	// Still 0600. The file is encrypted, and file permissions are the cheap
+	// second lock rather than a replacement for the first.
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("failed to write wallet %s: %w", path, err)
+	}
+	return nil
+}
+
+// walletAccountID reads the wallet's account id WITHOUT unlocking it.
+//
+// A keystore keeps the public key and account id in plaintext precisely so this
+// is possible: printing your own address, or reading its balance, is not a
+// reason to type a passphrase, and a tool that asks anyway teaches people to
+// type it reflexively.
+func walletAccountID(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("no wallet at %s (run `matrix wallet create` first)", path)
+		}
+		return "", fmt.Errorf("failed to read wallet %s: %w", path, err)
+	}
+	if ks, ok := token.UnmarshalKeystore(data); ok {
+		if ks.AccountID == "" {
+			return "", fmt.Errorf("wallet %s does not record its account id", path)
+		}
+		return ks.AccountID, nil
+	}
+	// A legacy plaintext wallet: the account id is the public key it carries.
+	var wf walletFile
+	if err := json.Unmarshal(data, &wf); err != nil {
+		return "", fmt.Errorf("failed to decode wallet %s: %w", path, err)
+	}
+	if wf.PublicKey == "" {
+		return "", fmt.Errorf("wallet %s has no public key", path)
+	}
+	return wf.PublicKey, nil
+}
+
+// loadWallet reads a wallet file into an Account, accepting either form.
+//
+// A keystore needs a passphrase, supplied by the caller's prompt function. A
+// LEGACY plaintext wallet is still read, without one: refusing it would strand
+// every account created before this existed, and there is no migration a tool
+// can perform on the user's behalf because it cannot invent a passphrase. The
+// caller warns instead.
+func loadWallet(path string, passphrase func() (string, error)) (*token.Account, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -84,6 +188,30 @@ func loadWallet(path string) (*token.Account, error) {
 		}
 		return nil, fmt.Errorf("failed to read wallet %s: %w", path, err)
 	}
+
+	if ks, ok := token.UnmarshalKeystore(data); ok {
+		if passphrase == nil {
+			return nil, fmt.Errorf("wallet %s is encrypted and no passphrase is available", path)
+		}
+		pass, err := passphrase()
+		if err != nil {
+			return nil, err
+		}
+		acct, err := token.DecryptKeystore(ks, pass)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unlock %s: %w", path, err)
+		}
+		return acct, nil
+	}
+
+	// A legacy plaintext wallet. Warn every time it is USED to sign, not once:
+	// the risk is not that the user has never been told, it is that the file is
+	// still there. Stderr so it never contaminates --json output.
+	fmt.Fprintf(os.Stderr,
+		"warning: %s stores its private key in the clear. Anyone who can read that file owns "+
+			"the account.\n         Move to an encrypted wallet: `matrix wallet import` with the "+
+			"recovery phrase, or create a new\n         wallet and transfer the balance.\n", path)
+
 	var wf walletFile
 	if err := json.Unmarshal(data, &wf); err != nil {
 		return nil, fmt.Errorf("failed to decode wallet %s: %w", path, err)

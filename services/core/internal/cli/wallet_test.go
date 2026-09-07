@@ -12,15 +12,18 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
-// TestLoadWallet_RoundTrip asserts a wallet written by createWallet loads back
-// into the same account (the happy path the key-pairing check must not break).
+// TestLoadWallet_RoundTrip asserts a LEGACY plaintext wallet still loads back
+// into the same account. Refusing these would strand every account created
+// before encryption existed, and there is no migration a tool can perform
+// unasked because it cannot invent a passphrase.
 func TestLoadWallet_RoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "wallet.json")
 	created, err := createWallet(path)
 	if err != nil {
 		t.Fatalf("createWallet: %v", err)
 	}
-	loaded, err := loadWallet(path)
+	// The legacy plaintext path takes no passphrase, and still must not.
+	loaded, err := loadWallet(path, nil)
 	if err != nil {
 		t.Fatalf("loadWallet: %v", err)
 	}
@@ -57,7 +60,7 @@ func TestLoadWallet_RejectsMismatchedKeyPair(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 
-	_, err = loadWallet(path)
+	_, err = loadWallet(path, nil)
 	if err == nil {
 		t.Fatal("expected loadWallet to reject a mismatched key pair, got nil error")
 	}

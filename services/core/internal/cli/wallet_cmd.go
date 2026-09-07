@@ -22,11 +22,26 @@ func newWalletCommand(opts *globalOptions) *cobra.Command {
 		Long: `Manage a local ed25519 wallet used to sign native MATRIX transfers.
 
 The wallet is stored at ~/.matrix/wallet.json (overridable with --wallet) with
-0600 permissions. The private key is never printed or logged.`,
+0600 permissions, ENCRYPTED under a passphrase you choose. The private key is
+never printed or logged.
+
+"wallet create" also shows a 12-word BIP-39 recovery phrase, once. That phrase is the
+only way to restore the account if the file is lost, and it is derived at the
+standard SLIP-0010 ed25519 path (m/44'/9004'/0'/0'), so it also restores in
+other wallets that implement it.
+
+A passphrase is read from MATRIX_WALLET_PASSPHRASE when set, otherwise typed at
+a prompt without being echoed. Commands that only need the public account id
+(show, balance) do not ask for it at all.
+
+Wallets created before encryption existed are still read as they are, with a
+warning, because there is no migration a tool can do on your behalf: use
+"wallet import" with the recovery phrase, or move value to a new wallet.`,
 		Args: cobra.NoArgs,
 	}
 	cmd.AddCommand(
 		newWalletCreateCommand(opts),
+		newWalletImportCommand(opts),
 		newWalletShowCommand(opts),
 		newWalletBalanceCommand(opts),
 		newWalletTransferCommand(opts),
@@ -38,17 +53,85 @@ func newWalletCreateCommand(opts *globalOptions) *cobra.Command {
 	var walletPath string
 	cmd := &cobra.Command{
 		Use:   "create",
-		Short: "Generate a new ed25519 wallet",
+		Short: "Generate a new encrypted wallet and show its recovery phrase",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path, err := resolveWalletPath(walletPath)
 			if err != nil {
 				return err
 			}
-			acct, err := createWallet(path)
+			passphrase, err := newPassphrase(cmd.ErrOrStderr())
 			if err != nil {
 				return err
 			}
+			acct, phrase, err := createEncryptedWallet(path, passphrase)
+			if err != nil {
+				return err
+			}
+
+			out := cmd.OutOrStdout()
+			if opts.JSON {
+				// The phrase is in the JSON because a caller asking for machine
+				// output has nowhere else to get it, and it exists exactly once.
+				// A caller that pipes this to a log has published its key.
+				return printJSON(out, struct {
+					Path           string `json:"path"`
+					AccountID      string `json:"account_id"`
+					RecoveryPhrase string `json:"recovery_phrase"`
+				}{Path: path, AccountID: acct.AccountID(), RecoveryPhrase: phrase})
+			}
+			fmt.Fprintf(out, "wallet created: %s\n", path)
+			fmt.Fprintf(out, "account:        %s\n", acct.AccountID())
+			fmt.Fprintf(out, "\nRecovery phrase (write this down; it is shown once and never again):\n\n  %s\n\n", phrase)
+			fmt.Fprintf(out, "Anyone with that phrase owns this account. Anyone without it, including us,\n")
+			fmt.Fprintf(out, "cannot restore it for you.\n")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&walletPath, "wallet", "", "wallet file path (default ~/.matrix/wallet.json)")
+	return cmd
+}
+
+func newWalletImportCommand(opts *globalOptions) *cobra.Command {
+	var (
+		walletPath string
+		phrase     string
+	)
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Restore a wallet from its recovery phrase",
+		Long: `import restores the account a 12- or 24-word BIP-39 phrase derives at
+m/44'/9004'/0'/0', and writes it as an encrypted wallet.
+
+Pass --mnemonic to supply the phrase, or leave it off to be asked. Being asked
+is better: a phrase on the command line ends up in your shell history.
+
+The phrase is checked against its BIP-39 checksum before anything is written, so
+a mistyped word is a refusal rather than a different, empty account.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := resolveWalletPath(walletPath)
+			if err != nil {
+				return err
+			}
+			if phrase == "" {
+				phrase, err = readMnemonic(cmd.ErrOrStderr(), cmd.InOrStdin())
+				if err != nil {
+					return err
+				}
+			}
+			if err := token.ValidateMnemonic(phrase); err != nil {
+				return fmt.Errorf("%w: check the words and their order", err)
+			}
+			passphrase, err := newPassphrase(cmd.ErrOrStderr())
+			if err != nil {
+				return err
+			}
+			acct, err := importEncryptedWallet(path, phrase, passphrase)
+			if err != nil {
+				return err
+			}
+
 			out := cmd.OutOrStdout()
 			if opts.JSON {
 				return printJSON(out, struct {
@@ -56,12 +139,14 @@ func newWalletCreateCommand(opts *globalOptions) *cobra.Command {
 					AccountID string `json:"account_id"`
 				}{Path: path, AccountID: acct.AccountID()})
 			}
-			fmt.Fprintf(out, "wallet created: %s\n", path)
-			fmt.Fprintf(out, "account:        %s\n", acct.AccountID())
+			fmt.Fprintf(out, "wallet restored: %s\n", path)
+			fmt.Fprintf(out, "account:         %s\n", acct.AccountID())
 			return nil
 		},
 	}
 	cmd.Flags().StringVar(&walletPath, "wallet", "", "wallet file path (default ~/.matrix/wallet.json)")
+	cmd.Flags().StringVar(&phrase, "mnemonic", "",
+		"the recovery phrase (omit to be asked, which keeps it out of your shell history)")
 	return cmd
 }
 
@@ -76,7 +161,9 @@ func newWalletShowCommand(opts *globalOptions) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			acct, err := loadWallet(path)
+			// No unlock: the id is public, and asking for a passphrase to print
+			// your own address teaches people to type it reflexively.
+			accountID, err := walletAccountID(path)
 			if err != nil {
 				return err
 			}
@@ -85,10 +172,10 @@ func newWalletShowCommand(opts *globalOptions) *cobra.Command {
 				return printJSON(out, struct {
 					AccountID string `json:"account_id"`
 					PublicKey string `json:"public_key"`
-				}{AccountID: acct.AccountID(), PublicKey: acct.AccountID()})
+				}{AccountID: accountID, PublicKey: accountID})
 			}
-			fmt.Fprintf(out, "account:    %s\n", acct.AccountID())
-			fmt.Fprintf(out, "public key: %s\n", acct.AccountID())
+			fmt.Fprintf(out, "account:    %s\n", accountID)
+			fmt.Fprintf(out, "public key: %s\n", accountID)
 			return nil
 		},
 	}
@@ -112,11 +199,11 @@ func newWalletBalanceCommand(opts *globalOptions) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				acct, err := loadWallet(path)
+				// A balance is a read of a public account; no unlock needed.
+				acctID, err = walletAccountID(path)
 				if err != nil {
 					return err
 				}
-				acctID = acct.AccountID()
 			}
 			cc, err := dial(opts)
 			if err != nil {
@@ -170,7 +257,7 @@ leaves the local wallet.`,
 			if err != nil {
 				return err
 			}
-			acct, err := loadWallet(path)
+			acct, err := loadWallet(path, passphrasePrompt(cmd.ErrOrStderr(), "Passphrase for "+path))
 			if err != nil {
 				return err
 			}

@@ -11,7 +11,16 @@ import (
 // runs: a wallet is created, the buyer is funded from the reward pool, a demo
 // provider is registered, a job is submitted and completed, and native MATRIX
 // actually moves buyer -> provider on the ledger.
+// quickstartPassphrase gives the encrypted wallet a passphrase without a
+// terminal. A test has no tty, and the tool refuses to read a passphrase off a
+// pipe rather than let it land in a log.
+func quickstartPassphrase(t *testing.T) {
+	t.Helper()
+	t.Setenv(PassphraseEnv, "test-passphrase")
+}
+
 func TestCLI_Quickstart(t *testing.T) {
+	quickstartPassphrase(t)
 	addr, mkt := startFundServer(t, 1_000_000_000)
 
 	walletPath := t.TempDir() + "/wallet.json"
@@ -46,11 +55,12 @@ func TestCLI_Quickstart(t *testing.T) {
 
 	// The demo job is 10 units @ 5 = 50, settled buyer -> provider. Read the
 	// buyer's account ID back from the created wallet to assert on-ledger balances.
-	buyer, err := loadWallet(walletPath)
+	// The account id, without unlocking: this is a read of a public value.
+	buyerID, err := walletAccountID(walletPath)
 	if err != nil {
-		t.Fatalf("loadWallet: %v", err)
+		t.Fatalf("walletAccountID: %v", err)
 	}
-	buyerBal, _ := mkt.Ledger().Balance(buyer.AccountID())
+	buyerBal, _ := mkt.Ledger().Balance(buyerID)
 	if buyerBal != 1000-50 {
 		t.Fatalf("buyer ledger balance = %d, want %d", buyerBal, 1000-50)
 	}
@@ -63,6 +73,7 @@ func TestCLI_Quickstart(t *testing.T) {
 // TestCLI_QuickstartReusesWallet asserts a second run reuses the existing wallet
 // (idempotent) rather than failing to overwrite it, and still completes a job.
 func TestCLI_QuickstartReusesWallet(t *testing.T) {
+	quickstartPassphrase(t)
 	addr, _ := startFundServer(t, 1_000_000_000)
 	walletPath := t.TempDir() + "/wallet.json"
 
