@@ -1,16 +1,39 @@
-'use client';
-
+import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
-import { FiCopy } from 'react-icons/fi';
-import { toast } from 'sonner';
+import { GITHUB_URL } from '@/lib/releases';
 
-export default function SoulProtocol() {
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    toast.success('Code copied to clipboard');
-  };
+export const metadata = {
+  title: 'Soul Protocol',
+  description:
+    'The Soul Protocol as it stands: Protocol Buffers definitions and in-process Go types. No service serves it yet, and this page says so.',
+};
 
+/**
+ * This page used to show `new SoulProtocol({...})` and a `KnowledgeNetwork`
+ * imported from an `@matrix-os/soul` npm package. There is no such package, and
+ * no node serves these services. What exists is the proto definitions and a
+ * small in-process Go type. Documenting that honestly is more useful than
+ * example code for an API nobody can call.
+ */
+const SERVICES = `matrix.soul.v1.SoulLifecycleService   CreateSoul, GetSoul, UpdateSoul, DeleteSoul,
+                                      StartTraining, StopTraining, GetTrainingStatus,
+                                      AddTrainingExamples
+matrix.soul.v1.MemoryService          memory read/write
+matrix.soul.v1.ValueService           value weights
+matrix.soul.v1.GoalService            goals
+matrix.soul.v1.SoulChatService        conversation
+matrix.soul.v1.InferenceService       soul-scoped inference`;
+
+const GO_TYPE = `// services/core/internal/soul/soul.go
+type Soul struct {
+    ID      string
+    memory  []MemoryEntry   // timestamp, content, type, tags
+    values  map[string]float64
+    persona Persona         // traits, goals
+}`;
+
+export default function SoulProtocolPage() {
   return (
     <>
       <Navigation />
@@ -19,230 +42,86 @@ export default function SoulProtocol() {
           <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
-            {/* Main Content */}
             <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
-              <div className='max-w-4xl mx-auto'>
+              <div className='mx-auto max-w-4xl'>
                 <article className='text-gray-100'>
-                  {/* Hero Section */}
-                  <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
-                    <h1 className='text-4xl font-bold text-white mb-4'>Soul Protocol</h1>
+                  <div className='mb-10 rounded-xl border border-accent-300/20 bg-gradient-to-r from-accent-300/10 via-primary-400/10 to-accent-300/10 p-8'>
+                    <h1 className='mb-4 text-4xl font-bold text-white'>Soul Protocol</h1>
                     <p className='text-xl text-gray-100'>
-                      Discover the Soul Protocol, an advanced AI communication framework that enables intelligent agents
-                      to collaborate and evolve within the Matrix OS ecosystem.
+                      Persistent identity, memory and values for an agent, defined as Protocol Buffers services.
                     </p>
                   </div>
 
-                  {/* Protocol Overview */}
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>Protocol Overview</h2>
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      The Soul Protocol is built on top of the Matrix Protocol, adding advanced AI capabilities:
+                  <div className='mb-10 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h2 className='mb-2 text-xl font-bold text-white'>Status: defined, not served</h2>
+                    <p className='mb-0 text-gray-100'>
+                      The services below exist as <code className='text-white'>.proto</code> definitions, and a small
+                      in-process Go type holds a soul&apos;s memory, values and persona. <strong>No node serves any
+                      of these RPCs today</strong>, and there is no client library for them. If you are looking for
+                      something to build against right now, that is the{' '}
+                      <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                        compute marketplace
+                      </a>{' '}
+                      and{' '}
+                      <a href='/products/inference' className='text-accent-200 underline hover:text-accent-100'>
+                        inference
+                      </a>{' '}
+                      APIs, which a node does serve.
                     </p>
-                    <ul className='text-gray-100 space-y-3 list-disc pl-6'>
-                      <li>AI Model Integration Framework</li>
-                      <li>Federated Learning Capabilities</li>
-                      <li>Knowledge Sharing Network</li>
-                      <li>Autonomous Decision Making</li>
-                      <li>Multi-Agent Collaboration</li>
-                    </ul>
                   </div>
 
-                  {/* Core Components */}
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Core Components</h2>
+                  <h2 className='mb-4 mt-8 text-3xl font-bold text-white'>What the protocol defines</h2>
+                  <CodeSample label='services' code={SERVICES} />
+                  <p className='mt-4 text-gray-300'>
+                    The definitions live in{' '}
+                    <a
+                      href={`${GITHUB_URL}/tree/main/proto/matrix/soul/v1`}
+                      className='text-accent-200 underline hover:text-accent-100'
+                      target='_blank'
+                      rel='noopener noreferrer'
+                    >
+                      <code className='text-white'>proto/matrix/soul/v1</code>
+                    </a>
+                    . They are buf-managed and generate Go stubs, so implementing them is a matter of writing the
+                    service, not of designing the wire format.
+                  </p>
 
-                  <div className='space-y-8'>
-                    {/* AI Integration */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>AI Integration</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>Integrate AI models with the Soul Protocol:</p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>AI Integration Example</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`import { SoulProtocol, AIModel } from '@matrix-os/soul';
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>What exists in the node</h2>
+                  <CodeSample label='Go' code={GO_TYPE} />
+                  <p className='mt-4 text-gray-300'>
+                    A node holds these in a map, keyed by id. They are reachable from Go code inside the process and
+                    from nowhere else: no gRPC service is registered for them, so they are not on the network and not
+                    persisted to the store.
+                  </p>
 
-@AIModel({
-  type: 'transformer',
-  capabilities: ['nlp', 'reasoning']
-})
-class LanguageModel {
-  async process(input: string): Promise<string> {
-    // Model processing logic
-    return this.transformer.generate(input);
-  }
-}
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>What is missing</h2>
+                  <ul className='list-disc space-y-3 pl-6 text-gray-300'>
+                    <li>A service implementation for any of the six definitions.</li>
+                    <li>Persistence: a soul currently lives in memory and dies with the process.</li>
+                    <li>
+                      A settlement story. Training and inference against a soul cost compute, and nothing connects
+                      them to the marketplace that charges for it.
+                    </li>
+                    <li>Authorisation: who may read another account&apos;s soul memory, and on what terms.</li>
+                  </ul>
 
-class IntelligentAgent extends SoulProtocol {
-  private model: LanguageModel;
-
-  async initialize() {
-    this.model = await AIModel.load('language-model');
-  }
-
-  async handleQuery(query: string) {
-    const response = await this.model.process(query);
-    return this.formatResponse(response);
-  }
-}`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`import { SoulProtocol, AIModel } from '@matrix-os/soul';
-
-@AIModel({
-  type: 'transformer',
-  capabilities: ['nlp', 'reasoning']
-})
-class LanguageModel {
-  async process(input: string): Promise<string> {
-    // Model processing logic
-    return this.transformer.generate(input);
-  }
-}
-
-class IntelligentAgent extends SoulProtocol {
-  private model: LanguageModel;
-
-  async initialize() {
-    this.model = await AIModel.load('language-model');
-  }
-
-  async handleQuery(query: string) {
-    const response = await this.model.process(query);
-    return this.formatResponse(response);
-  }
-}`}</code>
-                        </pre>
-                      </div>
-                    </div>
-
-                    {/* Knowledge Sharing */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Knowledge Sharing</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>Enable knowledge sharing between agents:</p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Knowledge Sharing Example</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`import { KnowledgeNetwork } from '@matrix-os/soul';
-
-class SharedKnowledge extends KnowledgeNetwork {
-  async shareInsight(insight: any) {
-    // Validate and prepare insight
-    const validatedInsight = await this.validate(insight);
-    
-    // Share with the network
-    await this.broadcast({
-      type: 'new_insight',
-      data: validatedInsight,
-      metadata: {
-        source: this.agentId,
-        confidence: this.calculateConfidence(insight),
-        timestamp: Date.now()
-      }
-    });
-  }
-
-  async onInsightReceived(insight: any) {
-    // Verify and integrate new knowledge
-    if (await this.verifyInsight(insight)) {
-      await this.integrateKnowledge(insight);
-    }
-  }
-}`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`import { KnowledgeNetwork } from '@matrix-os/soul';
-
-class SharedKnowledge extends KnowledgeNetwork {
-  async shareInsight(insight: any) {
-    // Validate and prepare insight
-    const validatedInsight = await this.validate(insight);
-    
-    // Share with the network
-    await this.broadcast({
-      type: 'new_insight',
-      data: validatedInsight,
-      metadata: {
-        source: this.agentId,
-        confidence: this.calculateConfidence(insight),
-        timestamp: Date.now()
-      }
-    });
-  }
-
-  async onInsightReceived(insight: any) {
-    // Verify and integrate new knowledge
-    if (await this.verifyInsight(insight)) {
-      await this.integrateKnowledge(insight);
-    }
-  }
-}`}</code>
-                        </pre>
-                      </div>
-                    </div>
-
-                    {/* Autonomous Decision Making */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Decision Making</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        Implement autonomous decision-making capabilities:
-                      </p>
-                      <ul className='text-gray-100 space-y-3 list-disc pl-6'>
-                        <li>Multi-factor analysis</li>
-                        <li>Risk assessment</li>
-                        <li>Goal-oriented planning</li>
-                        <li>Adaptive learning</li>
-                      </ul>
-                    </div>
-                  </div>
-
-                  {/* Protocol Features */}
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Protocol Features</h2>
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                    <h3 className='text-xl font-bold text-white mb-3'>Key Features</h3>
-                    <div className='grid grid-cols-1 md:grid-cols-2 gap-6'>
-                      <div>
-                        <h4 className='text-lg font-semibold text-white mb-2'>Learning Capabilities</h4>
-                        <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                          <li>Federated learning support</li>
-                          <li>Transfer learning</li>
-                          <li>Continuous adaptation</li>
-                          <li>Experience sharing</li>
-                        </ul>
-                      </div>
-                      <div>
-                        <h4 className='text-lg font-semibold text-white mb-2'>Collaboration Features</h4>
-                        <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                          <li>Multi-agent coordination</li>
-                          <li>Task delegation</li>
-                          <li>Resource sharing</li>
-                          <li>Collective intelligence</li>
-                        </ul>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Next Steps */}
-                  <div className='bg-blue-500/10 rounded-xl p-6 mt-8 border border-blue-500/20'>
-                    <h2 className='text-2xl font-bold text-white mb-4'>Next Steps</h2>
-                    <p className='text-gray-100 leading-relaxed mb-4'>To start working with the Soul Protocol:</p>
-                    <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
+                  <div className='mt-10 rounded-xl border border-primary-400/20 bg-primary-400/10 p-6'>
+                    <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
+                    <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/matrix-protocol' className='text-blue-400 hover:text-blue-300 underline'>
-                          Review the Matrix Protocol basics
-                        </a>
+                        <a href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
+                          Matrix Protocol
+                        </a>{' '}
+                        - the protocol that is implemented and running
+                      </li>
+                      <li>
+                        <a
+                          href='/docs/guides/agent-development'
+                          className='text-accent-200 underline hover:text-accent-100'
+                        >
+                          Agent development
+                        </a>{' '}
+                        - the WebAssembly runtime a node actually has
                       </li>
                     </ul>
                   </div>

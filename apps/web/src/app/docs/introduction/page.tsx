@@ -1,17 +1,20 @@
 'use client';
 
+import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
-import { FiCopy } from 'react-icons/fi';
-import { Toaster, toast } from 'sonner';
+import { Toaster } from 'sonner';
 import { GITHUB_URL } from '@/lib/releases';
 
-export default function MatrixOsIntroduction() {
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    toast.success('Code copied to clipboard');
-  };
+const LIST_PROVIDERS = `import { MatrixClient } from 'matrix-os-sdk';
 
+const matrix = new MatrixClient({ endpoint: 'http://127.0.0.1:9093' });
+
+for (const p of await matrix.listProviders({ includeRemote: true })) {
+  console.log(\`\${p.id}: \${p.available}/\${p.capacity} units at \${p.pricePerUnit} each\`);
+}`;
+
+export default function MatrixOsIntroduction() {
   return (
     <>
       <Navigation />
@@ -87,57 +90,20 @@ export default function MatrixOsIntroduction() {
                     </div>
 
                     <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Network Elements</h3>
+                      <h3 className='text-xl font-bold text-white mb-3'>Talking to a node</h3>
                       <p className='text-gray-100 leading-relaxed mb-4'>
-                        Matrix OS uses a powerful system of network elements that form the building blocks of
-                        distributed applications. Here&apos;s a simple example:
+                        A node serves its marketplace and inference APIs over HTTP, so a browser, a dApp front end
+                        or a script can drive it directly. This is the whole of a first call:
                       </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-400'>Network Element Example</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`import { NetworkElement } from '@matrix-os/core';
-
-@NetworkElement({
-  name: 'data-node',
-  protocol: 'matrix-v1',
-  capabilities: ['storage', 'compute']
-})
-export class DataNode {
-  async syncData(peer: string) {
-    // Secure data synchronization
-    await this.verifyPeer(peer);
-    const data = await this.fetchEncryptedData(peer);
-    return this.processData(data);
-  }
-}`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-300 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>
-                            {`import { NetworkElement } from '@matrix-os/core';
-
-@NetworkElement({
-  name: 'data-node',
-  protocol: 'matrix-v1',
-  capabilities: ['storage', 'compute']
-})
-export class DataNode {
-  async syncData(peer: string) {
-    // Secure data synchronization
-    await this.verifyPeer(peer);
-    const data = await this.fetchEncryptedData(peer);
-    return this.processData(data);
-  }
-}`}
-                          </code>
-                        </pre>
-                      </div>
+                      <CodeSample label='TypeScript' code={LIST_PROVIDERS} />
+                      <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
+                        The SDK lives in{' '}
+                        <code className='text-white'>packages/sdk</code> in the repository and is not on npm yet, so
+                        add it with{' '}
+                        <code className='text-white'>yarn add file:/path/to/matrix-os/packages/sdk</code>. Amounts are{' '}
+                        <code className='text-white'>bigint</code>: MATRIX has 9 decimals and a cap of a billion
+                        coins, so a balance can exceed what a JavaScript number holds exactly.
+                      </p>
                     </div>
                   </div>
 

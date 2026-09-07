@@ -1,16 +1,78 @@
-'use client';
-
+import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
-import { FiCopy } from 'react-icons/fi';
-import { toast } from 'sonner';
+import { GITHUB_URL, REPO } from '@/lib/releases';
 
-export default function MatrixOsQuickstart() {
-  const copyCode = (code: string) => {
-    navigator.clipboard.writeText(code);
-    toast.success('Code copied to clipboard');
-  };
+export const metadata = {
+  title: 'Quickstart',
+  description:
+    'Zero to a settled compute job on a local Matrix OS node: initialize, start, and run matrix quickstart. Every command here is real.',
+};
 
+/**
+ * This page used to describe `matrix-os init`, an `agent.config.ts`, and a
+ * `defineAgent` helper imported from an `@matrix-os/core` npm package. The
+ * binary is `matrix`, there is no such config file, and that package does not
+ * exist. What follows is the sequence that actually works, with the output a
+ * real run prints.
+ */
+const START_NODE = `matrixd -init          # writes config.yaml (0600) with a generated admin key
+matrixd                # starts the node`;
+
+const RUN_QUICKSTART = `# the key is under security.api_keys in the config matrixd -init wrote
+matrix --api-key <key> quickstart`;
+
+const QUICKSTART_OUTPUT = `1. wallet created at ~/.matrix/wallet.json
+   buyer account: c5b097824f2e2222a278af3dbe4b519fa653a96e44ff08891668b3a2a708d5d9
+
+2. funded buyer with 1000000 from the reward pool
+   buyer balance: 1000000
+
+3. registered provider "quickstart-provider" (capacity 100, price 5/unit)
+
+4. submitted job 807b0adf...: 10 units @ 5 = 50 (status pending)
+
+5. completed job 807b0adf... (status completed)
+
+done. native MATRIX moved buyer -> provider:
+  buyer    c5b09782...  999950
+  provider quickstart-provider  50
+  job 807b0adf... settled for 50`;
+
+const BY_HAND = `matrix wallet create                 # an ed25519 keypair at ~/.matrix/wallet.json
+matrix wallet show                   # your account id
+
+matrix --api-key <key> fund --account <your-account> --amount 1000000
+
+matrix provider register --id gpu-1 --capacity 100 --price 5
+matrix provider list
+
+matrix job submit --buyer <your-account> --provider gpu-1 --units 10
+matrix job complete --id <job-id>
+
+matrix balance --account <your-account>
+matrix tx list --limit 5`;
+
+const FROM_CODE = `import { MatrixClient } from 'matrix-os-sdk';
+
+const matrix = new MatrixClient({
+  endpoint: 'http://127.0.0.1:9093',
+  apiKey: process.env.MATRIX_API_KEY,
+});
+
+const provider = await matrix.registerProvider({ id: 'gpu-1', capacity: 100n, pricePerUnit: 5n });
+const job = await matrix.submitJob({ buyer: myAccount, provider: provider.id, units: 10n });
+const settled = await matrix.completeJob(job.id);
+
+console.log(settled.status, settled.price); // JOB_STATUS_COMPLETED 50n`;
+
+const INFERENCE = `matrix inference submit \\
+  --buyer <your-account> \\
+  --provider demo-inference-provider \\
+  --model demo \\
+  --prompt "one sentence about peer-to-peer compute"`;
+
+export default function QuickstartPage() {
   return (
     <>
       <Navigation />
@@ -19,207 +81,119 @@ export default function MatrixOsQuickstart() {
           <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
-            {/* Main Content */}
             <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
-              <div className='max-w-4xl mx-auto'>
+              <div className='mx-auto max-w-4xl'>
                 <article className='text-gray-100'>
-                  {/* Hero Section */}
-                  <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
-                    <h1 className='text-4xl font-bold text-white mb-4'>Quick Start Guide</h1>
+                  <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
+                    <h1 className='mb-4 text-4xl font-bold text-white'>Quickstart</h1>
                     <p className='text-xl text-gray-100'>
-                      Create your first Matrix OS agent in minutes. This guide will walk you through the basics of
-                      setting up and running an autonomous agent.
+                      A node, a funded wallet, and a settled compute job. Three commands, about a minute.
                     </p>
                   </div>
 
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>Prerequisites</h2>
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
-                    <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
+                  <h2 className='mb-4 mt-8 text-3xl font-bold text-white'>Before you start</h2>
+                  <p className='mb-4 text-gray-300'>
+                    You need the two binaries, <code className='text-white'>matrixd</code> (the node) and{' '}
+                    <code className='text-white'>matrix</code> (the CLI). Get them from{' '}
+                    <a href='/download' className='text-accent-200 underline hover:text-accent-100'>
+                      a release
+                    </a>{' '}
+                    or build from source with the{' '}
+                    <a href='/docs/installation' className='text-accent-200 underline hover:text-accent-100'>
+                      installation guide
+                    </a>
+                    . Nothing else: no GPU, no model server, no account with us.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>1. Start a node</h2>
+                  <CodeSample label='shell' code={START_NODE} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>-init</code> writes a config with access control on and one
+                    generated admin key inside it, which is why the file is mode 0600. It also seeds a genesis reward
+                    pool, so there is native MATRIX to fund an account with - the coins are moved out of that pool,
+                    never minted.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>2. Zero to a settled job</h2>
+                  <p className='mb-4 text-gray-300'>In another shell:</p>
+                  <CodeSample label='shell' code={RUN_QUICKSTART} />
+                  <p className='mb-4 mt-4 text-gray-300'>What it prints:</p>
+                  <CodeSample label='output' code={QUICKSTART_OUTPUT} />
+                  <p className='mt-4 text-gray-300'>
+                    Five steps: a wallet, funding from the reward pool, a provider advertising capacity at a price, a
+                    job that reserves that capacity, and a completion that moves 50 native MATRIX from buyer to
+                    provider. Re-running is safe - the wallet is reused.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>3. The same thing, one step at a time</h2>
+                  <p className='mb-4 text-gray-300'>
+                    Every step of the demo is a command you can run yourself:
+                  </p>
+                  <CodeSample label='shell' code={BY_HAND} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>matrix --help</code> lists the rest:{' '}
+                    <code className='text-white'>job cancel</code>, <code className='text-white'>tx get</code>,{' '}
+                    <code className='text-white'>status</code>, <code className='text-white'>health</code>, and the
+                    wallet commands that sign a transfer locally so the node never sees a private key.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>4. Ask for an inference</h2>
+                  <p className='mb-4 text-gray-300'>
+                    A freshly initialized node registers a GPU-free echo backend as{' '}
+                    <code className='text-white'>demo-inference-provider</code>, so the inference path works before
+                    you have any models:
+                  </p>
+                  <CodeSample label='shell' code={INFERENCE} />
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>From code</h2>
+                  <p className='mb-4 text-gray-300'>
+                    The node serves the same marketplace and inference APIs over HTTP on port 9093, so a script, a
+                    web app or a dApp front end can drive it directly:
+                  </p>
+                  <CodeSample label='TypeScript' code={FROM_CODE} />
+                  <p className='mt-4 text-gray-300'>
+                    The SDK is{' '}
+                    <a
+                      href={`${GITHUB_URL}/tree/main/packages/sdk`}
+                      className='text-accent-200 underline hover:text-accent-100'
+                      target='_blank'
+                      rel='noopener noreferrer'
+                    >
+                      <code className='text-white'>packages/sdk</code>
+                    </a>{' '}
+                    in the {REPO} repository. It is not published to npm yet, so add it from a checkout with{' '}
+                    <code className='text-white'>yarn add file:/path/to/matrix-os/packages/sdk</code>.
+                  </p>
+
+                  <div className='mt-10 rounded-xl border border-primary-400/20 bg-primary-400/10 p-6'>
+                    <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
+                    <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        Matrix OS installed (see{' '}
-                        <a href='/docs/installation' className='text-blue-400 hover:text-blue-300 underline'>
-                          Installation Guide
-                        </a>
-                        )
+                        <a href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
+                          Architecture
+                        </a>{' '}
+                        - what is inside the node you just started
                       </li>
-                      <li>Basic understanding of command line interfaces</li>
-                      <li>Text editor of your choice</li>
-                      <li>Terminal or command prompt</li>
+                      <li>
+                        <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                          Compute marketplace
+                        </a>{' '}
+                        - how a job is priced, reserved and settled
+                      </li>
+                      <li>
+                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                          Configuration
+                        </a>{' '}
+                        - every field in the file <code className='text-white'>-init</code> wrote
+                      </li>
+                      <li>
+                        <a href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
+                          matrix CLI
+                        </a>{' '}
+                        - the full command surface
+                      </li>
                     </ul>
                   </div>
-
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Creating Your First Agent</h2>
-
-                  <div className='space-y-8'>
-                    {/* Project Setup */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>1. Project Setup</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        First, create a new directory for your agent project and initialize it:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Create and initialize project</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`# Create project directory
-mkdir my-first-agent
-cd my-first-agent
-
-# Initialize Matrix OS project
-matrix-os init`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`# Create project directory
-mkdir my-first-agent
-cd my-first-agent
-
-# Initialize Matrix OS project
-matrix-os init`}</code>
-                        </pre>
-                      </div>
-                      <p className='text-gray-100 mt-4 mb-0'>
-                        The initialization wizard will guide you through setting up your project with sensible defaults.
-                      </p>
-                    </div>
-
-                    {/* Agent Configuration */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>2. Configure Your Agent</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        Open the generated{' '}
-                        <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>agent.config.ts</code> file
-                        and customize your agent&apos;s behavior:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>agent.config.ts</span>
-                          <button
-                            onClick={() =>
-                              copyCode(`import { defineAgent } from '@matrix-os/core';
-
-export default defineAgent({
-  name: 'my-first-agent',
-  description: 'A simple demo agent',
-  capabilities: ['compute', 'network'],
-  
-  // Define agent's behavior
-  behavior: {
-    onStart: async (context) => {
-      context.log.info('Agent started!');
-    },
-    onMessage: async (message, context) => {
-      context.log.info('Received message:', message);
-      return { status: 'received' };
-    }
-  }
-});`)
-                            }
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>{`import { defineAgent } from '@matrix-os/core';
-
-export default defineAgent({
-  name: 'my-first-agent',
-  description: 'A simple demo agent',
-  capabilities: ['compute', 'network'],
-  
-  // Define agent's behavior
-  behavior: {
-    onStart: async (context) => {
-      context.log.info('Agent started!');
-    },
-    onMessage: async (message, context) => {
-      context.log.info('Received message:', message);
-      return { status: 'received' };
-    }
-  }
-});`}</code>
-                        </pre>
-                      </div>
-                    </div>
-
-                    {/* Running the Agent */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>3. Run Your Agent</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        Start your agent in development mode with live-reload enabled:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Start development mode</span>
-                          <button
-                            onClick={() => copyCode('matrix-os dev')}
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>matrix-os dev</code>
-                        </pre>
-                      </div>
-                      <p className='text-gray-100 mt-4 mb-0'>
-                        Your agent is now running! The development mode includes:
-                      </p>
-                      <ul className='text-gray-100 mt-2 space-y-2 list-disc pl-6 mb-0'>
-                        <li>Live-reload on code changes</li>
-                        <li>Enhanced logging and debugging</li>
-                        <li>Performance monitoring</li>
-                      </ul>
-                    </div>
-
-                    {/* Testing the Agent */}
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>4. Test Your Agent</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        Send a test message to your agent using the Matrix OS CLI:
-                      </p>
-                      <div className='bg-black rounded-lg p-4'>
-                        <div className='flex justify-between items-center mb-2'>
-                          <span className='text-sm text-gray-100'>Send test message</span>
-                          <button
-                            onClick={() => copyCode('matrix-os message my-first-agent "Hello, Agent!"')}
-                            className='p-2 hover:bg-gray-800 rounded transition-colors'
-                          >
-                            <FiCopy className='w-4 h-4' />
-                          </button>
-                        </div>
-                        <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-                          <code>matrix-os message my-first-agent &quot;Hello, Agent!&quot;</code>
-                        </pre>
-                      </div>
-                    </div>
-                  </div>
-
-                  <h2 className='text-2xl font-bold text-white mb-4'>Next Steps</h2>
-                  <p className='text-gray-100 leading-relaxed mb-4'>Continue your journey with Matrix OS:</p>
-                  <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
-                    <li>
-                      <a href='/docs/architecture' className='text-blue-400 hover:text-blue-300 underline'>
-                        Next: Architecture Overview →
-                      </a>
-                    </li>
-                    <li>
-                      <a href='/docs/guides/agent-development' className='text-blue-400 hover:text-blue-300 underline'>
-                        Jump to Agent Development Guide →
-                      </a>
-                    </li>
-                    <li>
-                      <a href='/docs/cli' className='text-blue-400 hover:text-blue-300 underline'>
-                        Operate a node with the matrix CLI (matrix --help) →
-                      </a>
-                    </li>
-                  </ul>
                 </article>
               </div>
             </main>

@@ -2,10 +2,13 @@ package node
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ecirlabs/matrix-core/internal/admin"
@@ -43,6 +46,17 @@ type Config struct {
 	Security struct {
 		EnableACLs          bool `yaml:"enable_acls"`
 		AllowUnsignedAgents bool `yaml:"allow_unsigned_agents"`
+		// APIKeys are the keys that authenticate against the admin, market,
+		// inference and HTTP surfaces when EnableACLs is set.
+		//
+		// They live in the config because the alternative was a single
+		// MATRIX_ADMIN_API_KEY environment variable that nothing wrote and
+		// nothing documented: a freshly initialized node has ACLs on, so every
+		// RPC answered "authentication required" and no key existed to satisfy
+		// it. `matrixd -init` now writes one generated key here, which is what
+		// makes a first run work. MATRIX_ADMIN_API_KEY still works and is added
+		// on top, for deployments that keep secrets out of files.
+		APIKeys []APIKeyConfig `yaml:"api_keys"`
 	} `yaml:"security"`
 	Admin struct {
 		Addr string `yaml:"addr"`
@@ -75,12 +89,23 @@ type Config struct {
 	// gRPC needs HTTP/2 trailers, which no browser can produce, so without this
 	// surface a web app or a dApp front end cannot reach the node at all.
 	Connect struct {
-		// Addr is the TCP listen address. Default 0.0.0.0:9093. Set to "off" (or
-		// "-") to disable the endpoint entirely.
+		// Addr is the TCP listen address. Default 0.0.0.0:9093. Set to "off" to
+		// disable the endpoint entirely. (Only "off" - not a bare "-", which YAML
+		// reads as the start of a list.)
 		Addr string `yaml:"addr"`
-		// AllowedOrigins lists the browser origins allowed to call it. Default
-		// ["*"], which suits a daemon a user's own page talks to; a public
-		// deployment should narrow it.
+		// AllowedOrigins lists the browser origins allowed to call it.
+		//
+		// Empty means NO browser may call the endpoint, and that is the default
+		// for a config that does not mention it. Deny-by-default is deliberate:
+		// a wide-open CORS policy on a daemon listening on localhost lets any
+		// page the operator happens to visit drive their node, which on a node
+		// running without ACLs means submitting jobs and spending their MATRIX.
+		//
+		// It costs non-browser callers nothing - curl, the Go client and the SDK
+		// under Node send no Origin header and need no CORS - so this only ever
+		// gates pages. `matrixd -init` writes the Console's dev origins, which is
+		// the narrow thing that actually needs to work. "*" allows any origin and
+		// belongs in development only.
 		AllowedOrigins []string `yaml:"allowed_origins"`
 	} `yaml:"connect"`
 	Consensus struct {
@@ -111,6 +136,15 @@ type GenesisConfig struct {
 	RewardPool uint64 `yaml:"reward_pool"`
 }
 
+// APIKeyConfig is one credential the node accepts. Role is "admin",
+// "operator" or "viewer"; an unset role is treated as admin, which is what a
+// single-operator dev node wants.
+type APIKeyConfig struct {
+	Key  string `yaml:"key"`
+	Role string `yaml:"role"`
+	Name string `yaml:"name"`
+}
+
 // GenesisAllocationConfig is a single named genesis allocation: Amount native
 // base units credited to Account.
 type GenesisAllocationConfig struct {
@@ -118,6 +152,32 @@ type GenesisAllocationConfig struct {
 	Account string `yaml:"account"`
 	// Amount is the balance to credit, in native base units.
 	Amount uint64 `yaml:"amount"`
+}
+
+// generateAPIKey returns a 32-byte random key, hex encoded. It uses crypto/rand
+// because this value is the whole of a node's authentication.
+func generateAPIKey() (string, error) {
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+// roleFromConfig maps a configured role name to an admin role, defaulting to
+// admin for an unset value: a single-operator node that bothered to write a key
+// means it to work.
+func roleFromConfig(name string) admin.Role {
+	switch strings.ToLower(strings.TrimSpace(name)) {
+	case "", "admin":
+		return admin.RoleAdmin
+	case "operator":
+		return admin.RoleOperator
+	case "viewer":
+		return admin.RoleViewer
+	default:
+		return admin.RoleViewer
+	}
 }
 
 // connectAuth adapts the admin authenticator to the small interface the
@@ -189,10 +249,21 @@ func Initialize(configPath string) error {
 	config.Storage.Path = "./data"
 	config.Security.EnableACLs = true
 	config.Security.AllowUnsignedAgents = false
+	// Generate one admin key, because ACLs are on and a node with no valid key
+	// cannot be driven by anything - not even by `matrix` on the same machine.
+	// A generated config that refuses every call is not a working default.
+	key, err := generateAPIKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate an API key: %w", err)
+	}
+	config.Security.APIKeys = []APIKeyConfig{{Key: key, Role: "admin", Name: "local-admin"}}
 	config.Admin.Addr = "0.0.0.0:9090"
 	config.Market.Addr = "0.0.0.0:9091"
 	config.Inference.Addr = "0.0.0.0:9092"
 	config.Connect.Addr = "0.0.0.0:9093"
+	// The Console's Vite dev server, which is the browser origin that actually
+	// needs this on a fresh node. Anything else is opted into explicitly.
+	config.Connect.AllowedOrigins = []string{"http://127.0.0.1:5173", "http://localhost:5173"}
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -224,8 +295,9 @@ func Initialize(configPath string) error {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	// Write config file
-	f, err := os.Create(configPath)
+	// Write config file. 0600, not the usual 0644: it now holds an API key, and
+	// a credential readable by every account on the machine is not a credential.
+	f, err := os.OpenFile(configPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("failed to create config file: %w", err)
 	}
@@ -265,9 +337,6 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	}
 	if config.Connect.Addr == "" {
 		config.Connect.Addr = "0.0.0.0:9093"
-	}
-	if len(config.Connect.AllowedOrigins) == 0 {
-		config.Connect.AllowedOrigins = []string{"*"}
 	}
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
@@ -431,6 +500,11 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to load consensus identity: %w", err)
 	}
 	n.consensusAccount = consensusAccount
+	// Print it. The identity is generated on first start and persisted in the
+	// store, and it was previously never shown anywhere: an operator could not
+	// learn their own node's validator id, which made consensus.validators
+	// impossible to fill in and a multi-node network impossible to configure.
+	fmt.Printf("Consensus identity: %s\n", consensusAccount.AccountID())
 	validatorSet, err := consensus.ValidatorSetFromConfig(consensusAccount.PublicKey, n.config.Consensus.Validators)
 	if err != nil {
 		return fmt.Errorf("failed to build validator set: %w", err)
@@ -461,19 +535,36 @@ func (n *Node) Start() error {
 	// Initialize admin server with authentication if enabled
 	var apiKeys []*admin.APIKey
 	if n.config.Security.EnableACLs {
-		// In production, load API keys from secure storage (e.g., HashiCorp Vault)
-		// For now, load from environment variable MATRIX_ADMIN_API_KEY
-		defaultKey := os.Getenv("MATRIX_ADMIN_API_KEY")
-		if defaultKey != "" {
+		for i, k := range n.config.Security.APIKeys {
+			if k.Key == "" {
+				return fmt.Errorf("security.api_keys[%d] has no key", i)
+			}
+			name := k.Name
+			if name == "" {
+				name = fmt.Sprintf("config-key-%d", i)
+			}
 			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:  defaultKey,
-				Role: admin.RoleAdmin,
-				Name: "default-admin",
+				Key:  k.Key,
+				Role: roleFromConfig(k.Role),
+				Name: name,
 			})
 		}
-		// If no keys provided and auth is required, log a warning
+		// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
+		// of files entirely.
+		if envKey := os.Getenv("MATRIX_ADMIN_API_KEY"); envKey != "" {
+			apiKeys = append(apiKeys, &admin.APIKey{
+				Key:  envKey,
+				Role: admin.RoleAdmin,
+				Name: "env-admin",
+			})
+		}
 		if len(apiKeys) == 0 {
-			fmt.Printf("Warning: EnableACLs is true but no API keys configured. Admin server will require auth but no keys are valid.\n")
+			// Worth shouting about: with ACLs on and no valid key, every RPC on
+			// every surface answers "authentication required" and the node cannot
+			// be driven at all - including by its own CLI.
+			fmt.Printf("Warning: security.enable_acls is true but no API keys are configured, " +
+				"so every RPC will refuse. Add one under security.api_keys, set " +
+				"MATRIX_ADMIN_API_KEY, or run `matrixd -init` to generate a config with a key.\n")
 		}
 	}
 
@@ -606,7 +697,7 @@ func (n *Node) Start() error {
 	// browser can reach them. It is the same objects, not a copy: one code path
 	// serves both surfaces, so they cannot drift, and the same authenticator
 	// gates both when ACLs are enabled.
-	if addr := n.config.Connect.Addr; addr != "" && addr != "off" && addr != "-" {
+	if addr := n.config.Connect.Addr; addr != "" && addr != "off" {
 		connectServer, err := connectapi.NewServer(addr, connectapi.Config{
 			Bindings: []connectapi.Binding{
 				{Desc: &marketv1.MarketService_ServiceDesc, Impl: n.marketServer.Service()},

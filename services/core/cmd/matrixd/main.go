@@ -30,7 +30,12 @@ func main() {
 		if err := node.Initialize(*configPath); err != nil {
 			log.Fatalf("Failed to initialize node: %v", err)
 		}
-		fmt.Println("Node initialized successfully")
+		fmt.Printf("Node initialized: %s\n", *configPath)
+		// Say where the key is rather than printing it: the file is 0600, and a
+		// key echoed here lands in shell history and CI logs. Without this line
+		// the key is invisible, and a reader concludes ACLs are simply broken.
+		fmt.Println("An admin API key was generated under security.api_keys in that file.")
+		fmt.Println("Pass it to the CLI with --api-key, or export MATRIX_ADMIN_API_KEY.")
 		return
 	}
 
