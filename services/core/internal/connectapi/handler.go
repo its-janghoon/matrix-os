@@ -32,6 +32,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -82,6 +83,13 @@ type Config struct {
 	// authentication, because the policy that fits a protocol-shaped route is
 	// not always the blanket "a valid key on every method" this handler applies.
 	ExtraRoutes map[string]http.Handler
+	// RateLimit bounds how fast one caller can drive this endpoint. The zero
+	// value disables limiting, which is right for a loopback daemon and wrong for
+	// anything reachable.
+	RateLimit RateLimit
+	// Now is the clock the rate limiter uses. Nil means time.Now; a test
+	// substitutes its own so it does not have to wait out a refill.
+	Now func() time.Time
 	// AllowedOrigins lists the browser origins allowed to call this endpoint.
 	// A single "*" allows any origin, which is the right default for a local
 	// daemon a user's own page talks to and the wrong one for a public
@@ -142,7 +150,11 @@ func NewHandler(cfg Config) (http.Handler, error) {
 		_, _ = io.WriteString(w, "ok\n")
 	})
 
-	return withCORS(cfg.AllowedOrigins, mux), nil
+	// Order matters: CORS is outermost so a refused caller still gets headers a
+	// browser can read (without them the browser reports a CORS failure and the
+	// developer never sees the 429), and the limiter sits above the routes so one
+	// budget covers the Connect methods and the extra routes alike.
+	return withCORS(cfg.AllowedOrigins, withRateLimit(newLimiter(cfg.RateLimit, cfg.Now), mux)), nil
 }
 
 // rpcHandler serves one method. It holds the generated grpc.MethodDesc rather
@@ -315,7 +327,9 @@ func withCORS(allowed []string, next http.Handler) http.Handler {
 			}
 		}
 		if r.Method == http.MethodOptions {
-			w.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS")
+			// GET is here for the OpenAI-compatible /v1/models route; without it a
+			// browser preflight for that path fails even though the route works.
+			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}

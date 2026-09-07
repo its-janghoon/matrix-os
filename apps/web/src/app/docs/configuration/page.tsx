@@ -50,7 +50,9 @@ inference:
       price_per_unit: 3
 
 connect:
-  addr: 0.0.0.0:9093                     # HTTP/JSON for market + inference; "off" disables
+  addr: 0.0.0.0:9093                     # HTTP/JSON + /v1/chat/completions; "off" disables
+  rate_limit_per_minute: 600             # per caller; 0 disables
+  rate_limit_burst: 120
   allowed_origins:                       # browser origins; empty = no browser may call
     - http://127.0.0.1:5173
     - http://localhost:5173
@@ -182,6 +184,16 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'addr',
         def: '0.0.0.0:9093',
         note: 'Serves the market and inference services as JSON. Set to "off" to disable it entirely.',
+      },
+      {
+        name: 'rate_limit_per_minute',
+        def: '600',
+        note: 'How many requests one caller may make per minute, counted per credential where one is presented and per remote address otherwise. Nothing bounded this before, on an endpoint where every call reserves capacity, reads a ledger or runs a model. A refusal is a 429 with Retry-After, in the envelope the caller\'s protocol expects. Zero disables it. Note the limitation: the remote address is the TCP peer, not X-Forwarded-For, so behind a reverse proxy every unauthenticated request looks like one caller and the proxy should limit too.',
+      },
+      {
+        name: 'rate_limit_burst',
+        def: '120',
+        note: 'How many requests a caller may make back to back before the sustained rate applies. Zero means one minute\'s worth. CORS preflights are not counted, since a browser sends one per request.',
       },
       {
         name: 'allowed_origins',

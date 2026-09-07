@@ -106,6 +106,21 @@ type Config struct {
 		// the narrow thing that actually needs to work. "*" allows any origin and
 		// belongs in development only.
 		AllowedOrigins []string `yaml:"allowed_origins"`
+		// RateLimitPerMinute bounds how many requests one caller may make per
+		// minute, counted per credential where one is presented and per remote
+		// address otherwise.
+		//
+		// Nothing bounded this before: maxRequestBytes capped a single body and
+		// that was all, so a caller could open requests as fast as it liked
+		// against an endpoint where every call reserves capacity, reads a ledger
+		// or runs a model. A generated config arms a generous limit rather than
+		// leaving it off, because the setting that matters is the one a node
+		// exposed to a network already has. Zero disables it.
+		RateLimitPerMinute int `yaml:"rate_limit_per_minute"`
+		// RateLimitBurst is how many requests a caller may make back to back
+		// before the sustained rate applies. Zero means one minute's worth, which
+		// suits a client that batches a few calls at startup and then settles.
+		RateLimitBurst int `yaml:"rate_limit_burst"`
 	} `yaml:"connect"`
 	Consensus struct {
 		// Validators is the fixed validator set as hex-encoded account IDs
@@ -547,6 +562,11 @@ type Node struct {
 // at its own price. These match `matrix quickstart`'s demo provider so the two
 // demos behave the same.
 const (
+	// defaultRateLimitPerMinute / defaultRateLimitBurst are what `matrixd -init`
+	// arms on the HTTP endpoint. See Config.Connect.RateLimitPerMinute.
+	defaultRateLimitPerMinute = 600
+	defaultRateLimitBurst     = 120
+
 	demoInferenceCapacity = 100
 	demoInferencePrice    = 5
 )
@@ -592,6 +612,12 @@ func Initialize(configPath string) error {
 	// The Console's Vite dev server, which is the browser origin that actually
 	// needs this on a fresh node. Anything else is opted into explicitly.
 	config.Connect.AllowedOrigins = []string{"http://127.0.0.1:5173", "http://localhost:5173"}
+	// Generous enough that a quickstart, the Console and an SDK batching a few
+	// calls never notice, and low enough to bound one caller on a node exposed to
+	// a network. An operator serving many callers through one endpoint raises it;
+	// zero turns it off.
+	config.Connect.RateLimitPerMinute = defaultRateLimitPerMinute
+	config.Connect.RateLimitBurst = defaultRateLimitBurst
 	// Spell out the epoch length rather than leaving it zero: every node in a
 	// network must agree on it, so it belongs in the file where an operator can
 	// see and copy it. Approve no set changes by default - a node that
@@ -1324,6 +1350,10 @@ func (n *Node) Start() error {
 			ExtraRoutes:    openAI.Routes(),
 			Auth:           connectAuth(marketAuth),
 			AllowedOrigins: n.config.Connect.AllowedOrigins,
+			RateLimit: connectapi.RateLimit{
+				RequestsPerMinute: n.config.Connect.RateLimitPerMinute,
+				Burst:             n.config.Connect.RateLimitBurst,
+			},
 		})
 		if err != nil {
 			return fmt.Errorf("failed to create connect endpoint: %w", err)
