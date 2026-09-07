@@ -82,6 +82,31 @@ type Service struct {
 	// auth for FundAccount regardless of the node's general posture keeps the
 	// "every mutating RPC is authorized" invariant the market-auth note relies on.
 	authEnforced bool
+
+	// validatorCount reports how many validators the network currently has, and
+	// it gates FundAccount. Nil means unknown, which is treated as a single-node
+	// network so an in-process Service keeps working.
+	//
+	// Funding moves reward-pool MATRIX on THIS node's ledger and is not a
+	// consensus transaction, so on a multi-validator network it diverges the
+	// nodes' reward pools. That is not a cosmetic difference: the provider
+	// emission clamps its per-block budget to the pool balance it reads inside
+	// commitAndApply, so two nodes with different pools credit providers
+	// different amounts from the same block, which is a fork.
+	//
+	// It is latent while rewards.approved_providers is empty, because the
+	// emission then pays nobody. Refusing the call on a multi-validator node
+	// keeps it latent rather than waiting for the day someone approves a
+	// provider. A single-node network - the quickstart, a dev node - is
+	// unaffected, which is the only place this RPC was ever meant for.
+	//
+	// It is a func, not an int, for two reasons. The validator SET is the
+	// authority on its own size and the node's Consensus.Validators config list
+	// is not: the set is self plus the configured ids, so a two-node network
+	// whose configs each name only the other peer has a set of two and a config
+	// list of one. And the set changes at epoch boundaries, so a number captured
+	// at startup goes stale.
+	validatorCount func() int
 }
 
 // NewService constructs a Service. market, settled and chain are required;
@@ -256,6 +281,20 @@ func (s *Service) SetReconciler(reconciler Reconciler) { s.reconciler = reconcil
 // gates FundAccount (see the Service.authEnforced doc). It is called once during
 // construction, before the server starts serving, so no locking is needed.
 func (s *Service) SetAuthEnforced(enforced bool) { s.authEnforced = enforced }
+
+// SetValidatorCount gives the Service a way to read how many validators the
+// network currently has, which is what gates FundAccount. See the
+// Service.validatorCount doc for why this is a func and not a number.
+func (s *Service) SetValidatorCount(fn func() int) { s.validatorCount = fn }
+
+// validators reports the current validator count, or 1 when nothing told the
+// Service otherwise.
+func (s *Service) validators() int {
+	if s.validatorCount == nil {
+		return 1
+	}
+	return s.validatorCount()
+}
 
 // Server hosts the market gRPC service on its own listener, following the
 // internal/admin.Server construction pattern (grpc.NewServer, health service,

@@ -413,6 +413,22 @@ func (s *Service) FundAccount(ctx context.Context, req *marketv1.FundAccountRequ
 		return nil, status.Error(codes.FailedPrecondition,
 			"reward-pool funding requires authentication: enable ACLs (security.enable_acls) to expose FundAccount")
 	}
+	// Funding is not a consensus transaction: it moves reward-pool MATRIX on THIS
+	// node's ledger only. On a multi-validator network that diverges the nodes'
+	// reward pools, and the provider emission clamps its per-block budget to the
+	// pool balance it reads while applying a block - so two nodes with different
+	// pools credit providers different amounts from the same block. That is a
+	// fork, not a rounding difference.
+	//
+	// Found by running two nodes: funding an account on one left the other
+	// reporting a balance of zero for it, which is the visible half of the same
+	// divergence.
+	if n := s.validators(); n > 1 {
+		return nil, status.Errorf(codes.FailedPrecondition,
+			"reward-pool funding is not consensus-ordered, so it would diverge the %d validators' "+
+				"reward pools and fork the provider emission. Move value with a signed transfer instead, "+
+				"or set the allocation in every node's genesis config", n)
+	}
 	if req.GetAccount() == "" {
 		return nil, status.Error(codes.InvalidArgument, "account is required")
 	}

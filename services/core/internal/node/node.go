@@ -854,8 +854,18 @@ func (n *Node) Start() error {
 	}
 
 	// Initialize P2P host
+	// A STABLE peer id. Without it libp2p mints a new one every start, and every
+	// other node's bootstrap_peers entry names the old one - which libp2p then
+	// correctly refuses to connect to, reporting "all dials failed" with no hint
+	// that the id is merely out of date.
+	peerKey, err := p2p.LoadOrCreatePeerKey(n.kvStore)
+	if err != nil {
+		return err
+	}
+
 	p2pHost, err := p2p.New(n.ctx, &p2p.Config{
 		ListenAddr: n.config.Network.ListenAddr,
+		Identity:   peerKey,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize P2P host: %w", err)
@@ -1026,6 +1036,15 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start consensus engine: %w", err)
 	}
 	n.consensus = consensusEngine
+
+	// Print the addresses another node has to be given.
+	//
+	// This was missing, and it made a second node impossible to configure: the
+	// documented `bootstrap_peers` entry is
+	// /ip4/<host>/tcp/<port>/p2p/<peer id>, and nothing printed or exposed this
+	// node's peer id, so there was no way to learn what to put there. An
+	// operator's first two-node attempt hits this before anything else.
+	n.printPeerAddresses()
 
 	// Connect to bootstrap peers
 	for _, peerAddr := range n.config.Network.BootstrapPeers {
@@ -1198,6 +1217,22 @@ func (n *Node) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)
 	}
+	// FundAccount is not consensus-ordered, so it is refused on a network with
+	// more than one validator: it would diverge the nodes' reward pools and fork
+	// the provider emission. See marketapi.Service.validatorCount.
+	// Read the live validator SET, not the config list: the set is this node plus
+	// the configured ids, so a two-node network whose configs each name only the
+	// other peer has a set of two and a config list of one.
+	marketServer.Service().SetValidatorCount(func() int {
+		if n.consensus == nil {
+			return 1
+		}
+		vs := n.consensus.ValidatorSet()
+		if vs == nil {
+			return 1
+		}
+		return vs.Len()
+	})
 	n.marketServer = marketServer
 	if err := n.marketServer.Start(n.ctx); err != nil {
 		return fmt.Errorf("failed to start market API server: %w", err)
@@ -1748,6 +1783,37 @@ func (n *Node) GetBridge() *bridge.Bridge {
 // not a consensus-ordered operation; see bridge_watch.go for that boundary.
 func (n *Node) GetBridgeWatcher() *bridge.Watcher {
 	return n.bridgeWatcher
+}
+
+// printPeerAddresses prints the full multiaddrs another node uses to reach this
+// one, ready to paste into its `network.bootstrap_peers`.
+//
+// The peer id is the part that cannot be guessed: it is derived from the node's
+// libp2p key, which is generated on first start. A loopback address is printed
+// too, and labelled, because it is right for a second node on the same machine
+// and wrong for one anywhere else - an operator who pastes 127.0.0.1 into a
+// remote node's config gets a peer that silently never connects.
+func (n *Node) printPeerAddresses() {
+	if n.p2pHost == nil {
+		return
+	}
+	id := n.p2pHost.GetPeerID().String()
+	addrs := n.p2pHost.GetAddrs()
+	if len(addrs) == 0 {
+		fmt.Printf("P2P peer id: %s (no listen addresses; network.listen_addr may be unset)\n", id)
+		return
+	}
+
+	fmt.Printf("P2P peer id: %s\n", id)
+	fmt.Printf("P2P addresses for another node's network.bootstrap_peers:\n")
+	for _, addr := range addrs {
+		full := addr.String() + "/p2p/" + id
+		note := ""
+		if strings.Contains(addr.String(), "/127.0.0.1/") || strings.Contains(addr.String(), "/::1/") {
+			note = "   (loopback: only for a node on this same machine)"
+		}
+		fmt.Printf("  %s%s\n", full, note)
+	}
 }
 
 // unpaidInferenceSweepInterval is how often expired payment requests are swept.

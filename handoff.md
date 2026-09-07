@@ -131,8 +131,61 @@ On a staked network it also has to bond before it can be admitted: fund its
 consensus account, set `consensus.stake.bond`, and the node bonds the shortfall
 itself and keeps topping it up. It says so plainly when the account is empty.
 
-Not verified: a genuine two-machine join over real libp2p. The join tests use
-the in-process bus, and the earlier two-node work was manual. Worth doing.
+The node prints its own **peer id and full multiaddrs** at startup too, which is
+what goes in the other node's `bootstrap_peers`. It labels a loopback address as
+loopback, because pasting `127.0.0.1` into a remote node's config produces a
+peer that silently never connects.
+
+### What two running nodes verified, and what they did not
+
+Two separate `matrixd` processes, separate data directories, real libp2p TCP
+between them, each config naming only the *other* peer's validator id:
+
+- Both nodes bootstrap from an identical `genesis:` and report identical
+  balances for the allocated account.
+- A signed transfer submitted to A appears on B, and one submitted to B appears
+  on A, at the same index, nonce and block, with matching balances after the
+  1% fee (250 -> 248, 100 -> 99).
+- A's peer id is unchanged across a restart, and B stays joined through it.
+- `FundAccount` is refused on both, naming 2 validators.
+
+Still not verified: separate hosts, NAT traversal, and real latency or packet
+loss. Two processes on one machine is not two machines, and this note should not
+be read as if it were.
+
+**Three defects this found that a green test suite did not.** All three were
+invisible to a single node, which is the point:
+
+1. **Nothing printed the node's peer id or listen addresses,** so a second node
+   was impossible to configure: `bootstrap_peers` wants
+   `/ip4/<host>/tcp/<port>/p2p/<peer id>` and there was no way to learn the id.
+   Fixed by `Node.printPeerAddresses`.
+
+2. **The libp2p peer id changed on every start.** `libp2p.New` was called with
+   no `Identity()` option, so it minted a fresh key each time. The consensus
+   identity was already persisted, so the effect was specific and confusing: a
+   node kept its validator identity across a restart and lost its network
+   identity, which staled every other node's `bootstrap_peers` entry the moment
+   it bounced. libp2p verifies the id it dialed and correctly refuses a host
+   presenting a different one, so the only symptom is `all dials failed` with no
+   hint the id is merely out of date. Fixed by `p2p.LoadOrCreatePeerKey`, with a
+   test that fails if the persisted key is not the one the host presents.
+
+3. **`FundAccount` forks a multi-validator network.** It moves reward-pool
+   MATRIX on the receiving node's ledger only and is not a consensus
+   transaction, so funding on A left B reporting zero. That is not merely a
+   confusing read: `distributeEmissionLocked` clamps its per-block budget to the
+   reward-pool balance it reads while applying a block, so two nodes with
+   different pools credit providers different amounts from the same block. It is
+   latent only while `rewards.approved_providers` is empty. It is now refused
+   when the validator set has more than one member; use a signed transfer, or
+   set the allocation in every node's `genesis` config.
+
+   The gate reads the live validator **set**, not `consensus.validators`. The
+   set is self plus the configured ids, so the two-node network above - each
+   config naming only its peer - has a config list of one and a set of two, and
+   a count taken from the config would have let the call through. The set also
+   changes at epoch boundaries, so a number captured at startup goes stale.
 
 ## Done since 2e6325e
 
@@ -400,7 +453,11 @@ of which is code. Note also what that watcher's own comment says: the unlock is
 a per-node relayer and is NOT consensus-ordered, which is correct for a solo
 operator and not for a validator set.
 
-**A genuine two-machine libp2p join** is still unverified (as it has been).
+**A two-process libp2p join is now verified; a two-*machine* one is not.** Two
+processes with separate data directories agreed on the chain in both directions
+over real libp2p TCP, and that run turned up three defects (see "What two
+running nodes verified" above). Separate hosts, NAT and real latency remain
+untested.
 
 **Copies of byte layouts.** The node owns four canonical payloads now (the
 ed25519 transfer, the ed25519 run authorization, and the two EIP-712 digests).
@@ -536,9 +593,10 @@ Each of these cost real time this session.
 
 Known and accepted, not blocking:
 
-- **A genuine two-machine libp2p join is still unverified.** The join tests use
-  the in-process bus; the earlier two-node work was manual. Worth doing on real
-  hardware.
+- **A two-machine libp2p join is still unverified.** Two separate processes on
+  one machine now agree on the chain in both directions over real libp2p TCP,
+  which is what caught the peer-identity and `FundAccount` defects. Separate
+  hosts, NAT traversal and real latency are still untested.
 - **`apps/console`'s native Tauri bundle still won't build in this sandbox**
   (missing `webkit2gtk`/`gtk`). The frontend itself builds.
 - **Wallet/agent metering nonces are non-monotonic across restarts** but kept

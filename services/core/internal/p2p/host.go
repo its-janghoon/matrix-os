@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/libp2p/go-libp2p"
+	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
@@ -21,7 +22,11 @@ type Host struct {
 // Config represents p2p host configuration
 type Config struct {
 	ListenAddr string
-	// Add more config options as needed
+	// Identity is the host's libp2p private key. When nil, libp2p generates an
+	// EPHEMERAL one, which changes the node's peer id on every start and
+	// invalidates every other node's bootstrap_peers entry - so a real
+	// deployment passes a persisted key (see LoadOrCreatePeerKey).
+	Identity libp2pcrypto.PrivKey
 }
 
 // New creates a new p2p host
@@ -45,11 +50,18 @@ func New(ctx context.Context, cfg *Config) (*Host, error) {
 	// still enabled via EnableRelay so the host can dial/accept relayed
 	// connections; only the (misconfigured) automatic relay discovery is
 	// dropped. NAT port mapping is retained for real deployments.
-	h, err := libp2p.New(
+	opts := []libp2p.Option{
 		libp2p.ListenAddrs(listenAddr),
 		libp2p.EnableRelay(),
 		libp2p.NATPortMap(),
-	)
+	}
+	if cfg.Identity != nil {
+		// Without this the peer id is different on every start. See
+		// LoadOrCreatePeerKey for what that breaks.
+		opts = append(opts, libp2p.Identity(cfg.Identity))
+	}
+
+	h, err := libp2p.New(opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create libp2p host: %w", err)
 	}

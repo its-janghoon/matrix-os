@@ -2,6 +2,7 @@ package marketapi
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
@@ -210,5 +211,108 @@ func TestFundAccount_RejectedWithoutCredentials(t *testing.T) {
 	}
 	if poolBal, _ := mkt.Ledger().Balance(token.RewardPoolAccount); poolBal != rewardPool {
 		t.Fatalf("reward pool = %d, want %d (unchanged on rejection)", poolBal, rewardPool)
+	}
+}
+
+// fundHarnessWithValidators is a fund harness that also hands back the Service,
+// so a test can set the validator count the way the node does at startup.
+func fundHarnessWithValidators(t *testing.T, rewardPool uint64, validators int) marketv1.MarketServiceClient {
+	t.Helper()
+
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("kv.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	mkt, err := market.NewMarket(store)
+	if err != nil {
+		t.Fatalf("market.NewMarket: %v", err)
+	}
+	chain := token.NewChain(store)
+	settled := token.NewSettledLedger(mkt.Ledger(), chain)
+	treasury := token.NewTreasury(mkt.Ledger(), store)
+	if err := treasury.ApplyGenesis(nil, rewardPool); err != nil {
+		t.Fatalf("ApplyGenesis: %v", err)
+	}
+
+	auth := admin.NewAuthenticator()
+	if err := auth.AddKey(&admin.APIKey{Key: fundTestAPIKey, Role: admin.RoleAdmin}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	srv, err := NewServer(Config{
+		Addr:    "127.0.0.1:0",
+		Auth:    auth,
+		Market:  mkt,
+		Settled: settled,
+		Chain:   chain,
+		Funder:  treasury,
+	})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	srv.Service().SetValidatorCount(func() int { return validators })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	if err := srv.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	conn, err := grpc.NewClient(srv.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("grpc.NewClient: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	return marketv1.NewMarketServiceClient(conn)
+}
+
+// fundCtx carries the harness's API key, which FundAccount requires.
+func fundCtx() context.Context {
+	return metadata.NewOutgoingContext(context.Background(),
+		metadata.Pairs("authorization", "Bearer "+fundTestAPIKey))
+}
+
+// TestFundAccountIsRefusedOnAMultiValidatorNetwork covers a fork, not a
+// permission.
+//
+// Funding moves reward-pool MATRIX on ONE node's ledger and is not a consensus
+// transaction, so on a multi-validator network the nodes' pools diverge. The
+// provider emission then clamps its per-block budget to the pool balance it
+// reads while applying a block, so two nodes with different pools credit
+// providers different amounts from the same block.
+//
+// It is latent while rewards.approved_providers is empty. This keeps it that
+// way rather than waiting for someone to approve a provider. Found by running
+// two nodes: funding on one left the other reporting zero for the account.
+func TestFundAccountIsRefusedOnAMultiValidatorNetwork(t *testing.T) {
+	client := fundHarnessWithValidators(t, 1_000_000, 2)
+
+	_, err := client.FundAccount(fundCtx(), &marketv1.FundAccountRequest{Account: "alice", Amount: 100})
+	if err == nil {
+		t.Fatal("want a refusal on a two-validator network")
+	}
+	if status.Code(err) != codes.FailedPrecondition {
+		t.Fatalf("code = %s, want FailedPrecondition: %v", status.Code(err), err)
+	}
+	if !strings.Contains(err.Error(), "fork") {
+		t.Fatalf("error = %q, want it to say why: this is a fork, not a permission", err)
+	}
+}
+
+// TestFundAccountStillWorksOnASingleNodeNetwork: the quickstart and every dev
+// node depend on it, and they are the only place it was ever meant for.
+func TestFundAccountStillWorksOnASingleNodeNetwork(t *testing.T) {
+	client := fundHarnessWithValidators(t, 1_000_000, 1)
+
+	resp, err := client.FundAccount(fundCtx(), &marketv1.FundAccountRequest{Account: "alice", Amount: 100})
+	if err != nil {
+		t.Fatalf("FundAccount on a single-node network: %v", err)
+	}
+	if resp.GetBalance() != 100 {
+		t.Fatalf("balance = %d, want 100", resp.GetBalance())
 	}
 }
