@@ -848,13 +848,19 @@ func TestAWeightedClusterCommitsAndAgrees(t *testing.T) {
 	nodes, stop := stakeCluster(t, 4, 2, 0)
 	defer stop()
 
-	// Deliberately lopsided: one validator holds most of the stake, so a
-	// headcount majority and a stake majority are different sets.
+	// Unequal, but not so unequal that the set loses fault tolerance. With
+	// 60/20/15/5 no quorum exists without the 60 holder (the other three sum to
+	// 40 against a quorum of 66,667), so that node has to be present for every
+	// commit and one slow tick stalls the chain - which is correct BFT behaviour
+	// for a validator holding more than a third, and useless for a test about
+	// whether weighted voting commits at all. At 30/30/25/15 any three of the
+	// four clear the quorum, so it tolerates one lagging node the way an equal
+	// four-member set does.
 	//
 	// Bonded through committed transactions rather than written to each ledger
 	// by hand, because that is what makes the boundary re-weight: a bond takes
 	// effect because a bond transaction committed.
-	bonds := []uint64{60_000, 20_000, 15_000, 5_000}
+	bonds := []uint64{30_000, 30_000, 25_000, 15_000}
 	for i, nd := range nodes {
 		id := nd.acct.AccountID()
 		mintAll(t, nodes, id, bonds[i])
