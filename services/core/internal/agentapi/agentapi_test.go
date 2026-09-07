@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
@@ -250,3 +251,110 @@ func TestServiceDeployAndList(t *testing.T) {
 
 // guestLimits returns valid limits for running the trivial guest fixture.
 func guestLimits() agent.ResourceLimits { return agent.DefaultMemoryLimits }
+
+// The guest.wasm fixture calls send("peer-1", "ping") during _start. With the
+// default (zero) send policy the manager must refuse that send, record the
+// attempt via the runtime's stderr, and deliver nothing to any inbox: the
+// default posture is identical to a node with no send policy.
+func TestSendRefusedByDefaultPolicy(t *testing.T) {
+	store := newTestStore(t)
+	mgr, err := NewManager(ManagerConfig{Store: store}) // no SendPolicy => refuse all
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// Deploy the would-be recipient so a refusal cannot be blamed on a missing
+	// target: the point is that the DEFAULT policy refuses regardless.
+	if _, err := mgr.Deploy(context.Background(), "peer-1", guestWasm(t), guestLimits(), ""); err != nil {
+		t.Fatalf("Deploy peer-1: %v", err)
+	}
+	res, err := mgr.Deploy(context.Background(), "sender", guestWasm(t), guestLimits(), "")
+	if err != nil {
+		t.Fatalf("Deploy sender: %v", err)
+	}
+	// The send() attempt is refused and reported on the guest's stderr (captured
+	// into LastOutput), and nothing lands in peer-1's inbox.
+	if !strings.Contains(res.Deployment.LastOutput, "no send policy is configured") {
+		t.Fatalf("LastOutput = %q, want a refusal naming the missing policy", res.Deployment.LastOutput)
+	}
+	if in := mgr.Inbox("peer-1"); len(in) != 0 {
+		t.Fatalf("peer-1 inbox = %+v, want empty under the default policy", in)
+	}
+}
+
+// Under a policy that permits the target, the sender's send("peer-1", "ping")
+// is delivered into peer-1's inbox and no refusal is reported.
+func TestSendDeliveredUnderPermittingPolicy(t *testing.T) {
+	store := newTestStore(t)
+	mgr, err := NewManager(ManagerConfig{
+		Store:      store,
+		SendPolicy: agent.SendPolicy{Enabled: true, Allow: []string{"peer-1"}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := mgr.Deploy(context.Background(), "peer-1", guestWasm(t), guestLimits(), ""); err != nil {
+		t.Fatalf("Deploy peer-1: %v", err)
+	}
+	res, err := mgr.Deploy(context.Background(), "sender", guestWasm(t), guestLimits(), "")
+	if err != nil {
+		t.Fatalf("Deploy sender: %v", err)
+	}
+	if strings.Contains(res.Deployment.LastOutput, "not permitted") || strings.Contains(res.Deployment.LastOutput, "no send policy") {
+		t.Fatalf("LastOutput reported a refusal for a permitted send: %q", res.Deployment.LastOutput)
+	}
+	in := mgr.Inbox("peer-1")
+	if len(in) != 1 || in[0].Target != "peer-1" || string(in[0].Payload) != "ping" {
+		t.Fatalf("peer-1 inbox = %+v, want one message peer-1/ping", in)
+	}
+}
+
+// A send permitted by the allowlist but naming an agent not deployed on this
+// node does not resolve to a recipient: it is a delivery error, reported to the
+// guest's stderr, with nothing delivered.
+func TestSendPermittedButTargetNotDeployed(t *testing.T) {
+	store := newTestStore(t)
+	mgr, err := NewManager(ManagerConfig{
+		Store:      store,
+		SendPolicy: agent.SendPolicy{Enabled: true, Allow: []string{"peer-1"}},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	// peer-1 is on the allowlist but never deployed.
+	res, err := mgr.Deploy(context.Background(), "sender", guestWasm(t), guestLimits(), "")
+	if err != nil {
+		t.Fatalf("Deploy sender: %v", err)
+	}
+	if !strings.Contains(res.Deployment.LastOutput, "no agent named") {
+		t.Fatalf("LastOutput = %q, want a delivery error naming the missing agent", res.Deployment.LastOutput)
+	}
+	if in := mgr.Inbox("peer-1"); len(in) != 0 {
+		t.Fatalf("peer-1 inbox = %+v, want empty (nothing delivered)", in)
+	}
+}
+
+// A send whose target is NOT on the allowlist is refused, reported to the
+// guest's stderr, and delivers nothing - even under an enabled policy.
+func TestSendRefusedWhenTargetNotAllowlisted(t *testing.T) {
+	store := newTestStore(t)
+	mgr, err := NewManager(ManagerConfig{
+		Store:      store,
+		SendPolicy: agent.SendPolicy{Enabled: true, Allow: []string{"peer-9"}}, // not peer-1
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := mgr.Deploy(context.Background(), "peer-1", guestWasm(t), guestLimits(), ""); err != nil {
+		t.Fatalf("Deploy peer-1: %v", err)
+	}
+	res, err := mgr.Deploy(context.Background(), "sender", guestWasm(t), guestLimits(), "")
+	if err != nil {
+		t.Fatalf("Deploy sender: %v", err)
+	}
+	if !strings.Contains(res.Deployment.LastOutput, "not permitted") {
+		t.Fatalf("LastOutput = %q, want a refusal saying the target is not permitted", res.Deployment.LastOutput)
+	}
+	if in := mgr.Inbox("peer-1"); len(in) != 0 {
+		t.Fatalf("peer-1 inbox = %+v, want empty (not allowlisted)", in)
+	}
+}

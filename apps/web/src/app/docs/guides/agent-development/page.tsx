@@ -151,10 +151,15 @@ export default function AgentDevelopmentPage() {
                     </li>
                     <li>
                       <code className='text-white'>send</code> hands a target and a payload to the{' '}
-                      <code className='text-white'>SendFunc</code> the host configured. With none configured every
-                      send is refused, because who a module may address is a policy question and inventing an answer
-                      here would be worse than having none. The attempt is recorded either way, so you can see what a
-                      module tried to do.
+                      <code className='text-white'>SendFunc</code> the host configured. Who a module may address is a
+                      policy question, so it is a deliberate, configurable send policy with a secure default rather
+                      than an invented one. By default inter-agent send is <strong>off</strong>: every send is refused
+                      and reported on the guest&apos;s stderr, and the attempt is recorded either way so you can see
+                      what a module tried to do. An operator opts in by setting{' '}
+                      <code className='text-white'>agent.allow_send</code> and naming an allowlist in{' '}
+                      <code className='text-white'>agent.send_allowlist</code>; a <em>name</em> is a deployment id on
+                      the same node, and a permitted send is delivered into that agent&apos;s inbox. There is no
+                      wildcard and nothing off-node is addressable.
                     </li>
                   </ul>
 
@@ -199,9 +204,11 @@ export default function AgentDevelopmentPage() {
                       does. Today the deadline protects the node but bills nobody.
                     </li>
                     <li>
-                      Decide what <code className='text-white'>send</code> may address. The host function is real and
-                      refuses everything without a policy, which is the safe default and not a useful one: a
-                      messaging primitive for untrusted modules needs to say who may be named and what a name means.
+                      Route <code className='text-white'>send</code> off-node. Inter-agent send now has a real,
+                      configurable policy (a name resolves to another agent&apos;s inbox on the same node, refused by
+                      default, opt-in via <code className='text-white'>agent.allow_send</code> and{' '}
+                      <code className='text-white'>agent.send_allowlist</code>). What is still unbuilt is addressing an
+                      agent on a <em>different</em> node: the primitive is deliberately local for now.
                     </li>
                   </ul>
 

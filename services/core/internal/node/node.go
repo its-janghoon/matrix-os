@@ -348,6 +348,20 @@ type AgentConfig struct {
 	// deployer. Optional; when empty a metered deploy must name a deployer whose
 	// signing key the node can resolve.
 	DefaultDeployer string `yaml:"default_deployer"`
+	// AllowSend turns the agent runtime's inter-agent send() primitive on. It is
+	// OFF by default: with AllowSend false (or SendAllowlist empty) every send()
+	// a running module makes is refused and reported to the guest's stderr,
+	// identical to a node with no send policy at all. Turning it on is an
+	// explicit operator opt-in and does nothing on its own - SendAllowlist must
+	// also name who may be addressed. There is deliberately no "allow all".
+	AllowSend bool `yaml:"allow_send"`
+	// SendAllowlist is the set of target names (deployment ids on this node) a
+	// running module may address through send() when AllowSend is true. A name is
+	// a deployment id on this node; a permitted send is delivered into that
+	// agent's inbox, and nothing off-node is addressable. An empty allowlist
+	// refuses every send even when AllowSend is true, so the operator must name
+	// who may be addressed. There is deliberately no wildcard.
+	SendAllowlist []string `yaml:"send_allowlist"`
 }
 
 // GenesisAllocationConfig is a single named genesis allocation: Amount native
@@ -483,6 +497,13 @@ func Initialize(configPath string) error {
 	// an agent costs nothing. The per-run price is monetary policy the operator
 	// decides, not a number this tool bakes in; an operator opts in by setting
 	// agent.run_price and agent.run_price_recipient.
+	//
+	// Inter-agent send() OFF in a generated config: AllowSend stays false and
+	// SendAllowlist stays empty, so a running module's send() calls are refused
+	// (and reported to its stderr), identical to a node with no send policy. An
+	// operator opts in by setting agent.allow_send true AND naming
+	// agent.send_allowlist (the deployment ids a module may address); there is no
+	// permissive default and no "allow all".
 	// The Console's Vite dev server, which is the browser origin that actually
 	// needs this on a fresh node. Anything else is opted into explicitly.
 	config.Connect.AllowedOrigins = []string{"http://127.0.0.1:5173", "http://localhost:5173"}
@@ -1121,6 +1142,13 @@ func (n *Node) Start() error {
 			Price:           n.config.Agent.RunPrice,
 			Recipient:       n.config.Agent.RunPriceRecipient,
 			DefaultDeployer: n.config.Agent.DefaultDeployer,
+		},
+		// Inter-agent send is off unless the operator opts in with agent.allow_send
+		// AND names agent.send_allowlist; the zero SendPolicy refuses every send,
+		// exactly as a node with no policy does.
+		SendPolicy: agent.SendPolicy{
+			Enabled: n.config.Agent.AllowSend,
+			Allow:   n.config.Agent.SendAllowlist,
 		},
 		Settler:  n.consensus,
 		Accounts: n.signingAccts,

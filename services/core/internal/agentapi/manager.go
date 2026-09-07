@@ -194,6 +194,13 @@ type ManagerConfig struct {
 	// Accounts resolves the deployer's signing key. Required only when
 	// Meter.Enabled().
 	Accounts Accounts
+	// SendPolicy governs the agent runtime's inter-agent send() primitive: who a
+	// running module may address and, together with the Manager's inbox delivery,
+	// what a target name resolves to. The zero value (Enabled false, empty Allow)
+	// refuses every send, identical to today's nil SendFunc: inter-agent send is
+	// OFF unless the operator turns it on and names an allowlist. See
+	// agent.SendPolicy.
+	SendPolicy agent.SendPolicy
 }
 
 // Manager instantiates, runs, persists, and meters WebAssembly agents. It owns
@@ -201,14 +208,21 @@ type ManagerConfig struct {
 // construction so ListAgents reflects them after a node restart. It is safe for
 // concurrent use.
 type Manager struct {
-	store    *kv.Store
-	maxBytes int
-	meter    MeterConfig
-	settler  Settler
-	accounts Accounts
+	store      *kv.Store
+	maxBytes   int
+	meter      MeterConfig
+	settler    Settler
+	accounts   Accounts
+	sendPolicy agent.SendPolicy
 
 	mu      sync.Mutex
 	records map[string]Deployment
+	// inbox holds the messages delivered to each agent by a permitted send()
+	// from another agent on this node. It is keyed by recipient deployment id.
+	// A message only lands here when the send policy permits the target AND the
+	// target is a known deployment on this node; that is what a target "name"
+	// resolves to (see deliver).
+	inbox map[string][]agent.Message
 	// nonce is a per-deployer metering-transfer nonce sequence so repeated
 	// same-amount charges from one deployer remain distinct consensus
 	// transactions (the transfer nonce is a uniquifier; see
@@ -240,13 +254,15 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		}
 	}
 	m := &Manager{
-		store:    cfg.Store,
-		maxBytes: maxBytes,
-		meter:    cfg.Meter,
-		settler:  cfg.Settler,
-		accounts: cfg.Accounts,
-		records:  make(map[string]Deployment),
-		nonce:    make(map[string]uint64),
+		store:      cfg.Store,
+		maxBytes:   maxBytes,
+		meter:      cfg.Meter,
+		settler:    cfg.Settler,
+		accounts:   cfg.Accounts,
+		sendPolicy: cfg.SendPolicy,
+		records:    make(map[string]Deployment),
+		nonce:      make(map[string]uint64),
+		inbox:      make(map[string][]agent.Message),
 	}
 	if err := m.reload(); err != nil {
 		return nil, err
@@ -404,11 +420,18 @@ func (m *Manager) nextNonce(deployer string) uint64 {
 // module plus its last outcome, not a live process.
 func (m *Manager) run(ctx context.Context, id string, module []byte, limits agent.ResourceLimits) (string, error) {
 	var out strings.Builder
+	// Build the send handler from the configured policy. NewSendFunc returns nil
+	// when the policy permits nothing (disabled or empty allowlist), which the
+	// runtime treats as "refuse every send and say so" - the secure default. When
+	// the operator has opted in, a permitted target is delivered into the
+	// recipient agent's inbox that this Manager owns (see deliver).
+	send := agent.NewSendFunc(m.sendPolicy, agent.DelivererFunc(m.deliver))
 	a, err := agent.New(ctx, agent.Config{
 		ID:     id,
 		Code:   module,
 		Stdout: &out,
 		Stderr: &out,
+		Send:   send,
 	}, limits)
 	if err != nil {
 		return out.String(), err
@@ -418,6 +441,44 @@ func (m *Manager) run(ctx context.Context, id string, module []byte, limits agen
 		return out.String(), err
 	}
 	return out.String(), nil
+}
+
+// deliver resolves a permitted target name to a recipient and delivers a
+// payload to it. It is the "what a name means" half of the send policy: a name
+// is a deployment id on THIS node, and delivery appends the message to that
+// deployment's inbox. A name the policy permitted but that names no deployment
+// on this node does not resolve to a recipient, so it is a delivery error - the
+// runtime surfaces it to the sending guest's stderr and records the attempt
+// either way. Nothing off-node is addressable.
+//
+// The policy has already decided the target is permitted before deliver is
+// called (see agent.NewSendFunc); deliver never widens that decision.
+func (m *Manager) deliver(target string, payload []byte) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, ok := m.records[target]; !ok {
+		return fmt.Errorf("agentapi: no agent named %q is deployed on this node", target)
+	}
+	m.inbox[target] = append(m.inbox[target], agent.Message{
+		Target:  target,
+		Payload: append([]byte(nil), payload...),
+	})
+	return nil
+}
+
+// Inbox returns the messages delivered to the agent named id by permitted
+// send() calls from other agents on this node, in delivery order. It returns a
+// copy so a caller cannot mutate the stored messages. It is how a test or an
+// operator observes that a permitted send was actually delivered.
+func (m *Manager) Inbox(id string) []agent.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	msgs := m.inbox[id]
+	out := make([]agent.Message, len(msgs))
+	for i, msg := range msgs {
+		out[i] = agent.Message{Target: msg.Target, Payload: append([]byte(nil), msg.Payload...)}
+	}
+	return out
 }
 
 // persist writes a deployment record and its module bytes to the store in one
