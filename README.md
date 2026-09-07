@@ -11,11 +11,13 @@ document describes the layout and how to build and test each piece.
 
 ## Monorepo layout
 
-- [`services/core`](services/core/README.md) — Matrix Core, the Go P2P daemon that turns any machine into a Matrix node.
-- [`proto`](proto/README.md) — Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
-- [`apps/web`](apps/web) — the Next.js marketing website (ecirlabs-web).
-- [`apps/console`](apps/console/README.md) — Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
-- [`contracts`](contracts/README.md) — the Hardhat project for wMATRIX, the bridged ERC-20 mirror of the native MATRIX coin that lets the asset list on exchanges (the native coin on the Go L1 remains the single source of truth for balances).
+- [`services/core`](services/core/README.md) - Matrix Core, the Go P2P daemon that turns any machine into a Matrix node.
+- [`proto`](proto/README.md) - Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
+- [`apps/web`](apps/web) - the Next.js marketing website (ecirlabs-web).
+- [`apps/console`](apps/console/README.md) - Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
+- [`contracts`](contracts/README.md) - the Hardhat project for wMATRIX, the bridged ERC-20 mirror of the native MATRIX coin that lets the asset list on exchanges (the native coin on the Go L1 remains the single source of truth for balances).
+- [`packages/protocol`](packages/protocol) - the one TypeScript implementation of the wire byte layouts a client signs over (payment digests, run authorizations, message digests). It exists because those layouts were copied into three places and a drift between any copy and the Go verifier is a signature the node rejects for no visible reason.
+- [`packages/sdk`](packages/sdk) - the TypeScript client SDK. Its layout-parity test signs randomized inputs through both this package and the Go encoder and fails on a single differing byte.
 
 ## Screenshots
 
@@ -48,7 +50,7 @@ private per-node number.*
 
 ![Matrix Console desktop app](docs/screenshots/console-app.png)
 *Matrix Console: providers, jobs, native MATRIX wallet, consensus and inference tabs in one
-window &mdash; the whole thing running.*
+window - the whole thing running.*
 
 ## Repository tooling
 
@@ -60,7 +62,7 @@ covers the build artifacts of every subtree.
 
 Each toolchain is invoked from its own subdirectory.
 
-### Go — `services/core`
+### Go - `services/core`
 
 ```sh
 cd services/core
@@ -68,7 +70,7 @@ go build ./...
 go test ./...
 ```
 
-### Protocol Buffers — `proto`
+### Protocol Buffers - `proto`
 
 ```sh
 cd proto
@@ -76,7 +78,7 @@ buf lint
 buf generate
 ```
 
-### Web — `apps/web`
+### Web - `apps/web`
 
 ```sh
 cd apps/web
@@ -85,7 +87,7 @@ corepack yarn lint
 corepack yarn build
 ```
 
-### Console — `apps/console`
+### Console - `apps/console`
 
 ```sh
 cd apps/console
@@ -100,7 +102,7 @@ additionally needs the WebKitGTK/libsoup system libraries. See the
 [console README](apps/console/README.md) for the connection configuration and
 the documented native-build limitation.
 
-### Contracts — `contracts`
+### Contracts - `contracts`
 
 ```sh
 cd contracts
@@ -108,6 +110,20 @@ npm install
 npx hardhat compile
 npx hardhat test
 ```
+
+### SDK - `packages/sdk`
+
+```sh
+cd packages/sdk
+corepack yarn install --frozen-lockfile
+corepack yarn typecheck
+corepack yarn test    # includes the layout-parity differential test
+corepack yarn build
+```
+
+`packages/protocol` has no build of its own: it is consumed as TypeScript source
+by the web app and mirrored by the SDK, and the parity test above is what keeps
+the mirror honest.
 
 ## License
 

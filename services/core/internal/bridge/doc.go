@@ -36,10 +36,14 @@
 //	      unmodified) and the unlock half ingests real on-chain events without an
 //	      operator hand-feeding logs.
 //
-//	      What the watcher is NOT is consensus: it applies the unlock to the
-//	      ledger of whichever node runs it, rather than through a
-//	      consensus-ordered operation. That boundary is stated in watcher.go and
-//	      is unchanged by the in-node wiring.
+//	      The watcher is not itself consensus - it is the half holding an
+//	      Ethereum endpoint - but on a validator SET the unlock it observes is
+//	      consensus-ordered: the watcher submits an attestation and the engine
+//	      releases escrow on the block where attesting voting power crosses
+//	      quorum (internal/consensus/burnunlock.go). A Bridge built by
+//	      NewConsensusOrdered refuses a direct release, so both halves of the
+//	      bridge are now quorum-gated. A solo node still releases directly,
+//	      which is correct there: one ledger, one authority. See watcher.go.
 //
 // Because every mint is gated on a real lock and every unlock consumes a real
 // burn exactly once, total locked native always reconciles 1:1 (via the

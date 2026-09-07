@@ -1483,12 +1483,12 @@ func (n *Node) Start() error {
 	// rather than silently ignored, so a deployment that believes it is relaying
 	// never comes up quiet.
 	//
-	// AUTHORITY (honest, unchanged by this wiring): the watcher is a per-node
-	// polling relayer. Running it inside matrixd does not make the unlock
-	// consensus-ordered; on a multi-validator deployment the burn is applied by
-	// whichever node runs the watcher. That is the correct model for a solo/dev
-	// node or a single operator-run relayer node; consensus-ordered unlock is a
-	// separate design change (see bridge_watch.go).
+	// AUTHORITY: the watcher is a per-node polling relayer, because it is the
+	// half that holds an Ethereum endpoint. What it may DO with what it sees
+	// depends on the size of the validator set, and the node decides that rather
+	// than the operator: alone it releases escrow directly, and on a set it
+	// submits an attestation that releases escrow once a quorum agrees. See
+	// bridge_watch.go for the two adapters and the reason they are two.
 	ethClient, err := dialBridgeClient(n.config.Bridge)
 	if err != nil {
 		return fmt.Errorf("failed to initialize bridge watcher: %w", err)

@@ -22,9 +22,10 @@ These are constraints, not opinions. Changing any of them is a code change.
 | Genesis is idempotent and one-shot per store: named allocations plus one reserved reward pool | `Treasury.ApplyGenesis` |
 | The reward pool is a real account, `native/reward-pool`, not an abstraction | `RewardPoolAccount` |
 | Funding an account from the pool MOVES coins; it does not mint | `Treasury.FundFromRewardPool` |
-| The only runtime faucet is `FundAccount`, and it is admin-authenticated | `matrix.market.v1.MarketService/FundAccount` |
+| The only runtime faucet is `FundAccount`. It is admin-authenticated, and on a validator SET it refuses outright: reward-pool funding is not consensus-ordered, so it would diverge each node's pool and fork the provider emission | `matrix.market.v1.MarketService/FundAccount` |
 | The bridge cannot create native MATRIX. Burning wMATRIX only releases native that was locked earlier | `internal/bridge`, `WrappedMatrix.sol` |
 | Wrapped supply always equals locked native, by construction | mint requires an attestation per lock id; burn releases per event |
+| Both bridge directions are quorum-gated. The mint always was; the unlock is now consensus-ordered on a validator set, so escrow is released on the block where attesting voting power crosses quorum rather than by whichever node ran the watcher | `internal/consensus/burnunlock.go`, `bridge.NewConsensusOrdered` |
 | **There is no emission to VALIDATORS.** They are paid from the fee, which is usage, not from an emission | by design |
 | The validator set is chain state: a change rides in a committed block and takes effect at an epoch boundary, and it needs a quorum of operators to have approved it | `internal/consensus/setchange.go` |
 | A validator proven to have equivocated is ejected the same way, with no config entry, because the evidence proves itself | `internal/consensus/evidence.go`, `Engine.reportEquivocation` |

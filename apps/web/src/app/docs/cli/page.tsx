@@ -167,6 +167,15 @@ export default function MatrixCliDocs() {
                     never mints, so the billion-MATRIX cap holds however often you call it.
                   </p>
                   <p className='mt-4 text-gray-300'>
+                    On a <strong>validator set</strong> it refuses instead, with{' '}
+                    <code className='text-white'>FailedPrecondition</code>. Funding from the pool is not
+                    consensus-ordered: it moves value on the node you called and nowhere else, so the pools diverge
+                    and the provider emission forks. This was found by running two nodes - funding an account on
+                    one left the other reporting a balance of zero for it. Put the allocation in every
+                    node&apos;s <code className='text-white'>genesis</code> instead, or move value with a signed
+                    transfer, which every node applies from the committed block.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
                     <code className='text-white'>job complete</code> settles through consensus: the payment is a
                     transfer <em>signed by the buyer</em> that a quorum commits and every node applies. The node
                     therefore needs the buyer&apos;s signing key, which it resolves from the wallet files under{' '}

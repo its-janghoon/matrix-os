@@ -9,7 +9,7 @@ export function TokenBridge({ className }: { className?: string }) {
   return (
     <Diagram
       title='Native MATRIX and the wrapped mirror'
-      description='Native MATRIX is the coin of the Matrix OS Layer 1 with nine decimals, capped at one billion, and is the only thing marketplace jobs settle in. To move value to Ethereum, native MATRIX is locked into an on-chain escrow account and the validator set signs an attestation; the WrappedMatrix contract mints wMATRIX only against a threshold of those signatures, once per lock. Burning wMATRIX names a native recipient and releases the escrowed native MATRIX. Wrapped supply therefore always equals locked native.'
+      description='Native MATRIX is the coin of the Matrix OS Layer 1 with nine decimals, capped at one billion, and is the only thing marketplace jobs settle in. To move value to Ethereum, native MATRIX is locked into an on-chain escrow account and the validator set signs an attestation; the WrappedMatrix contract mints wMATRIX only against a threshold of those signatures, once per lock. Burning wMATRIX names a native recipient and releases the escrowed native MATRIX; on a validator set that release is itself quorum-gated, applied on the block where attesting voting power crosses quorum. Wrapped supply therefore always equals locked native.'
       viewBox='0 0 760 340'
       minWidth={640}
       className={className}

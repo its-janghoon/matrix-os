@@ -27,13 +27,30 @@ import (
 // releases escrowed native MATRIX on the node's real ledger and
 // Bridge.Reconcile is a meaningful check.
 //
-// AUTHORITY (unchanged and still honest): the Watcher is a per-node polling
-// relayer, not a consensus operation. Running it inside matrixd does not make
-// the unlock consensus-ordered; on a multi-validator deployment the unlock is
-// still applied by whichever node runs the watcher rather than agreed through
-// the consensus engine. Making burn->unlock a consensus-ordered operation is a
-// separate, larger design change. This wiring is correct for a solo/dev node or
-// a single operator-run relayer node, which is the model the config documents.
+// AUTHORITY. The Watcher is a per-node polling relayer: it is the thing with an
+// Ethereum endpoint, and nothing about running it inside matrixd makes what it
+// OBSERVES agreed. What the observation is allowed to DO now depends on the size
+// of the validator set, and that is decided here rather than by the operator.
+//
+// On a single-node network the watcher applies the escrow release itself. One
+// ledger, one authority, nothing to diverge.
+//
+// On a validator SET it may not, because the release would land on one node's
+// ledger and nowhere else, splitting the escrow balance and the 1:1 backing
+// invariant across nodes. So a set gets a consensus-ordered bridge
+// (bridge.NewConsensusOrdered): the watcher SUBMITS AN ATTESTATION, and the
+// engine releases escrow on the block where attesting voting power crosses
+// quorum. See internal/consensus/burnunlock.go for the encoding and the tally.
+// The bridge in that mode refuses a direct release outright, so a caller that
+// bypasses the attestation path gets ErrConsensusOrdered rather than a silent
+// divergence.
+//
+// This paragraph used to say the opposite - that the unlock was "still applied
+// by whichever node runs the watcher" and that making it consensus-ordered was
+// "a separate, larger design change". That was true when it was written and
+// false once newConfiguredBridgeForSet landed below it. A comment that
+// contradicts the code it heads is worse than none, because it is the thing a
+// reader trusts instead of reading on.
 
 // defaultBridgeConfirmations is the confirmation depth used when the operator
 // does not set one. It is deliberately conservative rather than zero: a node

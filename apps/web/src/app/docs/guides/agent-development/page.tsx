@@ -123,11 +123,43 @@ export default function AgentDevelopmentPage() {
                   </p>
                   <CodeSample label='Go' code={LIMITS} />
 
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>What a guest cannot exhaust</h2>
+                  <p className='mb-4 text-gray-300'>
+                    A deadline bounds one call. It does not bound what a guest ACCUMULATES inside the deadline, and
+                    that turned out to be the larger hole. A guest logging a 60 KiB line in a loop wrote{' '}
+                    <strong>586 MiB</strong> from one run; a guest calling <code className='text-white'>send</code>{' '}
+                    in a loop with no send policy - the secure default, where every send is refused - held{' '}
+                    <strong>1172 MiB</strong>, because the refusals were recorded in full. Both numbers are measured,
+                    from purpose-built guests that are now fixtures in the test suite.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    So the log and the send record are byte-budgeted as well as line-capped, and a guest past its
+                    budget has output dropped rather than the node growing. Ask{' '}
+                    <code className='text-white'>SendsDropped()</code> whether that happened: silence and success
+                    look identical from inside the guest, which is deliberate - a guest must not be able to tell how
+                    close it is to a limit and pace itself against it.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    The limits you pass are also <strong>clamped, not trusted</strong>. A deployment asking for the
+                    wasm maximum of 65536 pages (4 GiB) gets 1024, and a run-time of an hour gets 30 seconds. The
+                    inbox is bounded in both messages and bytes. A limit an operator can raise without bound is not
+                    a limit, and a deployment request is not an operator decision.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    A guest also <strong>cannot read a clock</strong>. No WASI module is instantiated and none of the
+                    four host functions returns a value, so there is no timer and no reply channel to build one from.
+                    That is a deliberate boundary rather than an omission: a guest runs in the node&apos;s own process
+                    beside the validator&apos;s signing key, and a nanosecond timer would let it time its own host
+                    calls and turn any data-dependent branch in the host into a side channel without breaking a
+                    single other limit. A module that imports{' '}
+                    <code className='text-white'>wasi_snapshot_preview1</code> fails to load.
+                  </p>
+
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>The host ABI</h2>
                   <p className='mb-4 text-gray-300'>
                     Four functions, and that is the whole surface a guest sees. An agent cannot open a socket, read a
-                    file or spawn anything - not by policy but by construction, because nothing else is imported into
-                    the module.
+                    file, read a clock or spawn anything - not by policy but by construction, because nothing else is
+                    imported into the module. A module that asks for a fifth import does not load.
                   </p>
                   <CodeSample label='host functions' code={HOST_ABI} />
                   <p className='mt-4 text-gray-300'>

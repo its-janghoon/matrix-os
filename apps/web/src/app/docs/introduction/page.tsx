@@ -59,7 +59,7 @@ const REAL = [
   },
   {
     title: 'A wrapped ERC-20 mirror',
-    body: 'Native MATRIX locks into escrow and a threshold of validator attestations authorizes minting wMATRIX; burning it releases the escrow. Against local and test networks only - it is not deployed to public Ethereum.',
+    body: 'Native MATRIX locks into escrow and a threshold of validator attestations authorizes minting wMATRIX; burning it releases the escrow, and on a validator set that release needs a quorum of attestations too, so neither direction rests on one node. Against local and test networks only - it is not deployed to public Ethereum.',
   },
   {
     title: 'A WebAssembly agent runtime',

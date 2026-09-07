@@ -13,7 +13,7 @@ backed 1:1 by native MATRIX locked on the L1.
 
 Two contracts:
 
-- **`WrappedMatrix.sol` (wMATRIX)** — the bridge-backed wrapped token. Its
+- **`WrappedMatrix.sol` (wMATRIX)** - the bridge-backed wrapped token. Its
   supply is minted/burned **only** through the lock-and-mint bridge, so it is
   always backed 1:1 by locked native MATRIX. This is the real bridge token.
 - **`MatrixToken.sol` (MATRIX)** - the standalone ERC-20 mirror kept for its
@@ -68,18 +68,38 @@ wrapped burn -> unlock native               (wMATRIX -> native MATRIX)
   `Burned(address indexed burner, string nativeRecipient, uint256 amount)`. The
   Go bridge decodes that log with `bridge.DecodeBurnedLog` (a dependency-free ABI
   decoder that recovers the burner, native recipient, and amount, and derives a
-  stable id from `txHash:logIndex`) into a `BurnEvent`, then `ProcessBurn`
-  applies it exactly once (replay-protected on that id) and releases the escrowed
-  native MATRIX to `nativeRecipient`. The `BridgeE2E` test cross-checks the raw
+  stable id from `txHash:logIndex`) into a `BurnEvent`, then applies it exactly
+  once (replay-protected on that id), releasing the escrowed native MATRIX to
+  `nativeRecipient` - directly on a single node, and by quorum attestation on a
+  validator set, as below. The `BridgeE2E` test cross-checks the raw
   emitted log against the exact bytes the Go decoder parses. Feeding logs into
   the decoder is automated by `bridge.Watcher`, an `eth_getLogs` poller that runs
   as a `matrixd` subsystem against the node's own ledger - see
   [Running the burn watcher in `matrixd`](#running-the-burn-watcher-in-matrixd).
 
-  What the watcher is not is consensus: it applies the unlock to the ledger of
-  whichever node runs it, rather than through a consensus-ordered operation. On a
-  multi-validator deployment that means one operator-run relayer node performs
-  the unlock. Making burn -> unlock consensus-ordered is a separate design item.
+  **The unlock is consensus-ordered on a validator set.** The watcher is still
+  the thing with an Ethereum endpoint, so what it observes is per-node - but what
+  that observation is allowed to do depends on the size of the set, and the node
+  decides that itself rather than trusting the operator to. On a single-node
+  network the watcher releases escrow directly: one ledger, one authority. On a
+  set it may not, because the release would land on one node's ledger and nowhere
+  else, splitting the escrow balance and the 1:1 backing invariant across nodes.
+  There the watcher instead submits an **attestation** to a reserved recipient
+  that encodes the burn, and the engine releases escrow on the block where
+  attesting voting power crosses quorum. The recipient is a pure function of the
+  burn, so two validators attesting the same burn produce byte-identical
+  transactions and the tally counts them as being about one thing; the tally is
+  keyed by the whole recipient, so attestations that disagree about the account
+  or the amount are separate tallies and neither borrows the other's power. A
+  quorum has to agree on where the money goes, not merely that something was
+  burned. A node with no Ethereum endpoint still tallies from the committed
+  blocks and reaches the same release at the same height.
+
+  This mirrors the lock half, which always required a threshold of validator
+  signatures before the contract would mint. Both directions are now
+  quorum-gated. What it does not do is verify that the burn happened: it
+  verifies that a quorum of the set says so, which is the same trust assumption
+  the mint half has always had.
 
 ### Running the burn watcher in `matrixd`
 
@@ -117,6 +137,12 @@ from. Notes that matter in operation:
 - **`confirmations` left unset defaults to 12,** not 0 - a node on a real
   endpoint must not release escrow on a block that can still be reorged away.
   Set it to `0` only for an instant-finality dev chain such as Hardhat.
+- **Run the watcher on every validator, not on one relayer.** On a set, escrow
+  is released by quorum, so a burn stays unreleased until more than two thirds of
+  the voting power has attested it. Pointing only one node at Ethereum leaves
+  every burn pending forever. A node whose bridge is consensus-ordered also
+  refuses a direct release, so `cmd/bridge-watch` cannot be used to force one
+  through.
 - **Because the node holds both halves on one ledger,** `Bridge.Reconcile` is a
   real invariant check there (escrow balance == locked - unlocked).
   `cmd/bridge-watch` applies burns to a throwaway ledger it seeds, so use it to
@@ -178,7 +204,7 @@ private keys or secrets are committed to this repository.**
    amount, ordered signatures).
 2. It deploys `WrappedMatrix` registering those attestor addresses.
 3. It re-runs the Go command bound to the **deployed** contract address and
-   feeds the resulting signatures into `WrappedMatrix.mint` — proving the Go
+   feeds the resulting signatures into `WrappedMatrix.mint` - proving the Go
    signatures verify on-chain unchanged.
 4. It burns part of the minted supply and asserts the `Burned` event carries the
    native recipient, and that wrapped supply tracks net locked 1:1.
@@ -212,7 +238,7 @@ gitignored and only `.env.example` (placeholders) is committed.
 MATRIX is **native-first**: the canonical coin lives on the Matrix OS consensus
 L1 and is the single source of truth for balances and supply. What this harness
 deploys to Ethereum is the **WRAPPED ERC-20 (`WrappedMatrix` / wMATRIX) + the
-validator-attestation bridge** — a 1:1 mirror backed by native MATRIX locked in
+validator-attestation bridge** - a 1:1 mirror backed by native MATRIX locked in
 L1 escrow. You are **not** deploying "the" token; you are deploying its wrapped
 Ethereum representation.
 
@@ -226,7 +252,7 @@ full annotated list):
 | `MAINNET_RPC_URL`     | Ethereum mainnet RPC endpoint                        | mainnet deploy/verify   |
 | `SEPOLIA_RPC_URL`     | Sepolia testnet RPC endpoint                         | sepolia dress rehearsal |
 | `MAINNET_FORK_RPC_URL`| Mainnet RPC used to fork state for the local sim     | fork simulation         |
-| `PRIVATE_KEY`         | Deployer key (hex, `0x`). Env only — never hardcoded | mainnet/sepolia deploy  |
+| `PRIVATE_KEY`         | Deployer key (hex, `0x`). Env only - never hardcoded | mainnet/sepolia deploy  |
 | `ETHERSCAN_API_KEY`   | Etherscan source verification                        | verify                  |
 | `ATTESTORS`           | Comma-separated secp256k1 attestor addresses (`n`)   | mainnet/sepolia deploy  |
 | `THRESHOLD`           | Distinct signatures required to mint (`m`), 1..n     | deploy                  |
@@ -324,9 +350,11 @@ npx hardhat verify --network mainnet <address> '["0x..","0x.."]' <threshold>
 
 Register the deployed contract address with the Go bridge (the `bridge.contract`
 and `bridge.chain_id` node config keys) and confirm the attestor addresses match,
-so Go-produced attestations mint on-chain. Then enable `bridge.watch` on the
-relayer node with the deployment block as `start_block` so burns unlock
-automatically - see [Running the burn watcher in `matrixd`](#running-the-burn-watcher-in-matrixd).
+so Go-produced attestations mint on-chain. Then enable `bridge.watch` with the
+deployment block as `start_block` so burns unlock automatically - on **every
+validator**, not on one relayer node, because on a set the release needs a quorum
+of attestations and a single watching node produces one. See
+[Running the burn watcher in `matrixd`](#running-the-burn-watcher-in-matrixd).
 The wrapped supply must always equal the outstanding native locked in L1 escrow;
 `Bridge.Reconcile` on the node checks that on the native side.
 

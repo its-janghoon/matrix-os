@@ -40,7 +40,15 @@ consensus:
 const subsystems = [
   {
     name: 'libp2p host and transport',
-    body: 'Peer connections and the gossip topics the marketplace and consensus publish on. Discovery is peer-to-peer; there is no broker and no registry server.',
+    body: 'Peer connections and the gossip topics the marketplace and consensus publish on. Discovery is peer-to-peer; there is no broker and no registry server. The host identity is persisted, so a node keeps its peer id across restarts and the multiaddrs other operators hold stay valid.',
+  },
+  {
+    name: 'Gossip validation, before the relay',
+    body: 'gossipsub forwards a message to the mesh BEFORE the application handler sees it, so every check the consensus engine makes - is the proposer a validator, does the signature verify - used to happen after the whole mesh had already spent bandwidth on an unauthenticated peer\'s bytes. A topic validator now runs first and bounds the STRUCTURE of a payload rather than any one field, so it covers every message type and any future one. Measured: a 1 MiB message declaring 349503 transactions decoded with no error into 204 MiB of heap; walking its tokens instead costs 1632 bytes.',
+  },
+  {
+    name: 'Peer scoring',
+    body: 'Rejecting a message stops that message; scoring is what stops the PEER. gossipsub tracks a score per peer and suppresses gossip, then publishing, then the peer entirely as it falls. Without it a peer sending nothing but garbage is refused a million times and stays a full mesh member. Measured on two hosts: 60 published messages reached validation 6 times before the peer was ignored. The freeloader penalty is deliberately off, because on a quiet chain it would graylist honest validators and a graylisted validator\'s votes stop being counted.',
   },
   {
     name: 'Compute marketplace',

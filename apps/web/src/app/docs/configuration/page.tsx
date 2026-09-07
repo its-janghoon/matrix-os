@@ -289,7 +289,7 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'reward_pool',
         def: '1e18 (the whole cap)',
-        note: 'Held in the reserved account native/reward-pool. `matrix fund` moves coins out of it; it never mints.',
+        note: 'Held in the reserved account native/reward-pool. `matrix fund` moves coins out of it; it never mints. On a validator SET, `fund` refuses: reward-pool funding is not consensus-ordered, so it would move value on one node and nowhere else, diverging each node\'s pool and forking the provider emission. Set the allocation in every node\'s genesis instead, or move value with a signed transfer.',
       },
     ],
   },
@@ -302,7 +302,7 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'watch.enabled',
         def: 'false',
-        note: 'Runs the burn-to-unlock watcher inside the node: it polls for Burned events past a confirmation depth and releases escrowed native MATRIX exactly once per event.',
+        note: 'Runs the burn-to-unlock watcher inside the node: it polls for Burned events past a confirmation depth, exactly once per event. What it does with one depends on the size of the validator set. A single node releases the escrow itself. On a SET the release is consensus-ordered: the watcher submits an attestation and the engine releases escrow on the block where attesting voting power crosses quorum, so turn this on for EVERY validator - a burn stays pending until more than two thirds of the power has attested it, and one watching node produces one attestation.',
       },
       { name: 'watch.rpc_url', def: '""', note: 'Ethereum JSON-RPC endpoint for the watcher.' },
       {

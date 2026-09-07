@@ -84,6 +84,7 @@ export default function TokenPage() {
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
               <CheckItem>Native lock to wrapped mint: minting requires a threshold of validator secp256k1 attestations that native was locked</CheckItem>
               <CheckItem>Wrapped burn to native unlock: a burn emits an on-chain Burned event that is decoded into an authorization to release the escrowed native MATRIX, applied exactly once per event</CheckItem>
+              <CheckItem>Both directions are quorum-gated: on a validator set the unlock is consensus-ordered, so escrow is released on the block where attesting voting power crosses quorum rather than by whichever node saw the burn</CheckItem>
               <CheckItem>Backed 1:1 by locked native, reconciled through the exact 1e9 conversion factor</CheckItem>
               <CheckItem>Local and test networks only, not deployed to a public Ethereum network</CheckItem>
             </ul>

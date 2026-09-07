@@ -164,6 +164,23 @@ export default function NetworkSetupPage() {
                     <code className='text-white'>/p2p/...</code> suffix. A failed dial is logged and does not stop
                     the node, so a typo here looks like silence rather than an error - check the log.
                   </p>
+                  <p className='mt-4 text-gray-300'>
+                    The peer id is <strong>stable across restarts</strong>. It is a second identity, separate from
+                    the consensus one above, and it is persisted under{' '}
+                    <code className='text-white'>p2p/identity/peer_key</code> in the same store. That is worth
+                    knowing because it used to be generated fresh on every start: every multiaddr you had pasted
+                    into another node&apos;s config went stale the moment this one restarted, and libp2p verifies the
+                    id it dialed, so the only symptom was{' '}
+                    <code className='text-white'>all dials failed</code> - indistinguishable from the typo above.
+                    Keeping <code className='text-white'>storage.path</code> keeps both identities; deleting it
+                    makes the node a different validator AND a different peer.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
+                    Bootstrap peers are also re-dialled, not dialled once. A node checks every 10 seconds whether
+                    each configured peer is still connected and re-dials the ones that are not, so restarting one
+                    node does not leave the others permanently disconnected from it. The node prints the exact
+                    multiaddrs to give other operators on startup, so there is nothing to assemble by hand.
+                  </p>
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>3. Give both the same validator set</h2>
                   <CodeSample label='config.yaml' code={VALIDATORS} />

@@ -52,9 +52,22 @@ export default function ComputeMarketplaceDocs() {
                       <li><strong>Lock to mint</strong> - native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
                       <li>
                         <strong>Burn to unlock</strong> - burning wMATRIX emits an on-chain Burned event. A watcher
-                        inside the node polls Ethereum for those events past a confirmation depth, keeps a persisted
-                        scan cursor across restarts, and releases the escrowed native MATRIX exactly once per event
-                        (keyed by transaction hash and log index).
+                        inside the node polls Ethereum for those events past a confirmation depth and keeps a
+                        persisted scan cursor across restarts. What the watcher observes is per-node, so what it is
+                        allowed to do depends on the size of the validator set: alone it releases the escrow itself,
+                        but on a set it submits an <strong>attestation</strong> and the engine releases escrow on the
+                        block where attesting voting power crosses quorum. Either way the release happens exactly
+                        once per event, keyed by transaction hash and log index.
+                      </li>
+                      <li>
+                        <strong>Both directions are quorum-gated.</strong> Minting always required a threshold of
+                        validator signatures; the unlock did not, and a per-node release on a validator set would
+                        move collateral on one ledger and nowhere else, splitting the 1:1 backing invariant across
+                        nodes. The attestation recipient is a pure function of the burn, so two validators attesting
+                        the same burn produce byte-identical transactions - and the tally is keyed by the whole
+                        recipient, so attestations that disagree about the account or the amount are separate tallies
+                        and neither borrows the other&apos;s power. A quorum has to agree on where the money goes, not
+                        merely that something was burned.
                       </li>
                       <li>Native has 9 decimals and wMATRIX has 18, so one native base unit equals 1e9 wrapped base units and the 1,000,000,000 MATRIX cap maps to the same money on both sides</li>
                       <li>Runs against local and test networks only; it is not deployed to any public Ethereum network</li>

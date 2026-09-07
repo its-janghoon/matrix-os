@@ -1036,6 +1036,42 @@ Nothing on the list. Remote existence oracles (whether a response reveals that
 an account or provider exists) were treated as out of scope here: they are
 answered by the response itself, not by its timing.
 
+## Docs and website, brought in line
+
+The consensus-ordered burn unlock landed in code but not in prose, and the prose
+said the opposite. **Four code comments contradicted the code they headed** -
+`node/bridge_watch.go`, `node/node.go`, `bridge/watcher.go` and `bridge/doc.go`
+all still said the unlock was "still applied by whichever node runs the watcher"
+and that making it consensus-ordered was "a separate, larger design change".
+`consensus/burnunlock.go` even quotes one of them as the problem it was written
+to solve, while the quoted comment stood unamended. A comment that contradicts
+its code is worse than none, because it is what a reader trusts instead of
+reading on. That is the same failure as the no-op constant-time compare, one
+layer up.
+
+Fixed in code and in five doc surfaces: `contracts/README.md`, the marketplace
+and configuration doc pages, the token product page, the `TokenBridge` diagram
+description, the introduction, and the token-and-bridge policy proposal.
+
+Three things the docs never covered and operators will hit:
+
+- **The libp2p peer id is persisted.** The network-setup guide documented the
+  consensus identity's persistence and not this one, and it attributed the
+  symptom of an ephemeral id - `all dials failed` - to a typo. Now stated, along
+  with the 10-second bootstrap re-dialer.
+- **`matrix fund` refuses on a validator set.** Documented in the CLI page and
+  the genesis config section, with the reason (it is not consensus-ordered, so
+  it moves value on one node and forks the provider emission) and the two
+  alternatives.
+- **What a guest cannot exhaust.** The agent guide documented the memory ceiling
+  and the deadline, which bound one call and say nothing about what a guest
+  accumulates inside it. Now carries the measured 586 MiB and 1172 MiB, the byte
+  budgets, the clamping of requested limits, and the no-clock boundary.
+
+Added to the architecture page: gossip validation before the relay, and peer
+scoring. Added to the README layout: `packages/protocol` and `packages/sdk`,
+neither of which was listed, plus the SDK build section.
+
 ## Non-blocking notes
 
 Known and accepted, not blocking:

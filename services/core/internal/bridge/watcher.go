@@ -16,16 +16,29 @@ import (
 // existing decode + replay-safe ProcessBurn primitive, so an operator does not
 // have to hand-feed logs.
 //
-// AUTOMATION BOUNDARY (honest): the Watcher is a polling relayer, not a consensus
-// participant. It applies burns to THIS node's ledger via ProcessBurn (which is
-// replay-protected per burn id). In a multi-validator deployment the unlock must
-// ultimately be agreed by consensus; running a Watcher on a single node is the
-// correct model for a solo/dev node or an operator-run relayer, and is what the
-// hardhat-backed test exercises. The operator supplies the endpoint URL, the
-// WrappedMatrix contract address, and the start block (via the matrixd
-// bridge.watch config section, which constructs and runs this Watcher against
-// the node's own ledger, or via cmd/bridge-watch out of process); the Watcher
-// does the rest.
+// AUTOMATION BOUNDARY: the Watcher is a polling relayer, not a consensus
+// participant. What it OBSERVES is per-node - it is the half with an Ethereum
+// endpoint, and no amount of wiring makes an observation agreed. What its
+// observation is allowed to DO is decided by the Applier it is given, and on a
+// validator set that is not this bridge:
+//
+//   - Solo node: the Applier is the Bridge, and ProcessBurn releases escrow here
+//     (replay-protected per burn id). One ledger, one authority.
+//   - Validator set: the Applier submits a consensus ATTESTATION instead, and
+//     escrow is released by the engine on the block where attesting voting power
+//     crosses quorum. See internal/consensus/burnunlock.go. A Bridge built for
+//     that mode refuses a direct release outright, so this Watcher cannot
+//     accidentally apply one.
+//
+// So "the unlock must ultimately be agreed by consensus", which this comment
+// used to name as future work, is what happens on a set. Run the Watcher on
+// EVERY validator: a burn stays unreleased until a quorum has attested it, and
+// one watching node produces one attestation.
+//
+// The operator supplies the endpoint URL, the WrappedMatrix contract address,
+// and the start block (via the matrixd bridge.watch config section, which
+// constructs and runs this Watcher against the node's own ledger, or via
+// cmd/bridge-watch out of process); the Watcher does the rest.
 
 // RESUME BEHAVIOR: where the watcher resumes depends on whether a cursor Store
 // is supplied.
