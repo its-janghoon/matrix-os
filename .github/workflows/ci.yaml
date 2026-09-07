@@ -12,9 +12,17 @@ jobs:
     # The Protocol Buffers Go stubs under proto/gen are gitignored and never
     # committed, so they have to be generated before any Go package that
     # imports them can build. buf is what generates them.
+    #
+    # github_token is not optional in practice. Without it the action resolves
+    # its download URL through the GitHub API ANONYMOUSLY, against a rate limit
+    # shared by every unauthenticated caller on the runner's IP, and this job
+    # has already failed on "API rate limit exceeded" in under a second - before
+    # a single test ran. The token makes the request authenticated, which raises
+    # the limit by three orders of magnitude.
     - uses: bufbuild/buf-setup-action@v1
       with:
         version: '1.72.0'
+        github_token: ${{ secrets.GITHUB_TOKEN }}
     # Driven through the Makefile rather than a bare `go test ./...`, because
     # `test` already declares its dependency on the `proto` target. Spelling the
     # sequence out in YAML instead is how this job came to run `go test` with no
@@ -31,9 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - uses: actions/checkout@v4
+    # Authenticated for the same reason as in the core job above.
     - uses: bufbuild/buf-setup-action@v1
       with:
         version: '1.72.0'
+        github_token: ${{ secrets.GITHUB_TOKEN }}
     - name: buf lint
       working-directory: proto
       run: buf lint
