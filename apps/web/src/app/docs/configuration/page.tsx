@@ -52,6 +52,7 @@ inference:
 connect:
   addr: 0.0.0.0:9093                     # HTTP/JSON + /v1/chat/completions; "off" disables
   public_reads: false                    # open Get*/List* to keyless callers
+  signed_writes: false                   # open the signature-authorised writes
   rate_limit_per_minute: 600             # per caller; 0 disables
   rate_limit_burst: 120
   allowed_origins:                       # browser origins; empty = no browser may call
@@ -190,6 +191,11 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'public_reads',
         def: 'false',
         note: 'Opens the read methods (Get*, List*) to callers with no API key. Writes still require one, so this cannot move money or reserve capacity. Off by default and it stays that way: chain data is public information, but turning this on by default would widen what an unauthenticated caller can see on every node that already exists. Turn it on for a PUBLIC endpoint, because a browser cannot hold a secret and the alternatives - shipping a key to everyone who loads the page, or not reading the chain from a page at all - are both worse.',
+      },
+      {
+        name: 'signed_writes',
+        def: 'false',
+        note: "Opens the three write methods whose authority is a client signature rather than an API key: SubmitSignedTransfer, SettleInferenceJob and RunInferenceJob. It is what a self-custody page needs, because a browser cannot keep a key secret. Turning it on ALSO makes RunInferenceJob require the buyer's signed run authorization, and that is not a separate switch on purpose: without it `buyer` is just a string, so an open RunInferenceJob would let anyone name someone else's funded account, have a provider do the work, and never sign for it. Nothing else is opened - FundAccount, RegisterProvider, SubmitJob, CompleteJob and CancelJob carry no signature that could stand in for a credential.",
       },
       {
         name: 'rate_limit_per_minute',

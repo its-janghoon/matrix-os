@@ -93,6 +93,16 @@ type Config struct {
 	// everyone who loads the page, or not reading the chain at all - are both
 	// worse than an open read of public chain data.
 	PublicReads bool
+	// SignedWrites opens the write methods whose authority is a client signature
+	// rather than an API key: SubmitSignedTransfer, SettleInferenceJob and
+	// RunInferenceJob (see publicreads.go for why each is safe and why nothing
+	// else is).
+	//
+	// A browser cannot hold an API key, so this is what a self-custody page
+	// needs. It is off by default, and an operator that turns it on MUST also
+	// require the buyer's run authorization - the node sets both from one field
+	// so they cannot drift apart.
+	SignedWrites bool
 	// RateLimit bounds how fast one caller can drive this endpoint. The zero
 	// value disables limiting, which is right for a loopback daemon and wrong for
 	// anything reachable.
@@ -136,7 +146,8 @@ func NewHandler(cfg Config) (http.Handler, error) {
 				impl:       impl,
 				fullMethod: fullMethod,
 				auth:       cfg.Auth,
-				public:     cfg.PublicReads && isReadMethod(method.MethodName),
+				public: (cfg.PublicReads && isReadMethod(method.MethodName)) ||
+					(cfg.SignedWrites && isSignatureAuthorisedWrite(method.MethodName)),
 			})
 		}
 	}
@@ -160,7 +171,8 @@ func NewHandler(cfg Config) (http.Handler, error) {
 				impl:       b.Impl,
 				fullMethod: path,
 				auth:       cfg.Auth,
-				public:     cfg.PublicReads && isReadMethod(desc.StreamName),
+				public: (cfg.PublicReads && isReadMethod(desc.StreamName)) ||
+					(cfg.SignedWrites && isSignatureAuthorisedWrite(desc.StreamName)),
 			})
 		}
 	}

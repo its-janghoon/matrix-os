@@ -119,6 +119,18 @@ type Config struct {
 		// loads the page, or not reading the chain from a page at all - are both
 		// worse than an open read.
 		PublicReads bool `yaml:"public_reads"`
+		// SignedWrites opens the three write methods whose authority is a client
+		// signature rather than an API key: SubmitSignedTransfer,
+		// SettleInferenceJob and RunInferenceJob. It is what a self-custody page
+		// needs, because a browser cannot hold a key.
+		//
+		// Turning it on ALSO makes RunInferenceJob require the buyer's signed
+		// RunAuthorization, and that is not a separate switch on purpose: without
+		// the authorization `buyer` is just a string, so an open RunInferenceJob
+		// would let anyone name someone else's funded account, have a provider do
+		// the work, and never sign for it - the victim's balance untouched, the
+		// provider working for free. One field sets both so they cannot drift.
+		SignedWrites bool `yaml:"signed_writes"`
 		// RateLimitPerMinute bounds how many requests one caller may make per
 		// minute, counted per credential where one is presented and per remote
 		// address otherwise.
@@ -1276,6 +1288,10 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to create inference API server: %w", err)
 	}
 	n.inferenceServer = inferenceServer
+	// Set from the SAME field that opens the signature-authorised writes, so an
+	// operator cannot open RunInferenceJob without also requiring the buyer's
+	// signed authorization for it. See Config.Connect.SignedWrites.
+	n.inferenceServer.Service().RequireRunAuthorization(n.config.Connect.SignedWrites)
 	if err := n.inferenceServer.Start(n.ctx); err != nil {
 		return fmt.Errorf("failed to start inference API server: %w", err)
 	}
@@ -1369,6 +1385,7 @@ func (n *Node) Start() error {
 			ExtraRoutes:    openAI.Routes(),
 			Auth:           connectAuth(marketAuth),
 			PublicReads:    n.config.Connect.PublicReads,
+			SignedWrites:   n.config.Connect.SignedWrites,
 			AllowedOrigins: n.config.Connect.AllowedOrigins,
 			RateLimit: connectapi.RateLimit{
 				RequestsPerMinute: n.config.Connect.RateLimitPerMinute,

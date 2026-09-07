@@ -36,6 +36,9 @@ import (
 // require_unimplemented_servers disabled, so every RPC is implemented explicitly.
 type Service struct {
 	inf *inference.Service
+	// requireRunAuth demands a signed RunAuthorization on RunInferenceJob. See
+	// RequireRunAuthorization.
+	requireRunAuth bool
 }
 
 // NewService constructs a Service backed by the given inference service, which
@@ -45,6 +48,19 @@ func NewService(inf *inference.Service) (*Service, error) {
 		return nil, fmt.Errorf("inferenceapi: inference service is required")
 	}
 	return &Service{inf: inf}, nil
+}
+
+// RequireRunAuthorization makes RunInferenceJob demand the buyer's signed
+// authorization. It MUST be set whenever the method is reachable without an API
+// key, because `buyer` is otherwise just a string: anyone could name someone
+// else's funded account, have a provider do the work, and never sign for it.
+//
+// It is set by the node from the same config field that opens the
+// signature-authorised writes, so the two cannot drift apart. When they are both
+// off - a node its own operator drives, behind a key - it stays off, and the CLI
+// keeps working without one.
+func (s *Service) RequireRunAuthorization(require bool) {
+	s.requireRunAuth = require
 }
 
 // Server hosts the inference gRPC service on its own listener, following the
@@ -176,6 +192,8 @@ func mapInferenceError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, inference.ErrEmptyPrompt):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, inference.ErrRunUnauthorized):
+		return status.Error(codes.Unauthenticated, err.Error())
 	case errors.Is(err, inference.ErrStreamNotSupported):
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, inference.ErrNotAwaitingPayment):

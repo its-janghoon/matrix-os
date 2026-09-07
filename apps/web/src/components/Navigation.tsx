@@ -18,6 +18,7 @@ const productLinks: NavLink[] = [
   { label: 'LLM Inference', href: '/products/inference' },
   { label: 'Matrix Console', href: '/products/console' },
   { label: 'matrix CLI', href: '/products/cli' },
+  { label: 'Chat (self-custody)', href: '/chat', description: 'Pay for inference with a key your browser holds' },
 ];
 
 const developerLinks: NavLink[] = [

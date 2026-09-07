@@ -125,8 +125,28 @@ func (s *Service) RunInferenceJob(ctx context.Context, req *inferencev1.RunInfer
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
+	request := runRequestToInternal(req)
+
+	// Verify the buyer's authorization BEFORE anything reserves capacity or runs
+	// a model, so an unauthorized caller costs a provider nothing.
+	if auth := req.GetAuthorization(); auth != nil {
+		if err := s.inf.VerifyRunAuthorization(req.GetBuyer(), request, &inference.RunAuthorization{
+			PublicKey: auth.GetPublicKey(),
+			Provider:  req.GetProvider(),
+			Model:     req.GetModel(),
+			Timestamp: auth.GetTimestamp(),
+			Signature: auth.GetSignature(),
+		}); err != nil {
+			return nil, mapInferenceError(err)
+		}
+	} else if s.requireRunAuth {
+		return nil, status.Error(codes.Unauthenticated,
+			"this node serves RunInferenceJob without an api key, so it requires the buyer's "+
+				"signed authorization: set `authorization` on the request")
+	}
+
 	payment, err := s.inf.RunUnsettled(ctx, req.GetBuyer(), req.GetProvider(),
-		runRequestToInternal(req), req.GetUnitsEstimate())
+		request, req.GetUnitsEstimate())
 	if err != nil {
 		return nil, mapInferenceError(err)
 	}

@@ -144,6 +144,10 @@ type Service struct {
 	// before its reservation is released. Zero means DefaultUnpaidJobTTL.
 	unpaidJobTTL time.Duration
 
+	// runAuth remembers recently used run authorizations, so one cannot be
+	// replayed into a second run of free work.
+	runAuth *runAuthSeen
+
 	mu    sync.Mutex
 	jobs  map[string]*InferenceJob
 	nonce map[string]uint64
@@ -204,6 +208,7 @@ func NewService(cfg Config) (*Service, error) {
 		accounts: cfg.Accounts,
 		jobs:     make(map[string]*InferenceJob),
 		nonce:    make(map[string]uint64),
+		runAuth:  newRunAuthSeen(),
 	}, nil
 }
 

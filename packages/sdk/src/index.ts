@@ -486,6 +486,121 @@ function utf8(value: string): Uint8Array {
   return new Uint8Array(out);
 }
 
+/**
+ * The exact bytes a buyer signs to authorise a RUN, as opposed to a payment.
+ *
+ * These are two different signatures answering two different questions at two
+ * different times. This one says "I am the buyer and I am asking for this
+ * work", and it is what makes `runInferenceJob` safe for a node to serve
+ * without an API key - a browser cannot hold one, and without this proof
+ * `buyer` would be just a string, so anyone could name someone else's funded
+ * account, have a provider do the work, and never sign for it. The payment
+ * signature (`paymentSigningBytes`) then says "I accept this bill".
+ *
+ * The layout is a domain-separated, length-prefixed, big-endian serialization
+ * of the public key, provider, model, a SHA-256 digest of the effective chat
+ * messages, and the timestamp, so an authorization is bound to one provider,
+ * one prompt and one moment.
+ *
+ * The digest is computed here, which is why this function is async: it needs
+ * WebCrypto. It uses the EFFECTIVE messages, so sending a bare `prompt` and
+ * sending the equivalent one-message transcript produce the same digest.
+ */
+export async function runAuthorizationSigningBytes(input: {
+  fromPublicKey: Uint8Array;
+  provider: string;
+  model: string;
+  timestamp: bigint | number;
+  prompt?: string;
+  messages?: ChatMessage[];
+}): Promise<Uint8Array> {
+  const messages: ChatMessage[] =
+    input.messages && input.messages.length > 0
+      ? input.messages
+      : input.prompt && input.prompt.trim() !== ''
+        ? [{ role: 'CHAT_ROLE_USER', content: input.prompt }]
+        : [];
+
+  const digest = await messagesDigest(messages);
+
+  const domain = utf8(RUN_AUTH_DOMAIN);
+  const provider = utf8(input.provider);
+  const model = utf8(input.model);
+  const total =
+    4 + domain.length + 4 + input.fromPublicKey.length + 4 + provider.length + 4 + model.length + 4 + digest.length + 8;
+
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  let o = 0;
+  const put = (bytes: Uint8Array) => {
+    view.setUint32(o, bytes.length, false);
+    o += 4;
+    out.set(bytes, o);
+    o += bytes.length;
+  };
+
+  put(domain);
+  put(input.fromPublicKey);
+  put(provider);
+  put(model);
+  put(digest);
+  view.setBigInt64(o, BigInt(input.timestamp), false);
+
+  return out;
+}
+
+/** Must match inference.runAuthDomain on the node. */
+const RUN_AUTH_DOMAIN = 'matrix/inference/run-authorization/v1';
+
+/**
+ * SHA-256 over the length-prefixed role/content pairs, preceded by the count.
+ * The prefixes are what stop two different transcripts hashing the same, which
+ * would let one signature cover both.
+ */
+async function messagesDigest(messages: ChatMessage[]): Promise<Uint8Array> {
+  const parts: Uint8Array[] = [];
+  const count = new Uint8Array(8);
+  new DataView(count.buffer).setBigUint64(0, BigInt(messages.length), false);
+  parts.push(count);
+
+  for (const m of messages) {
+    for (const field of [utf8(roleWireName(m.role)), utf8(m.content)]) {
+      const len = new Uint8Array(4);
+      new DataView(len.buffer).setUint32(0, field.length, false);
+      parts.push(len, field);
+    }
+  }
+
+  let size = 0;
+  for (const p of parts) size += p.length;
+  const flat = new Uint8Array(size);
+  let at = 0;
+  for (const p of parts) {
+    flat.set(p, at);
+    at += p.length;
+  }
+
+  const hash = await crypto.subtle.digest('SHA-256', flat);
+  return new Uint8Array(hash);
+}
+
+/**
+ * The node's internal role strings are "system" / "user" / "assistant", not the
+ * proto enum names, and the digest is over those. Mapping here rather than
+ * asking a caller to know it is the difference between a signature that
+ * verifies and one that mysteriously does not.
+ */
+function roleWireName(role: ChatRole): string {
+  switch (role) {
+    case 'CHAT_ROLE_SYSTEM':
+      return 'system';
+    case 'CHAT_ROLE_ASSISTANT':
+      return 'assistant';
+    default:
+      return 'user';
+  }
+}
+
 /** Decodes standard base64 (what proto JSON uses for a `bytes` field). */
 export function fromBase64(value: string): Uint8Array {
   const clean = value.replace(/[^A-Za-z0-9+/]/g, '');
@@ -780,6 +895,12 @@ export class MatrixClient {
     maxTokens?: number;
     temperature?: number;
     unitsEstimate?: bigint | number;
+    /**
+     * The buyer's proof that it controls `buyer` and is asking for this work,
+     * signed over `runAuthorizationSigningBytes`. Required by a node that serves
+     * this method without an API key, which is what a browser needs.
+     */
+    authorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
   }): Promise<{ payment: PaymentRequest; job: InferenceJob }> {
     const out = await this.call(INFERENCE, 'RunInferenceJob', {
       buyer: input.buyer,
@@ -790,6 +911,15 @@ export class MatrixClient {
       maxTokens: input.maxTokens ?? 0,
       temperature: input.temperature ?? 0,
       unitsEstimate: String(input.unitsEstimate ?? 0),
+      ...(input.authorization
+        ? {
+            authorization: {
+              publicKey: toBase64(input.authorization.publicKey),
+              timestamp: String(input.authorization.timestamp),
+              signature: toBase64(input.authorization.signature),
+            },
+          }
+        : {}),
     });
     return {
       payment: decodePaymentRequest(record(out.payment)),

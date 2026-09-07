@@ -7,6 +7,7 @@ import {
   MatrixError,
   fromBase64,
   paymentSigningBytes,
+  runAuthorizationSigningBytes,
   toBase64,
 } from './index';
 
@@ -436,5 +437,101 @@ describe('payment signing bytes', () => {
     expect(body.nonce).toBe('4');
     expect(body.timestamp).toBe('1788769228123456789');
     expect(body.to).toBe('gpu-1');
+  });
+});
+
+describe('run authorization signing bytes', () => {
+  // Taken from inference.RunAuthorization.SigningBytes on the node. Same reason
+  // as the payment vector: a one-byte drift rejects every signature and looks
+  // like a bad key rather than a bad encoding.
+  const GOLDEN =
+    'AAAAJW1hdHJpeC9pbmZlcmVuY2UvcnVuLWF1dGhvcml6YXRpb24vdjEAAAAgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8AAAAFZ3B1LTEAAAANbGxhbWEtMy4zLTcwYgAAACC5plUi18KqH5VVzrz5BlHYN9SQ1bcVKQ66LcPWFJUKBxjS/CK7csUV';
+
+  const key = (() => {
+    const k = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) k[i] = i;
+    return k;
+  })();
+
+  it('matches the node byte for byte', async () => {
+    const bytes = await runAuthorizationSigningBytes({
+      fromPublicKey: key,
+      provider: 'gpu-1',
+      model: 'llama-3.3-70b',
+      timestamp: 1788769228123456789n,
+      messages: [{ role: 'CHAT_ROLE_USER', content: 'hello' }],
+    });
+    expect(toBase64(bytes)).toBe(GOLDEN);
+  });
+
+  it('digests a bare prompt the same as the equivalent transcript', async () => {
+    // An honest client that picked the other field must not get a mysterious
+    // refusal, so both have to sign to the same bytes.
+    const fromPrompt = await runAuthorizationSigningBytes({
+      fromPublicKey: key,
+      provider: 'gpu-1',
+      model: 'llama-3.3-70b',
+      timestamp: 1788769228123456789n,
+      prompt: 'hello',
+    });
+    expect(toBase64(fromPrompt)).toBe(GOLDEN);
+  });
+
+  it('binds the authorization to the provider, model and prompt', async () => {
+    const base = {
+      fromPublicKey: key,
+      provider: 'gpu-1',
+      model: 'llama-3.3-70b',
+      timestamp: 1n,
+      prompt: 'hello',
+    };
+    const same = toBase64(await runAuthorizationSigningBytes(base));
+
+    for (const changed of [
+      { ...base, provider: 'gpu-2' },
+      { ...base, model: 'qwen-2.5-72b' },
+      { ...base, prompt: 'an enormously expensive question' },
+      { ...base, timestamp: 2n },
+    ]) {
+      expect(toBase64(await runAuthorizationSigningBytes(changed))).not.toBe(same);
+    }
+  });
+
+  it('separates transcript fields so two conversations cannot share a payload', async () => {
+    const base = { fromPublicKey: key, provider: 'p', model: 'm', timestamp: 1n };
+    const joined = toBase64(
+      await runAuthorizationSigningBytes({ ...base, messages: [{ role: 'CHAT_ROLE_USER', content: 'ab' }] }),
+    );
+    const split = toBase64(
+      await runAuthorizationSigningBytes({
+        ...base,
+        messages: [
+          { role: 'CHAT_ROLE_USER', content: 'a' },
+          { role: 'CHAT_ROLE_USER', content: 'b' },
+        ],
+      }),
+    );
+    expect(joined).not.toBe(split);
+  });
+
+  it('sends the authorization only when one is given', async () => {
+    const { client: c, calls } = client([
+      { body: { payment: {}, job: {} } },
+      { body: { payment: {}, job: {} } },
+    ]);
+
+    await c.runInferenceJob({ buyer: 'b', provider: 'p', model: 'm', prompt: 'hi' });
+    await c.runInferenceJob({
+      buyer: 'b',
+      provider: 'p',
+      model: 'm',
+      prompt: 'hi',
+      authorization: { publicKey: new Uint8Array(32), timestamp: 7n, signature: new Uint8Array(64) },
+    });
+
+    expect(JSON.parse(String(calls[0]!.init.body)).authorization).toBeUndefined();
+    const sent = JSON.parse(String(calls[1]!.init.body)).authorization;
+    expect(sent.timestamp).toBe('7');
+    expect(typeof sent.publicKey).toBe('string');
   });
 });

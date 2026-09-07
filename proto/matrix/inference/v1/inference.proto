@@ -185,6 +185,36 @@ message RunInferenceJobRequest {
     double temperature = 7;
     // Upfront estimate of the compute units to reserve. Zero defaults to one.
     uint64 units_estimate = 8;
+    // The buyer's proof that it controls `buyer` and is asking for this work.
+    //
+    // Required when the node serves this method without an API key, which is
+    // what a browser needs: a page cannot hold a key. Without it, `buyer` is
+    // just a string, so anyone could name someone else's funded account, have a
+    // provider do the work, and never sign for it - the victim's balance is
+    // untouched but the provider works for free and its capacity is held until
+    // the payment request expires.
+    RunAuthorization authorization = 9;
+}
+
+// RunAuthorization is a buyer's signature over the run it is requesting. It is
+// separate from the payment signature because the two answer different
+// questions at different times: this says "I am the buyer and I am asking for
+// this work", the payment says "I accept this bill".
+//
+// The signed bytes are a domain-separated, length-prefixed serialization of the
+// public key, provider, model, a SHA-256 digest of the effective chat messages,
+// and the timestamp - so an authorization is bound to one provider, one prompt
+// and one moment, and cannot be lifted onto another run.
+message RunAuthorization {
+    // The buyer's ed25519 public key (32 bytes). The buyer account ID is derived
+    // from it, which is what stops a caller naming an account it lacks the key
+    // for.
+    bytes public_key = 1;
+    // Unix nanoseconds at signing time. Accepted within two minutes of the
+    // node's clock, and each signature is accepted only once inside that window.
+    int64 timestamp = 2;
+    // The ed25519 signature (64 bytes).
+    bytes signature = 3;
 }
 
 // RunInferenceJobResponse returns the payment to sign and the job in

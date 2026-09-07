@@ -28,3 +28,43 @@ import "strings"
 func isReadMethod(method string) bool {
 	return strings.HasPrefix(method, "Get") || strings.HasPrefix(method, "List")
 }
+
+// signatureAuthorisedWrites are the write methods whose authority is a
+// CLIENT SIGNATURE rather than an API key, so opening them adds nothing an
+// attacker did not already have.
+//
+// A browser cannot hold an API key, so a self-custody page needs these three
+// reachable without one. Each is safe to open for a specific reason, and the
+// list is short and explicit rather than derived from a name, because getting it
+// wrong opens a write:
+//
+//	SubmitSignedTransfer  carries the sender's signature over the exact transfer.
+//	                      An unsigned or forged one is refused, so a key would
+//	                      only decide WHO MAY ASK, and the signature already
+//	                      decides whose money moves.
+//	SettleInferenceJob    carries the buyer's signature over the invoice, checked
+//	                      field by field against what the node asked for.
+//	RunInferenceJob       carries the buyer's RunAuthorization, a signature over
+//	                      the provider, model, prompt digest and timestamp. This
+//	                      one is only safe BECAUSE of that: without it `buyer` is
+//	                      just a string and anyone could make a provider work for
+//	                      free against someone else's account. The node ties the
+//	                      two settings together so it cannot be opened without
+//	                      the authorization being required.
+//
+// Nothing else belongs here. FundAccount moves money from the reward pool on the
+// operator's authority alone, RegisterProvider and SubmitJob commit a provider's
+// capacity, and CompleteJob and CancelJob decide a job's outcome - none of them
+// carries a signature that could stand in for a credential.
+var signatureAuthorisedWrites = map[string]struct{}{
+	"SubmitSignedTransfer": {},
+	"SettleInferenceJob":   {},
+	"RunInferenceJob":      {},
+}
+
+// isSignatureAuthorisedWrite reports whether a method's authority is a client
+// signature.
+func isSignatureAuthorisedWrite(method string) bool {
+	_, ok := signatureAuthorisedWrites[method]
+	return ok
+}
