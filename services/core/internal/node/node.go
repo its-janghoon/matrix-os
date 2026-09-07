@@ -146,8 +146,66 @@ type Config struct {
 		// offence than have the network eject the offender. Detection, recording
 		// and gossip are unaffected either way.
 		EjectEquivocators *bool `yaml:"eject_equivocators"`
+		// Stake configures bonded stake: voting power becomes an account's bonded
+		// native MATRIX, admission requires a minimum bond, and a proven offence
+		// takes the offender's bond instead of only its place.
+		Stake StakeConfig `yaml:"stake"`
 	} `yaml:"consensus"`
 	Genesis GenesisConfig `yaml:"genesis"`
+}
+
+// StakeConfig configures bonded stake for consensus.
+//
+// Membership used to be agreement between operators and nothing else, so a
+// validator caught equivocating lost its place and nothing more, and a quorum
+// measured in HEADS could be bought for the price of N identities. A bond
+// answers both: voting power is bonded stake, so a quorum costs two thirds of
+// everything bonded however many identities it is spread across, and an
+// offence that is provable is answered by taking the bond.
+type StakeConfig struct {
+	// Enabled turns bonded stake on. Off, the network runs as it did: every
+	// validator has power 1, every quorum is a headcount, and an ejected
+	// validator loses only its place. That is coherent for operators who know
+	// each other; it is not safe for a set anyone may join.
+	Enabled bool `yaml:"enabled"`
+	// MinBond is the stake an account must have bonded, in native base units,
+	// before the network may admit it as a validator. Null means the default
+	// (1e15, a thousandth of the supply cap); zero explicitly means no minimum,
+	// which is only appropriate on a network not using stake for security.
+	MinBond *uint64 `yaml:"min_bond"`
+	// UnbondingPeriod is how many blocks after leaving the validator set an
+	// account must wait before it may withdraw its bond. Zero means the default.
+	//
+	// The delay is why a bond deters anything. Without it a validator
+	// equivocates, is ejected, and withdraws before the network has committed
+	// the slash - so the bond it was supposed to lose is already spent. It has
+	// to be long enough for evidence to be gossiped, voted on and committed.
+	UnbondingPeriod uint64 `yaml:"unbonding_period"`
+	// Bond is how much of its own native MATRIX this node should keep bonded, in
+	// base units. The node bonds the shortfall itself and keeps topping it up,
+	// which is how an operator stakes: bonding has to be signed by the
+	// validator's own key, and that key lives inside the node.
+	//
+	// The node's consensus account has to hold the coins first. Its id is
+	// printed at startup; fund it with `matrix fund` or a transfer.
+	Bond uint64 `yaml:"bond"`
+}
+
+// effectiveMinBond and effectiveUnbonding resolve what the engine will actually
+// use, so the startup line reports the number in force rather than the raw
+// (possibly null or zero) config value.
+func effectiveMinBond(cfg StakeConfig) uint64 {
+	if cfg.MinBond != nil {
+		return *cfg.MinBond
+	}
+	return consensus.DefaultMinBond
+}
+
+func effectiveUnbonding(cfg StakeConfig) uint64 {
+	if cfg.UnbondingPeriod > 0 {
+		return cfg.UnbondingPeriod
+	}
+	return consensus.DefaultUnbondingPeriod
 }
 
 // GenesisConfig describes the one-time native MATRIX genesis this node applies
@@ -317,6 +375,12 @@ func Initialize(configPath string) error {
 	// operator reads. True is the default either way.
 	ejectEquivocators := true
 	config.Consensus.EjectEquivocators = &ejectEquivocators
+	// Bonded stake OFF in a generated config. Turning it on is a decision about
+	// what a validator must risk, and it cannot be made for an operator: on a
+	// single-node dev network it would require that node to bond a million
+	// MATRIX before it could validate anything. The section is written so the
+	// knobs are visible.
+	config.Consensus.Stake = StakeConfig{Enabled: false}
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -571,6 +635,30 @@ func (n *Node) Start() error {
 	// changes the set on its own authority; that would fork it away from its
 	// peers.
 	n.evidence = consensus.NewEvidenceStore(n.kvStore)
+
+	// Resolve the stake configuration before building the engine, so the two
+	// "zero means default" cases are decided in one place: a null min_bond takes
+	// the default, an explicit 0 means no minimum at all.
+	var stakeLedger *consensus.StakeLedger
+	var minBond uint64
+	var zeroMinBond bool
+	if n.config.Consensus.Stake.Enabled {
+		stakeLedger = consensus.NewStakeLedger(n.market.Ledger(), n.kvStore)
+		if n.config.Consensus.Stake.MinBond != nil {
+			minBond = *n.config.Consensus.Stake.MinBond
+			zeroMinBond = minBond == 0
+		}
+		fmt.Printf("Consensus: bonded stake is ON. Voting power is bonded MATRIX; "+
+			"a validator must bond at least %d base units to be admitted, and waits %d blocks after leaving to withdraw.\n",
+			effectiveMinBond(n.config.Consensus.Stake), effectiveUnbonding(n.config.Consensus.Stake))
+		if n.config.Consensus.Stake.Bond > 0 {
+			fmt.Printf("Consensus: this node will keep %d base units bonded from its own account %s.\n",
+				n.config.Consensus.Stake.Bond, consensusAccount.AccountID())
+		} else {
+			fmt.Printf("Consensus: consensus.stake.bond is 0, so this node bonds nothing and cannot be admitted " +
+				"to a staked validator set.\n")
+		}
+	}
 	consensusEngine, err := consensus.New(consensus.Config{
 		Transport:  n.transport,
 		Validators: validatorSet,
@@ -587,6 +675,15 @@ func (n *Node) Start() error {
 		EpochLength:        n.config.Consensus.EpochLength,
 		ApprovedSetChanges: n.config.Consensus.ApprovedChanges,
 		EjectEquivocators:  n.config.Consensus.EjectEquivocators,
+		// Bonded stake, when the operator has turned it on. A bond is a balance
+		// in a reserved account on the SAME ledger everything else settles on, so
+		// bonding conserves supply and bonded coins leave the spendable balance
+		// without any second accounting system.
+		Stake:           stakeLedger,
+		MinBond:         minBond,
+		ZeroMinBond:     zeroMinBond,
+		UnbondingPeriod: n.config.Consensus.Stake.UnbondingPeriod,
+		TargetBond:      n.config.Consensus.Stake.Bond,
 		OnEquivocation: func(eq *consensus.Equivocation) {
 			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+
 				"consensus/evidence/ in this node's database.\n", eq.VoterID, eq.Height, eq.Round)

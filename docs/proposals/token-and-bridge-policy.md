@@ -29,7 +29,9 @@ These are constraints, not opinions. Changing any of them is a code change.
 | **There is no emission schedule.** Nothing pays anyone per block | no code |
 | The validator set is chain state: a change rides in a committed block and takes effect at an epoch boundary, and it needs a quorum of operators to have approved it | `internal/consensus/setchange.go` |
 | A validator proven to have equivocated is ejected the same way, with no config entry, because the evidence proves itself | `internal/consensus/evidence.go`, `Engine.reportEquivocation` |
-| **There is no stake.** Membership is agreement between operators, not capital at risk, so an ejected validator loses its place and nothing else | no code |
+| Bonded stake exists and is OFF by default. With it on, voting power is bonded MATRIX, admission requires a minimum bond, and equivocation moves the offender's whole bond to the reward pool | `internal/consensus/stake.go` |
+| **A bond earns nothing.** Nothing pays a validator per block, so staking is a deterrent and not a yield - which is why the settlement fee below is the next piece, not an optional one | no code |
+| **A bond is necessary to be admitted, never sufficient.** A quorum of operators still has to approve the change, so this is permissioned-with-skin-in-the-game rather than permissionless | `internal/consensus/setchange.go` |
 
 Three consequences follow, and they drive everything below.
 
@@ -118,11 +120,11 @@ Three options, and I would take the third:
    when the network is idle, and gives stake something to earn, which is what
    makes slashing a deterrent rather than a threat.
 
-Option 3 needs stake. The dynamic validator set it was waiting on has landed -
-membership is now chain state and equivocation is punished by ejection - so
-stake is the next piece, and it is the only remaining prerequisite. Until it
-exists, option 1 is what we have, and we should say so rather than implying
-otherwise.
+Option 3's prerequisites are now in place: membership is chain state, and stake
+is bonded, weighted and slashable. What is missing is the fee itself. Until it
+exists a bond earns nothing and only stands to be lost, which is a deterrent
+that works and an incentive that does not - so option 1 is still what we have,
+and we should say so rather than implying otherwise.
 
 ### What I would refuse to do
 
@@ -139,15 +141,15 @@ otherwise.
    regulated event in most places, and the answer changes the sale mechanics
    (and whether there is a sale at all). This needs a lawyer, not me.
 4. Audit budget. It sets the bridge timeline in part 2.
-5. Is the validator set permissioned at launch, or open with stake? I recommend
-   permissioned for the first release. The mechanism that made that
-   recommendation conditional - a set that could only change by a coordinated
-   restart of every node - is gone, so a third-party validator can now be
-   admitted and, if it misbehaves provably, ejected while the network runs.
-   What is still missing is a cost to misbehaving: ejection without stake
-   removes a validator but takes nothing from it, so the deterrent is
-   reputational. That is acceptable among operators who know each other and
-   not acceptable for an open set.
+5. Is the validator set permissioned at launch, or open with stake? I still
+   recommend permissioned for the first release, but the reason has narrowed
+   again. A third-party validator can be admitted and, if it misbehaves
+   provably, slashed and ejected while the network runs; misbehaving now costs
+   the offender its bond. Two things are left before "open" is honest: a bond
+   earns nothing, so nobody outside the operator group has a reason to post
+   one; and admission is still a quorum of operators approving you, which is
+   the right default while the fee does not exist. Turn on the fee, and
+   "permissionless" becomes a policy switch rather than an engineering one.
 
 ## Part 2: getting wMATRIX to a market
 
@@ -238,17 +240,20 @@ In the order I would do them:
 1. **Programmatic provider rewards** in the consensus apply step, with a fixed
    decay from the genesis pool. Without it, the 40% is a promise with no
    mechanism.
-2. ~~**Dynamic validator set** (ledger-backed, applied at epoch boundaries)~~ -
-   DONE. A change is a transaction to a reserved recipient, it needs a quorum of
-   operators to have approved it, and it takes effect at an epoch boundary so
-   every node switches at the same height. Proven equivocation ejects the
-   offender through the same path. What remains is **stake**: a bond that
-   ejection burns. Stake is the prerequisite for the settlement fee, and it is
-   what turns ejection from a reputational cost into a financial one, which is
-   what a permissionless validator set needs.
+2. ~~**Dynamic validator set**, then **stake**~~ - DONE. A change is a
+   transaction to a reserved recipient, it needs a quorum of operators to have
+   approved it, and it takes effect at an epoch boundary so every node switches
+   at the same height. Voting power is bonded MATRIX, so a quorum costs two
+   thirds of what is bonded rather than two thirds of the identities; admission
+   requires a minimum bond; and proven equivocation moves the offender's whole
+   bond to the reward pool. A bond is withdrawable only after the validator has
+   left the set and served an unbonding period, so it cannot equivocate and
+   withdraw ahead of the evidence.
 3. **A settlement fee**, capped in code, split among the validators of the
    committing block.
 4. **A bridge mint cap** in the contract, plus the reconciliation report as a
    node endpoint rather than a manual query.
 
-Items 1, 3 and 4 are days. Item 2's remaining half - stake - is the large one.
+Items 1, 3 and 4 are days, and item 3 is now the one that matters most: with
+stake in place and no fee, a validator's bond earns nothing and only stands to
+be lost, which is why I would not invite a third-party validator yet.

@@ -418,7 +418,7 @@ func TestMultiNodeNoDivergenceUnderTightTimeout(t *testing.T) {
 	// divergence) is then asserted over every pair of nodes below, regardless of
 	// how far each one got.
 	const wantBalance = 1_000_000 - 40
-	quorum := nodes[0].engine.ValidatorSet().Quorum()
+	quorum := int(nodes[0].engine.ValidatorSet().QuorumPower()) // equal power: heads == power
 	deadline := time.Now().Add(20 * time.Second)
 	for {
 		settled := 0

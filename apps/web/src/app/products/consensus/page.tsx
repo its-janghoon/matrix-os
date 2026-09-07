@@ -5,7 +5,7 @@ import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
 import { ConsensusRound, ValidatorSetChange } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
-import { FiArrowRight, FiBookOpen, FiGlobe, FiLayers, FiShield, FiUsers, FiZap } from 'react-icons/fi';
+import { FiArrowRight, FiBookOpen, FiGlobe, FiLayers, FiLock, FiShield, FiUsers, FiZap } from 'react-icons/fi';
 
 export default function ConsensusPage() {
   return (
@@ -83,7 +83,26 @@ export default function ConsensusPage() {
 
           <ValidatorSetChange className='mt-10' />
 
-          <div className='mt-4 grid grid-cols-1 gap-6 md:grid-cols-2'>
+          <div className='mt-4 grid grid-cols-1 gap-6 md:grid-cols-3'>
+            <Card>
+              <div className='flex items-center gap-3'>
+                <IconBadge icon={FiLock} />
+                <h3 className='text-xl font-semibold'>A quorum is priced in stake</h3>
+              </div>
+              <ul className='mt-6 space-y-3'>
+                <CheckItem>Voting power is an account&apos;s bonded native MATRIX, not one vote per identity</CheckItem>
+                <CheckItem>
+                  So a quorum costs two thirds of everything bonded, however many identities it is spread across -
+                  identities are free, bonds are not
+                </CheckItem>
+                <CheckItem>Admission requires a minimum bond, so nobody validates with nothing at risk</CheckItem>
+                <CheckItem>
+                  A validator waits out an unbonding period after leaving before it can withdraw, so it cannot
+                  equivocate and pull its bond out ahead of the evidence
+                </CheckItem>
+              </ul>
+            </Card>
+
             <Card>
               <div className='flex items-center gap-3'>
                 <IconBadge icon={FiUsers} />
@@ -115,7 +134,8 @@ export default function ConsensusPage() {
                 <CheckItem>Every node verifies the proof itself rather than trusting the peer that relayed it</CheckItem>
                 <CheckItem>The network votes to eject the offender with no config entry needed</CheckItem>
                 <CheckItem>
-                  There is no stake yet, so an ejected validator loses its place and nothing else
+                  With bonded stake on, the offender&apos;s whole bond moves to the reward pool - the offence costs
+                  it money, not just its place
                 </CheckItem>
               </ul>
             </Card>

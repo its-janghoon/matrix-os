@@ -69,6 +69,13 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		chain := NewBlockChain(store)
 		evidence := NewEvidenceStore(store)
 		sets := NewSetStore(store)
+		// Every test cluster gets a stake ledger, matching how the node wires
+		// one. With no bonds posted, every validator has power 1 and every
+		// quorum is the same headcount it always was, so this changes nothing
+		// for tests that do not use stake - and it means a test that does use it
+		// never has to reach into a running engine to install one, which would
+		// be a data race on the driver goroutine.
+		stake := NewStakeLedger(ledger, store)
 		cfg := Config{
 			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
@@ -79,6 +86,10 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			RoundTimeout:    60 * time.Millisecond,
 			Evidence:        evidence,
 			Sets:            sets,
+			Stake:           stake,
+			// Nothing is bonded in most tests, so an admission floor would refuse
+			// every set change. Tests about the floor set one.
+			ZeroMinBond: true,
 		}
 		if opts != nil {
 			opts(&cfg)
@@ -517,8 +528,8 @@ func TestValidatorSetLeaderRotation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("set: %v", err)
 	}
-	if vs.Quorum() != 3 {
-		t.Fatalf("quorum for N=4 = %d, want 3", vs.Quorum())
+	if vs.QuorumPower() != 3 {
+		t.Fatalf("quorum for N=4 = %d, want 3", vs.QuorumPower())
 	}
 	ids := vs.IDs()
 	// (height, round) must select ids[(height+round) mod N] and wrap around. The

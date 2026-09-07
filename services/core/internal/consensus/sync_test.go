@@ -134,7 +134,7 @@ func TestAMissedProposalStallsANodeWithoutBlockSync(t *testing.T) {
 		t.Fatalf("block at 0: %v", err)
 	}
 	committedKey := fmt.Sprintf("%x", committed.Hash())
-	quorum := nodes[0].engine.vset().Quorum()
+	quorum := int(nodes[0].engine.vset().QuorumPower()) // equal power: heads == power
 
 	victim.engine.mu.Lock()
 	tallied := 0
@@ -237,7 +237,7 @@ func TestCommitPersistsEndorsingVotes(t *testing.T) {
 	}
 	waitForHeight(t, nodes, 1, 5*time.Second)
 
-	quorum := nodes[0].engine.vset().Quorum()
+	quorum := int(nodes[0].engine.vset().QuorumPower()) // equal power: heads == power
 	block, err := nodes[0].chain.BlockAt(0)
 	if err != nil {
 		t.Fatalf("block at 0: %v", err)
@@ -317,7 +317,7 @@ func TestSyncedBlockNeedsAQuorumToCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("commit votes: %v", err)
 	}
-	quorum := nodes[0].engine.vset().Quorum()
+	quorum := int(nodes[0].engine.vset().QuorumPower()) // equal power: heads == power
 	if len(votes) < quorum {
 		t.Fatalf("need at least %d stored votes to build the cases, have %d", quorum, len(votes))
 	}
@@ -481,7 +481,7 @@ func TestHeightSurvivesVoteLoss(t *testing.T) {
 	// Wait until a quorum of nodes has prevoted a block and the round has
 	// rotated, so the height is being carried by a re-proposal rather than by the
 	// original one.
-	quorum := nodes[0].engine.vset().Quorum()
+	quorum := int(nodes[0].engine.vset().QuorumPower()) // equal power: heads == power
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		voted, rotated := 0, 0
@@ -550,7 +550,7 @@ func TestCompetingValuesConverge(t *testing.T) {
 
 	// Wait for the split: a quorum of nodes has voted, for at least two different
 	// blocks. No block can reach a quorum from here.
-	quorum := nodes[0].engine.vset().Quorum()
+	quorum := int(nodes[0].engine.vset().QuorumPower()) // equal power: heads == power
 	deadline := time.Now().Add(5 * time.Second)
 	for {
 		voted := 0

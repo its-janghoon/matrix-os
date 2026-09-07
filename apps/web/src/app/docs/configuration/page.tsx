@@ -52,6 +52,11 @@ consensus:
   epoch_length: 100                      # blocks between set changes taking effect; must match everywhere
   approved_changes: []                   # set changes this operator votes for and offers
   eject_equivocators: true               # remove a validator proven to have double-voted
+  stake:
+    enabled: false                       # voting power = bonded MATRIX; off = one vote each
+    min_bond: null                       # null = 1e15 base units; 0 = no minimum
+    unbonding_period: 0                  # 0 = 1000 blocks after leaving before withdrawal
+    bond: 0                              # what THIS node keeps bonded from its own account
 
 genesis:
   allocations: []                        # [{account, amount}] credited once, at first start
@@ -165,7 +170,7 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
   {
     title: 'consensus',
     blurb:
-      'The validator set. Every node in a network must start from the same ids and agree on epoch_length, or they derive different leader schedules. The set itself is chain state: once it has changed, each node resumes the set the chain arrived at and this file no longer decides it.',
+      'The validator set. Every node in a network must start from the same ids and agree on epoch_length, and on whether stake is enabled, or they derive different leader schedules and different quorums. The set itself is chain state: once it has changed, each node resumes the set the chain arrived at and this file no longer decides it.',
     fields: [
       {
         name: 'validators',
@@ -181,6 +186,26 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'approved_changes',
         def: '[]',
         note: 'Set changes this operator votes for, written as add:<64-hex public key> or remove:<64-hex account id> - the same text the node prints in its log. A node offers the changes listed here and re-offers them until they commit, and prevotes nil on a block carrying anything else, so a change needs a quorum of operators to have listed it. Empty means this node approves no membership change, which is the safe default. A typo fails startup rather than silently approving nothing.',
+      },
+      {
+        name: 'stake.enabled',
+        def: 'false',
+        note: 'Turns bonded stake on. Voting power becomes an account’s bonded native MATRIX rather than one vote per validator, admission requires stake.min_bond, and a validator proven to have equivocated loses its whole bond to the reward pool instead of only its place. Off, the network runs as a permissioned set of equals - coherent for operators who know each other, and not safe for a set anyone may join, because a quorum counted in heads can be bought for the price of a few identities.',
+      },
+      {
+        name: 'stake.min_bond',
+        def: 'null (1e15 base units)',
+        note: 'What an account must have bonded before the network may admit it as a validator. Null takes the default, a thousandth of the supply cap; an explicit 0 means no minimum, which is only appropriate on a network not using stake for security. A bond is necessary to be admitted and never sufficient: a quorum of operators still has to approve the change.',
+      },
+      {
+        name: 'stake.unbonding_period',
+        def: '0 (1000 blocks)',
+        note: 'How many blocks after LEAVING the validator set an account waits before it may withdraw its bond. A sitting validator may not withdraw at all. The delay is why a bond deters anything: without it a validator could equivocate, be ejected, and withdraw before the network committed the slash, so it has to be long enough for evidence to be gossiped, voted on and committed. A withdrawal submitted early waits in the mempool and lands by itself.',
+      },
+      {
+        name: 'stake.bond',
+        def: '0',
+        note: 'How much of its own native MATRIX this node keeps bonded. The node bonds the shortfall itself and keeps topping it up, because bonding must be signed by the validator’s own key and that key lives inside the node. Its consensus account has to hold the coins first - the id is printed at startup - and the node says so plainly if it does not. Zero bonds nothing, so on a staked network the node cannot be admitted.',
       },
       {
         name: 'eject_equivocators',

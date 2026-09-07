@@ -50,6 +50,10 @@ const REAL = [
     body: 'An ed25519 validator set, a leader that rotates every commit, two voting phases, and a quorum of more than two thirds. Committed blocks are hash-linked; a node that misses one fetches it with the quorum that committed it.',
   },
   {
+    title: 'Bonded stake, optionally',
+    body: 'Turn it on and voting power becomes an account’s bonded MATRIX, so a quorum costs two thirds of what is bonded rather than two thirds of the identities. Admission requires a minimum bond, and a validator proven to have equivocated loses that bond to the reward pool.',
+  },
+  {
     title: 'A wrapped ERC-20 mirror',
     body: 'Native MATRIX locks into escrow and a threshold of validator attestations authorizes minting wMATRIX; burning it releases the escrow. Against local and test networks only - it is not deployed to public Ethereum.',
   },
@@ -60,7 +64,7 @@ const REAL = [
 ];
 
 const NOT_YET = [
-  'No stake. Validator-set membership is agreement between operators, not capital at risk, so a permissionless validator set is still ahead.',
+  'A permissionless validator set is still ahead. Bonded stake exists - voting power is bonded MATRIX, admission costs a bond, and equivocation takes it - but it is off unless an operator turns it on, and the set is still one a quorum of operators admits you to rather than one you buy into.',
   'No zero-knowledge proofs and no secure enclaves. A provider sees the work it runs.',
   'No agent deployment path over the network, and no agent-to-agent collaboration primitive. The runtime runs a module you hand it.',
   'The bridge is not on public Ethereum, and the SDK is not on npm.',

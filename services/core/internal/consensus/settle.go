@@ -52,6 +52,51 @@ func (e *Engine) SubmitTransfer(pub ed25519.PublicKey, priv ed25519.PrivateKey, 
 	return tx, nil
 }
 
+// SubmitBond locks amount of the account's own native MATRIX into its bond, by
+// submitting a transfer to its reserved bond account. Bonded coins leave the
+// spendable balance and are what its voting power is measured in.
+//
+// It takes effect on the ledger when the block commits, and changes voting
+// power at the next epoch boundary - not immediately, because power has to
+// change at the same height on every node.
+func (e *Engine) SubmitBond(from *token.Account, amount, nonce uint64) (*token.Transaction, error) {
+	if from == nil {
+		return nil, fmt.Errorf("%w: account is required", ErrInvalidMessage)
+	}
+	if amount == 0 {
+		return nil, fmt.Errorf("%w: a bond must carry a non-zero amount", ErrInvalidMessage)
+	}
+	return e.SubmitAccountTransfer(from, BondAccount(from.AccountID()), amount, nonce)
+}
+
+// SubmitWithdrawBond asks for the account's whole bond back. It is valid only
+// once the account is out of the validator set and its unbonding period has
+// elapsed, so the transaction may sit in the mempool until then and land by
+// itself - which is the intended behaviour, not a failure.
+func (e *Engine) SubmitWithdrawBond(from *token.Account, nonce uint64) (*token.Transaction, error) {
+	if from == nil {
+		return nil, fmt.Errorf("%w: account is required", ErrInvalidMessage)
+	}
+	return e.SubmitAccountTransfer(from, WithdrawRecipient(from.AccountID()), 0, nonce)
+}
+
+// BondedStake returns how much the given account has bonded, and zero on a
+// network without stake.
+func (e *Engine) BondedStake(id string) (uint64, error) {
+	if e.stake == nil {
+		return 0, nil
+	}
+	return e.stake.Bonded(id)
+}
+
+// MinBond is the stake required before an account may be admitted to the
+// validator set. Zero means membership costs nothing.
+func (e *Engine) MinBond() uint64 { return e.minBond }
+
+// UnbondingPeriod is how many blocks after leaving the set an account waits
+// before it may withdraw its bond.
+func (e *Engine) UnbondingPeriod() uint64 { return e.unbondingPeriod }
+
 // SubmitAccountTransfer is a convenience wrapper over SubmitTransfer for a
 // token.Account (which carries both key halves).
 func (e *Engine) SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {

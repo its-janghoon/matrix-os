@@ -317,8 +317,8 @@ func TestApprovedSetChangeAdmitsAValidatorAtTheEpochBoundary(t *testing.T) {
 		if vs.Len() != 5 {
 			t.Fatalf("node %d has %d validators, want 5", i, vs.Len())
 		}
-		if vs.Quorum() != 4 {
-			t.Fatalf("node %d quorum = %d, want 4 for a set of 5", i, vs.Quorum())
+		if vs.QuorumPower() != 4 {
+			t.Fatalf("node %d quorum = %d, want 4 for a set of 5", i, vs.QuorumPower())
 		}
 		// The set must have taken effect at an epoch boundary, not at whatever
 		// height each node happened to apply the block.
@@ -474,7 +474,7 @@ func TestRemovedValidatorStopsVotingAndTheRestCarryOn(t *testing.T) {
 		if got := nd.engine.vset().Len(); got != 3 {
 			t.Fatalf("node %d set size = %d, want 3", i, got)
 		}
-		if got := nd.engine.vset().Quorum(); got != 3 {
+		if got := nd.engine.vset().QuorumPower(); got != 3 {
 			t.Fatalf("node %d quorum = %d, want 3 for a set of 3", i, got)
 		}
 	}

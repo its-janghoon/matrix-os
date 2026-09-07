@@ -121,6 +121,34 @@ type Config struct {
 	// safe default: without it, one validator could propose removing all the
 	// others and the rest would vote for it without ever looking.
 	ApprovedSetChanges []string
+	// Stake, when non-nil, is the bonded-stake ledger. With it configured,
+	// voting power is bonded stake rather than one vote per validator, admission
+	// requires MinBond, and a proven offence takes the offender's bond.
+	//
+	// Without it the network runs unstaked: every validator has power 1, every
+	// quorum is a headcount, and an ejected validator loses nothing but its
+	// place. That is a coherent mode for operators who know each other, and the
+	// only safe one for an open set is the other.
+	Stake *StakeLedger
+	// MinBond is the stake an account must have bonded before it may be admitted
+	// to the validator set. Zero means DefaultMinBond; set it explicitly to zero
+	// through ZeroMinBond to admit validators with nothing at risk.
+	MinBond uint64
+	// ZeroMinBond removes the minimum-bond requirement, which is only
+	// appropriate on a network that is not using stake for security.
+	ZeroMinBond bool
+	// UnbondingPeriod is how many blocks after leaving the validator set an
+	// account must wait before withdrawing its bond. Zero means
+	// DefaultUnbondingPeriod.
+	UnbondingPeriod uint64
+	// TargetBond is how much this node should have bonded on its own consensus
+	// account. When its bond is below this the node submits a bond for the
+	// difference, and keeps doing so until the target is met.
+	//
+	// It is config rather than an RPC because bonding has to be signed by the
+	// validator's own key, which lives inside the node - the same reason
+	// approving a set change is config. Zero bonds nothing.
+	TargetBond uint64
 	// EjectEquivocators, when nil or true, has this node vote to REMOVE a
 	// validator it holds proof equivocated, and offer that removal itself.
 	//
@@ -181,6 +209,33 @@ type Engine struct {
 	// ejectEquivocators is whether proven equivocation is grounds for this node
 	// to vote for, and offer, the offender's removal.
 	ejectEquivocators bool
+	// stake, when non-nil, makes voting power bonded stake and membership cost
+	// something. See Config.Stake.
+	stake *StakeLedger
+	// minBond gates admission; unbondingPeriod gates withdrawal.
+	minBond         uint64
+	unbondingPeriod uint64
+	// targetBond is how much this node should have bonded; see Config.TargetBond.
+	targetBond uint64
+	// lastBondTop rate-limits the top-up check, and bondNonce keeps each top-up
+	// a distinct transaction.
+	lastBondTop time.Time
+	bondNonce   uint64
+	// stakeDirty is whether a bond or withdrawal has COMMITTED since the last
+	// epoch boundary. It both asks for a re-weight and justifies producing empty
+	// blocks to reach the boundary, because a bond the chain has accepted should
+	// take effect within an epoch even if the network then goes quiet.
+	//
+	// It exists because re-weighting reads a balance per validator and writes to
+	// the store, and doing that at every boundary put ledger and kv I/O on the
+	// hot path under e.mu. On a chain with no stake activity it did that work to
+	// arrive at the numbers it already had. With this flag the cost is paid when
+	// a bond actually moves, which is the only time the answer changes.
+	stakeDirty bool
+	// stakeNeverWeighted is set until this node has weighted the set once, so a
+	// store that already holds bonds is picked up at the first boundary reached
+	// in the ordinary course of events.
+	stakeNeverWeighted bool
 
 	mu sync.Mutex
 	// mempool holds submitted-but-not-yet-committed transactions in submission
@@ -322,18 +377,28 @@ func New(cfg Config) (*Engine, error) {
 		onEquivocation:       cfg.OnEquivocation,
 		sets:                 cfg.Sets,
 		ejectEquivocators:    cfg.EjectEquivocators == nil || *cfg.EjectEquivocators,
-		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
-		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
-		mempoolSet:           make(map[string]struct{}),
-		committedTxs:         make(map[string]struct{}),
-		appliedTxs:           make(map[string]bool),
-		settleWaiters:        make(map[string][]chan struct{}),
-		setChangeOffered:     make(map[string]time.Time),
-		proposals:            make(map[string]*Block),
-		prevotes:             make(map[uint64]map[string]map[string]Vote),
-		precommits:           make(map[uint64]map[string]map[string]Vote),
-		futureProposals:      make(map[string]*futureBlock),
-		futureVotes:          make(map[uint64]map[string]map[string]Vote),
+		stake:                cfg.Stake,
+		// Weight once at the first boundary this node reaches: the store may
+		// already hold bonds from before the process started. This does NOT
+		// justify producing blocks to get there - a node that has just booted on
+		// a quiet chain has no business emitting empty blocks - so it is a
+		// separate flag from stakeDirty.
+		stakeNeverWeighted: true,
+		minBond:            stakeMinBond(cfg),
+		unbondingPeriod:    orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
+		targetBond:         cfg.TargetBond,
+		epochLength:        orUint64C(cfg.EpochLength, DefaultEpochLength),
+		approvedChanges:    make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
+		mempoolSet:         make(map[string]struct{}),
+		committedTxs:       make(map[string]struct{}),
+		appliedTxs:         make(map[string]bool),
+		settleWaiters:      make(map[string][]chan struct{}),
+		setChangeOffered:   make(map[string]time.Time),
+		proposals:          make(map[string]*Block),
+		prevotes:           make(map[uint64]map[string]map[string]Vote),
+		precommits:         make(map[uint64]map[string]map[string]Vote),
+		futureProposals:    make(map[string]*futureBlock),
+		futureVotes:        make(map[uint64]map[string]map[string]Vote),
 	}
 	for _, c := range cfg.ApprovedSetChanges {
 		spec, err := ParseChangeSpec(c)
@@ -375,6 +440,16 @@ func orDurationC(v, d time.Duration) time.Duration {
 		return v
 	}
 	return d
+}
+
+// stakeMinBond resolves the admission floor. Zero is ambiguous in a struct
+// literal - it means both "unset" and "no minimum" - so ZeroMinBond says which
+// one is meant, and the default applies otherwise.
+func stakeMinBond(cfg Config) uint64 {
+	if cfg.ZeroMinBond {
+		return 0
+	}
+	return orUint64C(cfg.MinBond, DefaultMinBond)
 }
 
 func orUint64C(v, d uint64) uint64 {
@@ -562,6 +637,7 @@ func (e *Engine) driver(ctx context.Context) {
 			e.maybeAnnounceHead(ctx)
 			e.maybeRequestSync(ctx)
 			e.maybeProposeApprovedChanges()
+			e.maybeTopUpBond()
 			e.tick(ctx)
 		}
 	}
@@ -743,6 +819,15 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 				continue
 			}
 		}
+		// A withdrawal whose unbonding period has not elapsed is not invalid
+		// forever, only not yet: leaving it in the mempool is what makes it land
+		// by itself once the delay passes, and proposing it now would make the
+		// block invalid.
+		if IsStakeRecipient(e.mempool[i].To) {
+			if err := e.verifyStakeTxLocked(&e.mempool[i], e.height); err != nil {
+				continue
+			}
+		}
 		txs = append(txs, e.mempool[i])
 	}
 	if len(txs) == 0 && !e.mustAdvanceToEpochBoundaryLocked() {
@@ -767,7 +852,8 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 // Callers must hold e.mu.
 func (e *Engine) polkaCertificateLocked(round uint64, hkey string) *PolkaCertificate {
 	byVoter := e.prevotes[round][hkey]
-	if len(byVoter) < e.vset().Quorum() {
+	vs := e.vset()
+	if vs.PowerOfVoters(byVoter) < vs.QuorumPower() {
 		return nil
 	}
 	votes := make([]Vote, 0, len(byVoter))
@@ -1027,6 +1113,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
 			}
 		}
+		if IsStakeRecipient(b.Txs[i].To) {
+			if err := e.verifyStakeTxLocked(&b.Txs[i], b.Height); err != nil {
+				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+			}
+		}
 		key := mempoolKey(&b.Txs[i])
 		// Reject a block that replays an already-committed transaction: an honest
 		// validator will not vote for it, so a malicious leader cannot double-apply
@@ -1075,6 +1166,22 @@ func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) err
 	if err != nil {
 		return err
 	}
+	// An admission requires a bond. This is the rule that gives membership a
+	// price: without it an account could be voted in with nothing at risk, and
+	// the stake weighting below would hand it power 1 for free.
+	//
+	// It is checkable from committed state - the bond is a balance - so every
+	// node validating this block at this height reaches the same answer.
+	if change.Kind == SetChangeAdd && e.stake != nil && e.minBond > 0 {
+		bonded, err := e.stake.Bonded(change.ValidatorID)
+		if err != nil {
+			return err
+		}
+		if bonded < e.minBond {
+			return fmt.Errorf("%w: %s has %d bonded, the minimum is %d",
+				ErrInsufficientBond, change.ValidatorID, bonded, e.minBond)
+		}
+	}
 	// A change that alters nothing is invalid, not merely useless. Judge it
 	// against the set that WILL be in force - the current set plus everything
 	// already pending - so "remove X" followed by "add X" is still a real change
@@ -1093,6 +1200,67 @@ func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) err
 		return fmt.Errorf("%w: %s is already in force", ErrInvalidMessage, change)
 	}
 	return nil
+}
+
+// verifyStakeTxLocked decides whether a stake transaction may be in a block at
+// this height. Callers must hold e.mu.
+//
+// These are VALIDITY rules, not policy: a block carrying a stake transaction
+// that breaks them is invalid on every node, because every node validating that
+// block at that height sees the same committed prefix and so the same bonds,
+// the same validator set and the same unbonding clocks. An honest leader will
+// not propose one (buildProposalLocked skips it), and a malicious leader that
+// does gets its block voted down.
+func (e *Engine) verifyStakeTxLocked(tx *token.Transaction, height uint64) error {
+	req, err := ParseStakeRecipient(tx.To)
+	if err != nil {
+		return err
+	}
+	sender := tx.SenderID()
+	// You may only stake your OWN coins on your OWN account. Bonding into
+	// someone else's account would be a gift of voting power, and withdrawing
+	// from someone else's would be theft; neither is a thing this protocol
+	// offers, and delegation is a feature with its own design rather than a side
+	// effect of a missing check.
+	if req.Account != sender {
+		return fmt.Errorf("%w: a %s must name its own sender, not %s", ErrInvalidMessage, req.Op, req.Account)
+	}
+
+	switch req.Op {
+	case StakeOpBond:
+		if tx.Amount == 0 {
+			return fmt.Errorf("%w: a bond must carry a non-zero amount", ErrInvalidMessage)
+		}
+		// Affordability is NOT checked here. A transfer the sender cannot afford
+		// is deterministically skipped at apply time, which is how every other
+		// transfer behaves, and making it a validity rule instead would let a
+		// balance changing between proposal and commit invalidate a whole block.
+		return nil
+
+	case StakeOpWithdraw:
+		if tx.Amount != 0 {
+			return fmt.Errorf("%w: a withdrawal carries no amount; it returns the whole bond, got %d",
+				ErrInvalidMessage, tx.Amount)
+		}
+		if e.stake == nil {
+			return fmt.Errorf("%w: this network does not use bonded stake", ErrInvalidMessage)
+		}
+		at, allowed, err := e.stake.WithdrawableAt(sender, e.vset(), e.unbondingPeriod)
+		if err != nil {
+			return err
+		}
+		if !allowed {
+			return fmt.Errorf("%w: %s is still a validator", ErrBondLocked, sender)
+		}
+		if height < at {
+			return fmt.Errorf("%w: %s may withdraw from height %d, this block is height %d",
+				ErrBondLocked, sender, at, height)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("%w: unknown stake operation %q", ErrInvalidMessage, req.Op)
+	}
 }
 
 // setChangesInLocked extracts the changes a block carries. Callers must hold
@@ -1407,7 +1575,8 @@ func (e *Engine) onVotes(ctx context.Context) {
 // position on the record instead of waiting out a timeout.
 func (e *Engine) processPrevoteQuorum(ctx context.Context) {
 	e.mu.Lock()
-	quorum := e.vset().Quorum()
+	vs := e.vset()
+	quorum := vs.QuorumPower()
 	var (
 		polkaRound uint64
 		polkaHash  string
@@ -1417,7 +1586,7 @@ func (e *Engine) processPrevoteQuorum(ctx context.Context) {
 	)
 	for round, byHash := range e.prevotes {
 		for hkey, voters := range byHash {
-			if len(voters) < quorum {
+			if vs.PowerOfVoters(voters) < quorum {
 				continue
 			}
 			if isNilVoteHashKey(hkey) {
@@ -1530,7 +1699,8 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 		e.mu.Unlock()
 		return
 	}
-	quorum := e.vset().Quorum()
+	vs := e.vset()
+	quorum := vs.QuorumPower()
 	var (
 		winner      *Block
 		winnerRound uint64
@@ -1538,7 +1708,7 @@ func (e *Engine) maybeCommit(ctx context.Context) {
 	)
 	for round, byHash := range e.precommits {
 		for hkey, voters := range byHash {
-			if len(voters) < quorum || isNilVoteHashKey(hkey) {
+			if vs.PowerOfVoters(voters) < quorum || isNilVoteHashKey(hkey) {
 				continue
 			}
 			b, ok := e.proposals[hkey]
@@ -1633,10 +1803,11 @@ func isNilVoteHashKey(hkey string) bool {
 // permanent-stall condition: nothing in the ordinary flow will ever deliver
 // that body again. Callers must hold e.mu.
 func (e *Engine) quorumWithoutBodyLocked() bool {
-	quorum := e.vset().Quorum()
+	vs := e.vset()
+	quorum := vs.QuorumPower()
 	for _, byHash := range e.precommits {
 		for hkey, voters := range byHash {
-			if len(voters) < quorum || isNilVoteHashKey(hkey) {
+			if vs.PowerOfVoters(voters) < quorum || isNilVoteHashKey(hkey) {
 				continue
 			}
 			if _, ok := e.proposals[hkey]; !ok {
@@ -1763,8 +1934,12 @@ func (e *Engine) reportEquivocation(ctx context.Context, eq *Equivocation, gossi
 		e.mu.Lock()
 		e.approveRemovalLocked(eq.VoterID)
 		e.mu.Unlock()
-		fmt.Printf("consensus: voting to eject %s; the removal takes effect at an epoch boundary "+
-			"once a quorum of validators holding the same evidence has committed it\n", eq.VoterID)
+		what := "eject"
+		if e.stake != nil {
+			what = "slash and eject"
+		}
+		fmt.Printf("consensus: voting to %s %s; it takes effect at an epoch boundary "+
+			"once a quorum of validators holding the same evidence has committed it\n", what, eq.VoterID)
 	}
 
 	if e.onEquivocation != nil {
@@ -1977,9 +2152,28 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	// transfers uniformly. Record per-tx whether the transfer actually applied so
 	// a settlement caller can tell "paid" from "skipped".
 	applied := make(map[string]bool, len(b.Txs))
+	// Withdrawals are collected here and performed after the transfer critical
+	// section: StakeLedger.Withdraw takes the ledger lock itself, and calling it
+	// from inside Atomically would deadlock. Their validity was already decided
+	// when the block was verified at this height.
+	var withdrawals []string
+	var withdrawFor []string
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
 		for i := range b.Txs {
 			tx := &b.Txs[i]
+			if IsStakeRecipient(tx.To) {
+				// A BOND is an ordinary transfer into the reserved bond account, so
+				// it falls through to the transfer path below and gets the same
+				// affordability check and deterministic skip as any other transfer.
+				// Only a WITHDRAWAL needs its own handling, because it moves the
+				// whole bond back rather than an amount the transaction names.
+				if req, err := ParseStakeRecipient(tx.To); err == nil && req.Op == StakeOpWithdraw {
+					withdrawals = append(withdrawals, mempoolKey(tx))
+					withdrawFor = append(withdrawFor, tx.SenderID())
+					applied[mempoolKey(tx)] = true
+					continue
+				}
+			}
 			if IsSetChangeRecipient(tx.To) {
 				// A set change carries no value (block validation enforces that) and its
 				// recipient is a reserved marker, not an account. Transferring zero to it
@@ -2009,6 +2203,34 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	}); err != nil {
 		return err
 	}
+	// Return the bonds of every withdrawal the block carried. Deterministic: the
+	// whole bond moves, and the block was only valid at this height if the
+	// withdrawal was permitted at this height, which every node evaluated
+	// against the same committed prefix.
+	for i, key := range withdrawals {
+		id := withdrawFor[i]
+		if e.stake == nil {
+			// Unreachable: the validity rule refuses a withdrawal on a network
+			// without a stake ledger. Guarded because a nil dereference in the
+			// commit path would take the node down.
+			applied[key] = false
+			continue
+		}
+		returned, err := e.stake.Withdraw(id, e.vset(), e.unbondingPeriod, b.Height)
+		if err != nil {
+			// Unreachable for a block that passed verification. Record it as not
+			// applied rather than failing the commit: the block is already in the
+			// chain on every other node, so refusing it here would fork this node
+			// off rather than protect it.
+			fmt.Printf("consensus: withdrawal for %s in committed block %d did not apply: %v\n", id, b.Height, err)
+			applied[key] = false
+			continue
+		}
+		if returned > 0 {
+			fmt.Printf("consensus: returned bond of %d to %s at height %d\n", returned, id, b.Height)
+		}
+	}
+
 	// Publish the applied/skipped result and wake any settlement waiters. Done
 	// after the ledger critical section so observers only see finalised state.
 	e.recordApplied(applied)
@@ -2105,6 +2327,15 @@ func (e *Engine) advanceHeight(committed *Block) {
 	}
 	e.mempool = append([]token.Transaction(nil), kept...)
 
+	// A committed bond or withdrawal changes what the next boundary should weigh
+	// the set by. Nothing else does, so nothing else makes the boundary do I/O.
+	for i := range committed.Txs {
+		if IsStakeRecipient(committed.Txs[i].To) {
+			e.stakeDirty = true
+			break
+		}
+	}
+
 	// Collect any validator-set changes this block carried. They wait for the
 	// next epoch boundary, so the set is stable for a run of heights and every
 	// node switches at the same height.
@@ -2190,14 +2421,22 @@ func (e *Engine) pruneStaleSetChangesLocked() {
 // have nodes switching sets at whatever moment each one happened to apply the
 // block, and a leader schedule that differs by one height is a fork.
 func (e *Engine) applyEpochBoundaryLocked() {
-	if len(e.pendingChanges) == 0 || e.epochLength == 0 {
+	if e.epochLength == 0 || e.height%e.epochLength != 0 {
 		return
 	}
-	if e.height%e.epochLength != 0 {
+	// A boundary with nothing pending still re-weights the set from bonded
+	// stake, so a bond posted mid-epoch takes effect at the next boundary rather
+	// than never - but only when a bond has actually moved since the last
+	// boundary. Re-reading every balance to arrive at the numbers already in
+	// hand is I/O under e.mu on the hot path, and at a short epoch length it is
+	// most of what the driver does.
+	reweight := e.stake != nil && (e.stakeDirty || e.stakeNeverWeighted)
+	if len(e.pendingChanges) == 0 && !reweight {
 		return
 	}
 
-	next, err := e.vset().WithChanges(e.pendingChanges)
+	previous := e.vset()
+	next, err := previous.WithChanges(e.pendingChanges)
 	if err != nil {
 		// Every change was checked when its block was validated, so this should be
 		// unreachable. If it happens, keeping the current set is the only safe
@@ -2209,6 +2448,18 @@ func (e *Engine) applyEpochBoundaryLocked() {
 		}
 		return
 	}
+
+	// Weight the new set by bonded stake, and take the bond of anyone this
+	// boundary slashes. Both happen HERE rather than when the change committed,
+	// so power changes at the same height on every node - a node weighting a
+	// vote differently from its peers would compute a different quorum from the
+	// same votes, which is a fork.
+	if reweight || len(e.pendingChanges) > 0 {
+		next = e.reweightLocked(next)
+		e.stakeDirty = false
+		e.stakeNeverWeighted = false
+	}
+	e.applyStakeSideEffectsLocked(previous, next)
 
 	applied := e.pendingChanges
 	e.pendingChanges = nil
@@ -2227,7 +2478,8 @@ func (e *Engine) applyEpochBoundaryLocked() {
 	for _, c := range applied {
 		fmt.Printf("consensus: validator set change in force at height %d: %s\n", e.height, c)
 	}
-	fmt.Printf("consensus: validator set is now %d members, quorum %d\n", next.Len(), next.Quorum())
+	fmt.Printf("consensus: validator set is now %d members, total power %d, quorum %d\n",
+		next.Len(), next.TotalPower(), next.QuorumPower())
 	if wasValidator && !nowValidator {
 		fmt.Printf("consensus: this node is no longer a validator; it will follow and apply blocks but not vote\n")
 	}
@@ -2239,6 +2491,103 @@ func (e *Engine) applyEpochBoundaryLocked() {
 	// the round-robin schedule just changed under us, so the current round's
 	// leader is a different validator. Nothing else to do: the driver picks that
 	// up on its next tick.
+}
+
+// reweightLocked returns vs with voting power taken from bonded stake, or vs
+// unchanged on a network without stake. Callers must hold e.mu.
+func (e *Engine) reweightLocked(vs *ValidatorSet) *ValidatorSet {
+	if e.stake == nil {
+		return vs
+	}
+	bonds, err := e.stake.BondedFor(vs.IDs())
+	if err != nil {
+		// Reading a balance failed. Keeping the set as it is - equal power, or
+		// whatever it carried over - is wrong in the same way on every node only
+		// if every node fails, which is not something we can rely on, so say so
+		// loudly rather than silently diverging.
+		fmt.Printf("consensus: could not read bonded stake at height %d, leaving voting power unchanged: %v\n",
+			e.height, err)
+		return vs
+	}
+
+	// ALL OR NOTHING. If any member has bonded nothing, the whole set stays at
+	// equal power.
+	//
+	// Weighting a partly-bonded set is the dangerous case, not the safe one: an
+	// unbonded member counts 1, so the first validator to bond anything at all
+	// holds essentially the entire voting power and the rest of the network
+	// cannot outvote it - it could not even be slashed, because a slash needs a
+	// quorum it now controls. A network turning stake on would hand itself to
+	// whoever bonded first.
+	//
+	// Staying at headcount until every member has bonded makes the transition
+	// atomic: the set flips to stake weighting at one boundary, when the last
+	// validator has posted its bond. A validator that refuses to bond holds the
+	// network at headcount, which is the status quo and something its peers can
+	// answer by removing it - a far smaller problem than the alternative.
+	var unbonded []string
+	for _, id := range vs.IDs() {
+		if bonds[id] == 0 {
+			unbonded = append(unbonded, id)
+		}
+	}
+	if len(unbonded) > 0 {
+		fmt.Printf("consensus: %d of %d validators have bonded nothing, so voting power stays equal "+
+			"(weighting a partly-bonded set would hand the network to whoever bonded first); "+
+			"first unbonded: %s\n", len(unbonded), vs.Len(), unbonded[0])
+		return vs
+	}
+
+	weighted, err := vs.WithPower(bonds)
+	if err != nil {
+		fmt.Printf("consensus: could not weight the validator set at height %d: %v\n", e.height, err)
+		return vs
+	}
+	return weighted
+}
+
+// applyStakeSideEffectsLocked runs the stake bookkeeping a set change implies:
+// it starts the unbonding clock for validators that just left, stops it for
+// those that just joined, and takes the bond of anyone this boundary slashed.
+// Callers must hold e.mu.
+func (e *Engine) applyStakeSideEffectsLocked(previous, next *ValidatorSet) {
+	if e.stake == nil {
+		return
+	}
+	for _, id := range previous.IDs() {
+		if next.Contains(id) {
+			continue
+		}
+		// Left the set. The unbonding clock starts now, so the bond stays
+		// slashable for UnbondingPeriod blocks after the departure - which is what
+		// stops a validator equivocating and withdrawing before the evidence
+		// lands.
+		if err := e.stake.RecordLeftSet(id, e.height); err != nil {
+			fmt.Printf("consensus: %v\n", err)
+		}
+	}
+	for _, id := range next.IDs() {
+		if previous.Contains(id) {
+			continue
+		}
+		// Joined (or rejoined) the set: it is a validator, so no unbonding clock
+		// is running and any earlier departure is stale.
+		if err := e.stake.ClearLeftSet(id); err != nil {
+			fmt.Printf("consensus: %v\n", err)
+		}
+	}
+	for _, c := range e.pendingChanges {
+		if c.Kind != SetChangeSlash {
+			continue
+		}
+		taken, err := e.stake.Slash(c.ValidatorID)
+		if err != nil {
+			fmt.Printf("consensus: %v\n", err)
+			continue
+		}
+		fmt.Printf("consensus: SLASHED %s at height %d: %d native base units moved from its bond to the reward pool\n",
+			c.ValidatorID, e.height, taken)
+	}
 }
 
 // maybeProposeApprovedChanges submits the validator-set changes this operator
@@ -2325,26 +2674,39 @@ func (e *Engine) maybeProposeApprovedChanges() {
 // mustAdvanceToEpochBoundaryLocked reports whether the chain has to keep
 // producing blocks even with nothing to put in them. Callers must hold e.mu.
 //
-// A committed set change takes effect at the next epoch boundary, and a height
-// only exists once a block commits. On an idle chain no blocks are produced, so
-// without this a change would commit and then wait forever for a boundary the
-// chain never reaches - an admitted validator that never joins, and an
-// equivocating one that is never ejected, purely because the network is quiet.
+// A committed set change - or a committed bond - takes effect at the next epoch
+// boundary, and a height only exists once a block commits. On an idle chain no
+// blocks are produced, so without this a change would commit and then wait
+// forever for a boundary the chain never reaches: an admitted validator that
+// never joins, an equivocating one that is never ejected, and a bond that never
+// becomes voting power, purely because the network is quiet.
 //
 // The exception is bounded: at most one empty block per height between the
 // commit and the boundary, and the boundary clears the pending changes (even
 // when applying them fails), so this can never become a permanent stream of
 // empty blocks.
 func (e *Engine) mustAdvanceToEpochBoundaryLocked() bool {
-	return len(e.pendingChanges) > 0
+	// A committed bond that has not been weighted yet counts too, for the same
+	// reason: an operator who bonded on a quiet network would otherwise see
+	// their stake do nothing at all until unrelated traffic happened to arrive.
+	// Bounded the same way - the boundary clears the flag.
+	return len(e.pendingChanges) > 0 || (e.stake != nil && e.stakeDirty)
 }
 
 // approveRemovalLocked makes the ejection of validatorID a change this node
 // will vote for and offer, exactly as if the operator had listed it under
 // consensus.approved_changes. It is idempotent. Callers must hold e.mu - except
 // in New, before any goroutine exists.
+//
+// On a network with bonded stake this approves a SLASH rather than a plain
+// removal: the offence is provable, so taking the bond is the point. Without
+// stake there is no bond to take and the offender simply loses its place.
 func (e *Engine) approveRemovalLocked(validatorID string) {
-	change := SetChange{Kind: SetChangeRemove, ValidatorID: validatorID}
+	kind := SetChangeRemove
+	if e.stake != nil {
+		kind = SetChangeSlash
+	}
+	change := SetChange{Kind: kind, ValidatorID: validatorID}
 	key := strings.ToLower(change.String())
 	if _, already := e.approvedChanges[key]; already {
 		return
@@ -2352,6 +2714,73 @@ func (e *Engine) approveRemovalLocked(validatorID string) {
 	e.approvedChanges[key] = struct{}{}
 	e.approvedSpecs = append(e.approvedSpecs, change)
 }
+
+// maybeTopUpBond submits a bond for the shortfall between what this node has
+// bonded and what its operator configured, so bonding is something a node does
+// rather than something an operator has to find an RPC for.
+//
+// Idempotent and self-healing: it bonds the DIFFERENCE, so a partial top-up
+// completes on the next attempt and a node funded gradually still reaches its
+// target. It bonds nothing it cannot afford, and nothing at all once the target
+// is met.
+func (e *Engine) maybeTopUpBond() {
+	if e.stake == nil || e.self == nil || e.targetBond == 0 {
+		return
+	}
+
+	e.mu.Lock()
+	if !e.lastBondTop.IsZero() && time.Since(e.lastBondTop) < bondTopUpInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastBondTop = time.Now()
+	// A bond already waiting to commit would be counted twice, because the
+	// ledger does not reflect it until its block lands.
+	for i := range e.mempool {
+		if IsStakeRecipient(e.mempool[i].To) && e.mempool[i].SenderID() == e.selfID {
+			e.mu.Unlock()
+			return
+		}
+	}
+	nonce := e.bondNonce
+	e.bondNonce++
+	e.mu.Unlock()
+
+	bonded, err := e.stake.Bonded(e.selfID)
+	if err != nil {
+		fmt.Printf("consensus: could not read this node's bond: %v\n", err)
+		return
+	}
+	if bonded >= e.targetBond {
+		return
+	}
+	shortfall := e.targetBond - bonded
+
+	spendable, err := e.ledger.Balance(e.selfID)
+	if err != nil {
+		fmt.Printf("consensus: could not read this node's balance: %v\n", err)
+		return
+	}
+	if spendable == 0 {
+		fmt.Printf("consensus: this node wants %d more bonded but its consensus account (%s) holds nothing; "+
+			"fund that account before it can validate on a staked network\n", shortfall, e.selfID)
+		return
+	}
+	amount := shortfall
+	if amount > spendable {
+		amount = spendable
+	}
+
+	if _, err := e.SubmitBond(e.self, amount, nonce); err != nil {
+		fmt.Printf("consensus: could not submit a bond of %d: %v\n", amount, err)
+		return
+	}
+	fmt.Printf("consensus: bonding %d native base units (bonded %d, target %d)\n", amount, bonded, e.targetBond)
+}
+
+// bondTopUpInterval is how often a node checks whether its bond is short. Slow
+// on purpose: it corrects a config drift, it is not a hot path.
+const bondTopUpInterval = 5 * time.Second
 
 // PendingSetChanges returns the changes waiting for the next epoch boundary.
 func (e *Engine) PendingSetChanges() []SetChange {

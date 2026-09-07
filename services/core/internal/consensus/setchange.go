@@ -39,6 +39,12 @@ const (
 	setChangePrefix = "consensus/validator/"
 	addPrefix       = setChangePrefix + "add/"
 	removePrefix    = setChangePrefix + "remove/"
+	// slashChangePrefix ejects a validator AND takes its bond. It is a set
+	// change rather than a stake transaction because deciding that an offence
+	// happened is the network's decision, carried by the quorum that commits the
+	// block, and not something one node may assert. Each node votes for it only
+	// if it holds the evidence itself (see Engine.approveSlashLocked).
+	slashChangePrefix = setChangePrefix + "slash/"
 
 	// pendingChangesKey holds changes seen in committed blocks that have not yet
 	// reached an epoch boundary.
@@ -68,6 +74,10 @@ type SetChangeKind string
 const (
 	SetChangeAdd    SetChangeKind = "add"
 	SetChangeRemove SetChangeKind = "remove"
+	// SetChangeSlash removes a validator and moves its whole bond to the reward
+	// pool. It is what makes an offence cost something: a removal alone takes a
+	// validator's place and nothing else.
+	SetChangeSlash SetChangeKind = "slash"
 )
 
 // SetChange is one admission or ejection.
@@ -87,16 +97,20 @@ func (c SetChange) String() string {
 	if c.Kind == SetChangeAdd {
 		return "add:" + hex.EncodeToString(c.PublicKey)
 	}
-	return "remove:" + c.ValidatorID
+	return string(c.Kind) + ":" + c.ValidatorID
 }
 
 // Recipient renders the reserved account id that encodes this change, which is
 // what a submitter puts in a transaction's To field.
 func (c SetChange) Recipient() string {
-	if c.Kind == SetChangeAdd {
+	switch c.Kind {
+	case SetChangeAdd:
 		return addPrefix + hex.EncodeToString(c.PublicKey)
+	case SetChangeSlash:
+		return slashChangePrefix + c.ValidatorID
+	default:
+		return removePrefix + c.ValidatorID
 	}
-	return removePrefix + c.ValidatorID
 }
 
 // AddValidatorRecipient returns the transaction recipient that admits a key.
@@ -107,6 +121,12 @@ func AddValidatorRecipient(pub ed25519.PublicKey) string {
 // RemoveValidatorRecipient returns the transaction recipient that ejects an id.
 func RemoveValidatorRecipient(validatorID string) string {
 	return removePrefix + validatorID
+}
+
+// SlashValidatorRecipient returns the transaction recipient that ejects an id
+// and takes its bond.
+func SlashValidatorRecipient(validatorID string) string {
+	return slashChangePrefix + validatorID
 }
 
 // IsSetChangeRecipient reports whether a recipient encodes a set change. It is
@@ -146,6 +166,15 @@ func ParseSetChange(to string, height uint64) (SetChange, error) {
 		}
 		return SetChange{Kind: SetChangeRemove, ValidatorID: id, Height: height}, nil
 
+	case strings.HasPrefix(to, slashChangePrefix):
+		id := strings.TrimPrefix(to, slashChangePrefix)
+		raw, err := hex.DecodeString(id)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return SetChange{}, fmt.Errorf("%w: slash target must be a 64-hex-character account id",
+				ErrInvalidMessage)
+		}
+		return SetChange{Kind: SetChangeSlash, ValidatorID: id, Height: height}, nil
+
 	default:
 		return SetChange{}, fmt.Errorf("%w: %q is not a validator set change", ErrInvalidMessage, to)
 	}
@@ -166,7 +195,9 @@ func (vs *ValidatorSet) WithChanges(changes []SetChange) (*ValidatorSet, error) 
 	}
 
 	for _, c := range changes {
-		if c.Kind == SetChangeRemove {
+		// A slash removes as well as taking the bond, so both kinds drop the
+		// member here; the bond is dealt with at the epoch boundary.
+		if c.Kind == SetChangeRemove || c.Kind == SetChangeSlash {
 			delete(keys, c.ValidatorID)
 		}
 	}
@@ -197,7 +228,26 @@ func (vs *ValidatorSet) WithChanges(changes []SetChange) (*ValidatorSet, error) 
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	return &ValidatorSet{ids: ids, keys: keys}, nil
+
+	// Voting power carries over for members that stay; a newcomer starts at 1.
+	// The epoch boundary re-weights the whole set from bonded stake immediately
+	// after applying these changes, so these numbers are what a set would have
+	// with no stake at all - never a half-weighted set, which would make some
+	// quorum smaller than either rule intends.
+	power := make(map[string]uint64, len(ids))
+	var total uint64
+	for _, id := range ids {
+		p := vs.power[id]
+		if p == 0 {
+			p = 1
+		}
+		if total > maxTotalPower-p {
+			return nil, fmt.Errorf("%w: total voting power would overflow", ErrInvalidMessage)
+		}
+		power[id] = p
+		total += p
+	}
+	return &ValidatorSet{ids: ids, keys: keys, power: power, total: total}, nil
 }
 
 // PublicKeys returns the set's keys in the set's own deterministic order. It is
@@ -231,6 +281,15 @@ func NewSetStore(store *kv.Store) *SetStore {
 type persistedSet struct {
 	// Keys are hex-encoded ed25519 public keys.
 	Keys []string `json:"keys"`
+	// Power is the voting power per key, in the same order as Keys.
+	//
+	// It has to be persisted. Power is what a quorum is measured in, so a node
+	// that reloaded a set at equal power while its peers held it at stake
+	// weights would compute a different quorum from the same votes - and two
+	// nodes disagreeing about what counts as a quorum is a fork, not a
+	// performance problem. Absent (an older record) means equal power, which is
+	// what such a record was written under.
+	Power []uint64 `json:"power,omitempty"`
 	// Height is the height the set took effect at, for diagnosis.
 	Height uint64 `json:"height"`
 }
@@ -241,8 +300,11 @@ func (s *SetStore) SaveActive(vs *ValidatorSet, height uint64) error {
 		return nil
 	}
 	rec := persistedSet{Height: height}
-	for _, k := range vs.PublicKeys() {
+	// PublicKeys returns keys in the set's own id order, which is what Power is
+	// indexed by below, so the two slices line up.
+	for i, k := range vs.PublicKeys() {
 		rec.Keys = append(rec.Keys, hex.EncodeToString(k))
+		rec.Power = append(rec.Power, vs.Power(vs.ids[i]))
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {
@@ -282,6 +344,19 @@ func (s *SetStore) LoadActive() (*ValidatorSet, uint64, error) {
 	vs, err := NewValidatorSet(keys)
 	if err != nil {
 		return nil, 0, fmt.Errorf("consensus: rebuild active set: %w", err)
+	}
+	if len(rec.Power) > 0 {
+		if len(rec.Power) != len(keys) {
+			return nil, 0, fmt.Errorf("consensus: active set has %d keys but %d power entries", len(keys), len(rec.Power))
+		}
+		stake := make(map[string]uint64, len(keys))
+		for i, k := range keys {
+			stake[token.AccountIDFromPublicKey(k)] = rec.Power[i]
+		}
+		vs, err = vs.WithPower(stake)
+		if err != nil {
+			return nil, 0, fmt.Errorf("consensus: reweight active set: %w", err)
+		}
 	}
 	return vs, rec.Height, nil
 }
@@ -342,8 +417,11 @@ func ParseChangeSpec(spec string) (SetChange, error) {
 		return ParseSetChange(addPrefix+target, 0)
 	case SetChangeRemove:
 		return ParseSetChange(removePrefix+target, 0)
+	case SetChangeSlash:
+		return ParseSetChange(slashChangePrefix+target, 0)
 	default:
-		return SetChange{}, fmt.Errorf("%w: %q is not a set change kind, want add or remove", ErrInvalidMessage, kind)
+		return SetChange{}, fmt.Errorf("%w: %q is not a set change kind, want add, remove or slash",
+			ErrInvalidMessage, kind)
 	}
 }
 
@@ -355,5 +433,11 @@ func (c SetChange) InForce(vs *ValidatorSet) bool {
 	if c.Kind == SetChangeAdd {
 		return vs.Contains(c.ValidatorID)
 	}
+	// A removal and a slash are both in force once the member is gone. For a
+	// slash that is slightly generous - the bond may not have been taken yet if
+	// the member left by an ordinary removal first - but re-slashing an account
+	// that is already out of the set is not something an honest node offers, and
+	// an offender's bond stays slashable through its unbonding period either
+	// way.
 	return !vs.Contains(c.ValidatorID)
 }

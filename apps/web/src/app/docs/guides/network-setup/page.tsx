@@ -6,7 +6,7 @@ import Navigation from '@/components/Navigation';
 export const metadata = {
   title: 'Network setup',
   description:
-    'Running more than one Matrix OS node: the two things that must match, how to find a node peer id and validator id, and how the validator set changes while the network is running.',
+    'Running more than one Matrix OS node: the two things that must match, how the validator set changes while the network is running, and what turning on bonded stake does.',
 };
 
 /**
@@ -55,6 +55,26 @@ consensus: validator set change in force at height 100: add:9f2c1e4b...
 consensus: validator set is now 3 members, quorum 3`;
 
 const VETO_LOG = `consensus: refusing to vote for a block that would add:9f2c1e4b... (not in consensus.approved_changes)`;
+
+const STAKE = `consensus:
+  stake:
+    enabled: true
+    min_bond: 1000000000000000    # 1,000,000 MATRIX at 9 decimals; null = this default
+    unbonding_period: 1000        # blocks to wait after leaving before withdrawing
+    bond: 2000000000000000        # what THIS node keeps bonded from its own account`;
+
+const STAKE_LOG = `Consensus identity: 0c2265316242995a96890c698af0e1959264bb6b1f805ed7352fe6174f6fcabb
+Consensus: bonded stake is ON. Voting power is bonded MATRIX; a validator must bond at least
+  1000 base units to be admitted, and waits 4 blocks after leaving to withdraw.
+Consensus: this node will keep 5000 base units bonded from its own account 0c226531...
+
+# before its account is funded:
+consensus: this node wants 5000 more bonded but its consensus account (0c226531...) holds
+  nothing; fund that account before it can validate on a staked network
+
+# after:
+consensus: bonding 5000 native base units (bonded 0, target 5000)
+consensus: validator set is now 1 members, total power 5000, quorum 3334`;
 
 const PORTS = `9000  libp2p        peers. Must be reachable by other nodes.
 9090  gRPC admin    deploy, health, logs.
@@ -166,14 +186,60 @@ export default function NetworkSetupPage() {
                     investigate an offence yourself; detection, recording and gossip carry on either way.
                   </p>
 
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>5. Bonded stake</h2>
+                  <p className='mb-4 text-gray-300'>
+                    Off by default. With it on, three things change: voting power becomes an account&apos;s bonded
+                    native MATRIX, admission requires a minimum bond, and a validator proven to have equivocated
+                    loses that bond instead of only its place.
+                  </p>
+                  <CodeSample label='config.yaml' code={STAKE} />
+                  <p className='mt-4 text-gray-300'>
+                    A bond is a balance in a reserved account,{' '}
+                    <code className='text-white'>consensus/stake/bond/&lt;account id&gt;</code>, on the same ledger
+                    everything else settles on. So bonding conserves supply, bonded coins leave the spendable
+                    balance, and &quot;how much is bonded&quot; is a balance you can read. Bonding has to be signed
+                    by the validator&apos;s own key, which lives inside the node, which is why{' '}
+                    <code className='text-white'>bond</code> is a config field rather than a command: the node bonds
+                    the shortfall itself and keeps topping it up. Fund its consensus account first - the id is the
+                    one it prints at startup - or it says so and does nothing:
+                  </p>
+                  <CodeSample label='node log' code={STAKE_LOG} />
+
+                  <p className='mt-4 text-gray-300'>
+                    Why weight the quorum at all: a quorum counted in HEADS can be bought for the price of a few
+                    minimum bonds under a few identities, because identities are free and only the bond is not.
+                    Weighting by stake prices an attack at two thirds of everything bonded however many identities it
+                    is spread across.
+                  </p>
+
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
-                    <h3 className='mb-2 text-lg font-bold text-white'>There is still no stake</h3>
+                    <h3 className='mb-2 text-lg font-bold text-white'>Everyone bonds, or nobody is weighted</h3>
                     <p className='mb-0 text-gray-100'>
-                      Membership is decided by agreement between operators, not by capital at risk. An ejected
-                      validator loses its place and nothing else, and admission is a decision a quorum of operators
-                      makes rather than one anyone can buy into. That makes this suitable for a network whose
-                      operators know each other; a permissionless validator set needs bonded stake and a penalty,
-                      which is the next substantial piece of work on the consensus layer.
+                      While ANY validator has bonded nothing, the whole set stays at equal power and the node says
+                      so. That is deliberate: an unbonded member counts as 1, so weighting a partly-bonded set would
+                      hand essentially the entire voting power to whoever bonded first - and it could not even be
+                      slashed, because a slash needs a quorum it would then control. Staying at headcount until the
+                      last validator has posted its bond makes the switch atomic. A validator that refuses to bond
+                      holds the network at headcount, which is the status quo and something its peers can answer by
+                      removing it.
+                    </p>
+                  </div>
+
+                  <p className='mt-4 text-gray-300'>
+                    Withdrawing is gated: a sitting validator may not withdraw at all, and after leaving the set it
+                    waits <code className='text-white'>unbonding_period</code> blocks. Without that delay a validator
+                    could equivocate, be ejected, and pull its bond out before the network committed the slash - so
+                    the delay has to be long enough for evidence to be gossiped, voted on and committed. A withdrawal
+                    submitted early is not rejected, it simply waits in the mempool and lands by itself.
+                  </p>
+
+                  <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h3 className='mb-2 text-lg font-bold text-white'>What stake does not make this</h3>
+                    <p className='mb-0 text-gray-100'>
+                      Membership is still a decision a quorum of operators makes, not one anyone can buy into: a bond
+                      is necessary to be admitted and it is not sufficient. There are no rewards for staking either -
+                      nothing pays a validator per block - so a bond earns nothing and only stands to be lost. That
+                      is the honest state of it: stake here is a deterrent, not yet a yield.
                     </p>
                   </div>
 

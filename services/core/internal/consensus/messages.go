@@ -549,8 +549,9 @@ func (c *PolkaCertificate) Verify(vs *ValidatorSet) error {
 		}
 		seen[v.VoterID] = struct{}{}
 	}
-	if len(seen) < vs.Quorum() {
-		return fmt.Errorf("%w: certificate has %d distinct voters, need quorum %d", ErrInvalidMessage, len(seen), vs.Quorum())
+	if got := vs.PowerOfSet(seen); got < vs.QuorumPower() {
+		return fmt.Errorf("%w: certificate carries %d voting power from %d distinct voters, need quorum %d",
+			ErrInvalidMessage, got, len(seen), vs.QuorumPower())
 	}
 	return nil
 }

@@ -13,11 +13,13 @@ import (
 // members.
 var ErrEmptyValidatorSet = errors.New("consensus: validator set must not be empty")
 
-// ValidatorSet is the FIXED set of validator identities that participate in
-// consensus. Membership and ordering are immutable for the life of the set:
-// the ordering (by account ID) is what makes the round-robin leader schedule
-// deterministic and identical on every node, so all nodes agree on who the
-// leader is for any given round without extra coordination.
+// ValidatorSet is an immutable snapshot of who validates and with how much
+// weight. Membership, ordering and power are fixed for the life of the value:
+// the ordering (by account ID) is what makes the leader schedule deterministic
+// and identical on every node, and the power is what a quorum is measured in.
+//
+// A new set is produced at each epoch boundary rather than mutated, so a set
+// already deciding a height cannot change underneath it.
 type ValidatorSet struct {
 	// ids is the deterministic, sorted list of validator account IDs. Index in
 	// this slice is the validator's position in the round-robin schedule.
@@ -25,13 +27,24 @@ type ValidatorSet struct {
 	// keys maps account ID -> public key for O(1) membership checks and signature
 	// verification.
 	keys map[string]ed25519.PublicKey
+	// power maps account ID -> voting power, which is the validator's bonded
+	// stake in native base units. A set built without stake gives every member
+	// power 1, which makes every quorum below identical to a headcount.
+	power map[string]uint64
+	// total is the sum of power, precomputed because every quorum check needs it.
+	total uint64
 }
 
-// NewValidatorSet builds a fixed validator set from a list of ed25519 public
-// keys. Duplicate keys are collapsed. The resulting order is deterministic
-// (sorted by account ID) regardless of input order, so every node that is given
-// the same set of keys derives the identical leader schedule. It returns
-// ErrEmptyValidatorSet when no valid keys are supplied.
+// NewValidatorSet builds a validator set from a list of ed25519 public keys,
+// giving every member power 1. Duplicate keys are collapsed. The resulting
+// order is deterministic (sorted by account ID) regardless of input order, so
+// every node given the same keys derives the identical leader schedule. It
+// returns ErrEmptyValidatorSet when no valid keys are supplied.
+//
+// Equal power is the unstaked case: total power equals the headcount and every
+// quorum is the classic floor(2N/3)+1. It is what a permissioned network of
+// operators who know each other runs on. Use WithPower for a set whose weight
+// comes from bonded stake.
 func NewValidatorSet(keys []ed25519.PublicKey) (*ValidatorSet, error) {
 	m := make(map[string]ed25519.PublicKey)
 	for _, k := range keys {
@@ -50,12 +63,55 @@ func NewValidatorSet(keys []ed25519.PublicKey) (*ValidatorSet, error) {
 		return nil, ErrEmptyValidatorSet
 	}
 	ids := make([]string, 0, len(m))
+	power := make(map[string]uint64, len(m))
 	for id := range m {
 		ids = append(ids, id)
+		power[id] = 1
 	}
 	sort.Strings(ids)
-	return &ValidatorSet{ids: ids, keys: m}, nil
+	return &ValidatorSet{ids: ids, keys: m, power: power, total: uint64(len(ids))}, nil
 }
+
+// WithPower returns a copy of the set whose voting power is taken from stake,
+// which maps account id -> bonded native base units.
+//
+// A member missing from stake, or bonded zero, keeps power 1 rather than
+// dropping to zero. Zero-power members would be dead weight in every quorum
+// while still taking their turn as leader, so a set that cannot be weighted is
+// better left unweighted than left half-weighted. Whether an unbonded validator
+// belongs in the set at all is decided when it is admitted, not here.
+func (vs *ValidatorSet) WithPower(stake map[string]uint64) (*ValidatorSet, error) {
+	power := make(map[string]uint64, len(vs.ids))
+	var total uint64
+	for _, id := range vs.ids {
+		p := stake[id]
+		if p == 0 {
+			p = 1
+		}
+		if total > maxTotalPower-p {
+			return nil, fmt.Errorf("%w: total voting power would overflow", ErrInvalidMessage)
+		}
+		power[id] = p
+		total += p
+	}
+	keys := make(map[string]ed25519.PublicKey, len(vs.keys))
+	for id, k := range vs.keys {
+		keys[id] = k
+	}
+	return &ValidatorSet{
+		ids:   append([]string(nil), vs.ids...),
+		keys:  keys,
+		power: power,
+		total: total,
+	}, nil
+}
+
+// maxTotalPower bounds the sum of voting power so QuorumPower's arithmetic
+// cannot overflow. Native MATRIX is capped at 1e18 base units, so a real total
+// is far below this; the bound exists so a malformed stake map is an error
+// rather than a wraparound that would make some tiny vote set look like a
+// quorum.
+const maxTotalPower = ^uint64(0) / 4
 
 // Len returns the number of validators in the set.
 func (vs *ValidatorSet) Len() int { return len(vs.ids) }
@@ -109,12 +165,47 @@ func (vs *ValidatorSet) IsLeader(id string, height, round uint64) bool {
 	return vs.LeaderFor(height, round) == id
 }
 
-// Quorum returns the number of votes required to commit: a strict Byzantine
-// quorum of more than 2/3 of the set, i.e. floor(2N/3)+1. For N=3f+1 this is
-// 2f+1, the classic BFT quorum that guarantees any two quorums intersect in at
-// least one honest validator, so two conflicting blocks can never both commit at
-// the same height.
-func (vs *ValidatorSet) Quorum() int {
-	n := len(vs.ids)
-	return (2*n)/3 + 1
+// Power returns the voting power of id, and zero for a non-member.
+func (vs *ValidatorSet) Power(id string) uint64 { return vs.power[id] }
+
+// TotalPower returns the sum of every member's voting power.
+func (vs *ValidatorSet) TotalPower() uint64 { return vs.total }
+
+// QuorumPower returns the voting power required to commit: strictly more than
+// two thirds of the total, i.e. floor(2T/3)+1.
+//
+// It is measured in POWER, not in heads. With equal power that is exactly the
+// classic floor(2N/3)+1 and nothing about the protocol changes. With power from
+// bonded stake it is what makes the set safe to open: a headcount quorum can be
+// bought for the price of N minimum bonds under N identities, because identities
+// are free and only the bond is not. Weighting the quorum by stake prices an
+// attack at two thirds of everything bonded, whatever number of identities it is
+// spread across.
+//
+// The intersection argument is unchanged, just denominated differently: any two
+// sets holding more than 2T/3 power each must share more than T/3 power, so they
+// cannot endorse conflicting blocks unless validators holding more than a third
+// of the stake equivocate - and that is exactly the fault threshold the protocol
+// assumes and the offence it slashes for.
+func (vs *ValidatorSet) QuorumPower() uint64 {
+	return (2*vs.total)/3 + 1
+}
+
+// PowerOfVoters sums the voting power of the given voter ids, ignoring any that
+// are not members. It is how every quorum check is evaluated.
+func (vs *ValidatorSet) PowerOfVoters(voters map[string]Vote) uint64 {
+	var sum uint64
+	for id := range voters {
+		sum += vs.power[id]
+	}
+	return sum
+}
+
+// PowerOfSet sums the voting power of the given voter ids.
+func (vs *ValidatorSet) PowerOfSet(voters map[string]struct{}) uint64 {
+	var sum uint64
+	for id := range voters {
+		sum += vs.power[id]
+	}
+	return sum
 }
