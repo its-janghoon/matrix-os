@@ -117,6 +117,25 @@ export interface Provider {
  * back this invoice instead; signing it authorises this recipient and this
  * amount and nothing else. The completion is withheld until you settle.
  */
+/** One message of a streamed completion. */
+export interface InferenceChunk {
+  /** The next piece of the completion. Concatenating every delta gives the whole. */
+  delta: string;
+  /** Present on every chunk, so a caller can correlate without waiting for the end. */
+  jobId: string;
+  /**
+   * Set on the final chunk only: the settled job. Do not treat a stream as paid
+   * for until you have this.
+   */
+  job?: InferenceJob;
+  /**
+   * True on the final chunk when the provider's backend could not stream and
+   * the whole completion arrived as one delta, so a UI can stop pretending
+   * there is a typing effect.
+   */
+  streamedOneShot: boolean;
+}
+
 export interface PaymentRequest {
   jobId: string;
   /** The buyer's account, which must be the signer. */
@@ -866,6 +885,165 @@ export class MatrixClient {
    * proto after this version of the SDK was published; `call` reaches it
    * without waiting for a release.
    */
+  /**
+   * Submits an inference job and yields the completion as it is produced, then
+   * the settled job.
+   *
+   * This is the hosted path: the node signs the payment with a key it holds for
+   * the buyer once the model has finished. Streaming is deliberately
+   * unavailable on the client-signed path, where the completion is withheld
+   * until the buyer signs the invoice - streaming the answer out and then asking
+   * to be paid would give the whole thing away first.
+   *
+   * ```ts
+   * for await (const chunk of client.streamInferenceJob({ ... })) {
+   *   if (chunk.job) console.log('settled', chunk.job.units);
+   *   else process.stdout.write(chunk.delta);
+   * }
+   * ```
+   *
+   * Breaking out of the loop cancels the request, which aborts the run so the
+   * provider stops generating tokens nobody will read.
+   */
+  async *streamInferenceJob(input: {
+    buyer: string;
+    provider: string;
+    model: string;
+    prompt?: string;
+    messages?: ChatMessage[];
+    maxTokens?: number;
+    temperature?: number;
+    unitsEstimate?: bigint | number;
+  }): AsyncGenerator<InferenceChunk, void, undefined> {
+    const frames = this.callStreaming(INFERENCE, 'StreamInferenceJob', {
+      buyer: input.buyer,
+      provider: input.provider,
+      model: input.model,
+      prompt: input.prompt ?? '',
+      messages: input.messages ?? [],
+      maxTokens: input.maxTokens ?? 0,
+      temperature: input.temperature ?? 0,
+      unitsEstimate: String(input.unitsEstimate ?? 0),
+    });
+    for await (const raw of frames) {
+      const hasJob = raw.job !== undefined && raw.job !== null;
+      yield {
+        delta: str(raw.delta),
+        jobId: str(raw.jobId),
+        streamedOneShot: raw.streamedOneShot === true,
+        ...(hasJob ? { job: decodeInferenceJob(record(raw.job)) } : {}),
+      };
+    }
+  }
+
+  /**
+   * Reads a Connect server-streaming response: enveloped frames of
+   * `[1 flag byte][4 big-endian length bytes][payload]`, ending with a frame
+   * whose flag bit 0x02 is set. That end frame is not decoration - an HTTP
+   * response that has already begun cannot change its status code, so a failure
+   * halfway through a stream travels in it. A reader that stopped at
+   * end-of-body would read a truncated stream as a complete one.
+   */
+  private async *callStreaming(
+    service: string,
+    method: string,
+    request: unknown,
+  ): AsyncGenerator<Record<string, unknown>, void, undefined> {
+    const url = `${this.endpoint}/${service}/${method}`;
+    const label = `${service}/${method}`;
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      'Connect-Protocol-Version': '1',
+    };
+    if (this.apiKey) headers.Authorization = `Bearer ${this.apiKey}`;
+
+    let response: Response;
+    try {
+      // No timeout on a stream: this.timeoutMs bounds a unary round trip, and a
+      // long generation is not a stalled request. A caller that wants to give up
+      // breaks out of the loop, which cancels the body.
+      response = await this.doFetch(url, { method: 'POST', headers, body: JSON.stringify(request ?? {}) });
+    } catch (cause) {
+      throw new MatrixError('unreachable', label, `could not reach ${this.endpoint} for ${label}`, cause);
+    }
+
+    if (!response.ok) {
+      // A failure before the first frame is still an ordinary HTTP error.
+      const text = await response.text();
+      let code: MatrixErrorCode = 'internal';
+      let message = `${label} failed with HTTP ${response.status}`;
+      try {
+        const body = JSON.parse(text) as { code?: string; message?: string };
+        if (body.code) code = body.code as MatrixErrorCode;
+        if (body.message) message = body.message;
+      } catch {
+        // Not a Connect error body; the status and label are what we have.
+      }
+      throw new MatrixError(code, label, message);
+    }
+    if (!response.body) {
+      throw new MatrixError('internal', label, `${label} returned no body to stream`);
+    }
+
+    const reader = response.body.getReader();
+    let buffer = new Uint8Array();
+    let sawEnd = false;
+
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (value && value.length > 0) {
+          const next = new Uint8Array(buffer.length + value.length);
+          next.set(buffer);
+          next.set(value, buffer.length);
+          buffer = next;
+        }
+
+        // Drain whole frames out of the buffer.
+        for (;;) {
+          if (buffer.length < 5) break;
+          const view = new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+          const flags = buffer[0] as number;
+          const length = view.getUint32(1, false);
+          if (buffer.length < 5 + length) break;
+          const payload = buffer.subarray(5, 5 + length);
+          buffer = buffer.subarray(5 + length);
+
+          const text = new TextDecoder().decode(payload);
+          const parsed = text === '' ? {} : (JSON.parse(text) as Record<string, unknown>);
+
+          if ((flags & 0x02) !== 0) {
+            sawEnd = true;
+            const err = parsed.error;
+            if (err) {
+              const body = record(err);
+              throw new MatrixError(
+                (str(body.code) || 'internal') as MatrixErrorCode,
+                label,
+                str(body.message) || `${label} failed mid-stream`,
+              );
+            }
+            return;
+          }
+          yield parsed;
+        }
+
+        if (done) break;
+      }
+    } finally {
+      // Cancel on any exit, including a caller breaking out of the loop, so the
+      // provider stops generating.
+      await reader.cancel().catch(() => {});
+    }
+
+    if (!sawEnd) {
+      // The body ended without an end frame, so the stream was cut off. Saying
+      // so is the whole reason the end frame exists.
+      throw new MatrixError('internal', label,
+        `${label} ended without an end-of-stream frame, so the response was truncated`);
+    }
+  }
+
   async call(service: string, method: string, request: unknown): Promise<Record<string, unknown>> {
     const url = `${this.endpoint}/${service}/${method}`;
     const label = `${service}/${method}`;

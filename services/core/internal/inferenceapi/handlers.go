@@ -4,6 +4,7 @@ import (
 	"context"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
+	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -167,6 +168,73 @@ func (s *Service) SettleInferenceJob(ctx context.Context, req *inferencev1.Settl
 		return nil, mapInferenceError(err)
 	}
 	return &inferencev1.SettleInferenceJobResponse{Job: jobToProto(job)}, nil
+}
+
+// StreamInferenceJob submits a job and streams its completion as it is
+// produced, then settles it.
+//
+// The stream is closed by returning: a nil error ends it cleanly, and an error
+// travels to the client in the transport's end-of-stream frame, which is the
+// only way to report a failure after the first byte has gone out.
+func (s *Service) StreamInferenceJob(
+	req *inferencev1.StreamInferenceJobRequest,
+	stream grpc.ServerStreamingServer[inferencev1.StreamInferenceJobResponse],
+) error {
+	if req == nil {
+		return status.Error(codes.InvalidArgument, "request is required")
+	}
+	ctx := stream.Context()
+
+	job, err := s.inf.SubmitInferenceJob(req.GetBuyer(), req.GetProvider(),
+		streamRequestToInternal(req), req.GetUnitsEstimate())
+	if err != nil {
+		return mapInferenceError(err)
+	}
+
+	// Send returns its error into the callback, so a client that hangs up aborts
+	// the run instead of the provider generating tokens nobody will read.
+	onChunk := func(delta string) error {
+		return stream.Send(&inferencev1.StreamInferenceJobResponse{
+			Delta: delta,
+			JobId: job.ID,
+		})
+	}
+
+	settled, result, err := s.inf.StreamJob(ctx, job.ID, onChunk)
+	if err != nil {
+		return mapInferenceError(err)
+	}
+
+	// The final message carries the settled job. A client must not consider a
+	// stream paid for until it has this, which is why it is a message rather
+	// than something a caller has to go and fetch.
+	final := &inferencev1.StreamInferenceJobResponse{JobId: job.ID}
+	if settled != nil {
+		final.Job = jobToProto(settled)
+	}
+	if result != nil {
+		final.StreamedOneShot = result.StreamedOneShot
+	}
+	return stream.Send(final)
+}
+
+// streamRequestToInternal builds an internal InferenceRequest from the
+// streaming request.
+func streamRequestToInternal(req *inferencev1.StreamInferenceJobRequest) inference.InferenceRequest {
+	msgs := make([]inference.Message, 0, len(req.GetMessages()))
+	for _, m := range req.GetMessages() {
+		msgs = append(msgs, inference.Message{
+			Role:    roleToInternal(m.GetRole()),
+			Content: m.GetContent(),
+		})
+	}
+	return inference.InferenceRequest{
+		Model:       req.GetModel(),
+		Prompt:      req.GetPrompt(),
+		Messages:    msgs,
+		MaxTokens:   int(req.GetMaxTokens()),
+		Temperature: req.GetTemperature(),
+	}
 }
 
 // runRequestToInternal builds an internal InferenceRequest from the

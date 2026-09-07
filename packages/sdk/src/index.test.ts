@@ -299,6 +299,7 @@ describe('coverage against the served surface', () => {
       'GetInferenceJob',
       'RunInferenceJob',
       'SettleInferenceJob',
+      'StreamInferenceJob',
     ],
     'matrix.agent.v1.AgentService': ['DeployAgent', 'ListAgents', 'GetAgent'],
   };

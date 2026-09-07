@@ -299,11 +299,22 @@ func TestHandlerRefusesBadConfig(t *testing.T) {
 	if _, err := NewHandler(Config{Bindings: []Binding{{Desc: &marketv1.MarketService_ServiceDesc}}}); err == nil {
 		t.Fatal("a binding with no implementation should be refused")
 	}
-	streaming := grpc.ServiceDesc{
+	// Server-streaming is served now (see streaming.go). Client-streaming is not,
+	// and is still refused: the client would have to frame its own request
+	// stream, which a request-body-then-response shape cannot express, and
+	// half-serving one is worse than refusing it.
+	serverStreaming := grpc.ServiceDesc{
 		ServiceName: "test.Streaming",
-		Streams:     []grpc.StreamDesc{{StreamName: "Watch"}},
+		Streams:     []grpc.StreamDesc{{StreamName: "Watch", ServerStreams: true}},
 	}
-	if _, err := NewHandler(Config{Bindings: []Binding{{Desc: &streaming, Impl: &fakeMarket{}}}}); err == nil {
-		t.Fatal("a streaming service should be refused rather than half-served")
+	if _, err := NewHandler(Config{Bindings: []Binding{{Desc: &serverStreaming, Impl: &fakeMarket{}}}}); err != nil {
+		t.Fatalf("a server-streaming service should be served: %v", err)
+	}
+	clientStreaming := grpc.ServiceDesc{
+		ServiceName: "test.Streaming",
+		Streams:     []grpc.StreamDesc{{StreamName: "Upload", ClientStreams: true}},
+	}
+	if _, err := NewHandler(Config{Bindings: []Binding{{Desc: &clientStreaming, Impl: &fakeMarket{}}}}); err == nil {
+		t.Fatal("a client-streaming service should be refused rather than half-served")
 	}
 }

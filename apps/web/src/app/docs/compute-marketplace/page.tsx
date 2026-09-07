@@ -152,9 +152,13 @@ r = client.chat.completions.create(
                       </li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
-                      Not supported yet: streaming. A request with <code>&quot;stream&quot;: true</code> is refused
-                      rather than answered with one whole body, because a client expecting SSE frames would fail in a
-                      way that looks like a broken server.
+                      <code>&quot;stream&quot;: true</code> works, as server-sent events: a role frame, a content
+                      frame per delta, a stop frame, then the usage and <code>[DONE]</code>. Every frame is flushed as
+                      it is produced. A backend that cannot stream is not hidden - the final frame carries{' '}
+                      <code>streamed_one_shot</code> so a UI knows the whole answer arrived at once instead of
+                      pretending there was a typing effect. A failure after the first frame travels in the body as an
+                      error frame, because the status is already 200 by then and a stream that merely stopped would
+                      look complete.
                     </p>
                   </div>
 
@@ -177,6 +181,13 @@ r = client.chat.completions.create(
                       <li>
                         <strong>Client-signed</strong> - <code>RunInferenceJob</code> then{' '}
                         <code>SettleInferenceJob</code>. The node needs no key for you at all.
+                      </li>
+                      <li>
+                        <strong>Hosted and streamed</strong> - <code>StreamInferenceJob</code>, or{' '}
+                        <code>&quot;stream&quot;: true</code> on the OpenAI route. Streaming is deliberately
+                        unavailable on the client-signed path: there the completion is withheld until the invoice is
+                        signed, and streaming the answer out before asking to be paid gives away the only thing
+                        holding the buyer to the bargain.
                       </li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mb-4'>

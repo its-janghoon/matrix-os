@@ -24,6 +24,9 @@ type fakeInference struct {
 	fulfilled  []string
 	fulfillErr error
 	result     *inference.InferenceJob
+	streamed   []string
+	streamErr  error
+	oneShot    bool
 }
 
 type submitCall struct {
@@ -57,6 +60,50 @@ func (f *fakeInference) FulfillJob(ctx context.Context, jobID string) (*inferenc
 		Usage:      inference.Usage{PromptTokens: 7, CompletionTokens: 5, TotalTokens: 12},
 	}, nil
 }
+
+// StreamJob makes fakeInference a Streamer, emitting the canned completion one
+// word at a time so a test can count frames.
+func (f *fakeInference) StreamJob(ctx context.Context, jobID string, onChunk inference.ChunkFunc) (*inference.InferenceJob, *inference.StreamResult, error) {
+	f.streamed = append(f.streamed, jobID)
+	if f.streamErr != nil {
+		return nil, nil, f.streamErr
+	}
+	done, err := f.FulfillJob(ctx, jobID)
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, word := range strings.SplitAfter(done.Completion, " ") {
+		if word == "" {
+			continue
+		}
+		if err := onChunk(word); err != nil {
+			return nil, nil, err
+		}
+	}
+	return done, &inference.StreamResult{
+		Response: inference.InferenceResponse{
+			Model: done.Model, Completion: done.Completion, Usage: done.Usage,
+		},
+		StreamedOneShot: f.oneShot,
+	}, nil
+}
+
+// nonStreamingInference is an Inference that is NOT a Streamer, so the route's
+// "this server cannot stream" path stays reachable in a test. The embedded
+// methods are re-declared because embedding a value that satisfies Streamer
+// would promote StreamJob onto this type too.
+type nonStreamingInference struct{ inner fakeInference }
+
+func (n *nonStreamingInference) SubmitInferenceJob(buyer, providerID string, req inference.InferenceRequest, units uint64) (*inference.InferenceJob, error) {
+	return n.inner.SubmitInferenceJob(buyer, providerID, req, units)
+}
+
+func (n *nonStreamingInference) FulfillJob(ctx context.Context, jobID string) (*inference.InferenceJob, error) {
+	return n.inner.FulfillJob(ctx, jobID)
+}
+
+// errStreamBroke stands in for a backend dying partway through a stream.
+var errStreamBroke = errors.New("the model server hung up")
 
 type fakeRouter struct{ providers []market.Provider }
 
@@ -302,21 +349,21 @@ func TestMarketErrorsMapToTheStatusAnSDKBranchesOn(t *testing.T) {
 	}
 }
 
-// TestAStreamingRequestIsRefusedRatherThanAnsweredWhole: a client that asked for
-// a stream would try to parse SSE frames out of one JSON body and fail in a way
-// that looks like a broken server.
-func TestAStreamingRequestIsRefusedRatherThanAnsweredWhole(t *testing.T) {
-	inf := &fakeInference{}
-	h := newHandler(t, inf, twoProviders(), fakeAuth{account: "buyer"})
+// TestAStreamRequestOnANonStreamingServiceSaysSo: the route must not answer a
+// streaming request with one whole body, because a client parsing SSE frames
+// would fail in a way that looks like a broken server. Saying "this server
+// cannot stream" is the honest alternative.
+func TestAStreamRequestOnANonStreamingServiceSaysSo(t *testing.T) {
+	h := newHandler(t, &nonStreamingInference{}, twoProviders(), fakeAuth{account: "buyer"})
 
 	rec := post(t, h, ChatCompletionsPath,
 		`{"model":"llama-3.3-70b","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
 
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", rec.Code)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
 	}
-	if len(inf.submitted) != 0 {
-		t.Fatal("a refused request must not reserve capacity")
+	if !strings.Contains(rec.Body.String(), "cannot stream") {
+		t.Fatalf("body = %s, want it to say the server cannot stream", rec.Body.String())
 	}
 }
 

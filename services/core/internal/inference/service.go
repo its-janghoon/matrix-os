@@ -278,9 +278,8 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 		return nil, fmt.Errorf("inference: job %q in state %q cannot be fulfilled", jobID, job.Status)
 	}
 	job.Status = InferenceJobRunning
-	job.UpdatedAt = time.Now().UTC()
+	job.UpdatedAt = nowUTC()
 	reqCopy := job.Request
-	buyer := job.Buyer
 	provider := job.Provider
 	s.mu.Unlock()
 
@@ -296,6 +295,29 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 		return nil, fmt.Errorf("inference: backend %q failed: %w", backend.Name(), err)
 	}
 
+	return s.settleRun(ctx, jobID, resp)
+}
+
+// settleRun charges for a completed run and confirms the payment. It is the half
+// of FulfillJob that follows the model producing an answer, extracted so the
+// streaming path (StreamJob) shares one implementation rather than carrying a
+// second copy of the charge computation. The clamping to the reservation and the
+// commit-and-apply confirmation are precisely the properties a duplicate would
+// eventually get wrong.
+//
+// It settles the HOSTED way: the node signs the transfer with a key it holds for
+// the buyer. The client-signed path is settle.go, and it necessarily computes
+// its charge at a different moment, which is why that one is separate.
+func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceResponse) (*InferenceJob, error) {
+	s.mu.Lock()
+	job, ok := s.jobs[jobID]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: %q", ErrJobNotFound, jobID)
+	}
+	buyer, provider, marketJobID := job.Buyer, job.Provider, job.MarketJobID
+	s.mu.Unlock()
+
 	// Determine the amount to charge. The market reservation ran the affordability
 	// check against the reserved PRICE = unitsEstimate * PricePerUnit, so the
 	// settled charge must be (a) scaled by the provider's PricePerUnit and (b)
@@ -304,13 +326,10 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	//      reports more usage than estimated is capped at what was reserved, never
 	//      silently over-charging the buyer), and
 	//   2. multiply by PricePerUnit to get the credit amount.
-	// This keeps the charged quantity identical to what was reserved and
-	// affordability-checked, closing the gap where raw resp.Units (unscaled,
-	// unbounded) was settled.
-	mjob, ok := s.market.GetJob(job.MarketJobID)
+	mjob, ok := s.market.GetJob(marketJobID)
 	if !ok {
 		s.failJob(jobID)
-		return nil, fmt.Errorf("%w: market job %q", market.ErrJobNotFound, job.MarketJobID)
+		return nil, fmt.Errorf("%w: market job %q", market.ErrJobNotFound, marketJobID)
 	}
 	prov, ok := s.market.GetProvider(provider)
 	if !ok {
@@ -330,7 +349,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	// so a future pricing change cannot silently reintroduce an over-charge.
 	if amount > mjob.Price {
 		s.failJob(jobID)
-		return nil, fmt.Errorf("inference: computed charge %d exceeds reserved price %d for job %q", amount, mjob.Price, job.MarketJobID)
+		return nil, fmt.Errorf("inference: computed charge %d exceeds reserved price %d for job %q", amount, mjob.Price, marketJobID)
 	}
 
 	buyerAcct, ok := s.accounts.Account(buyer)
@@ -361,7 +380,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	job.Units = amount
 	job.Usage = resp.Usage
 	job.Model = resp.Model
-	job.UpdatedAt = time.Now().UTC()
+	job.UpdatedAt = nowUTC()
 	s.mu.Unlock()
 
 	waitCtx, cancel := context.WithTimeout(ctx, DefaultSettlementTimeout)
@@ -394,20 +413,24 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	// price a SECOND time and double-charge the buyer, so instead release the
 	// reserved capacity (the settlement, not the reservation, charged the buyer)
 	// and mark the inference job COMPLETED.
-	if err := s.market.CancelJob(job.MarketJobID); err != nil {
+	if err := s.market.CancelJob(marketJobID); err != nil {
 		// Capacity release failure is non-fatal to settlement, which already
 		// applied; surface it so the operator can reconcile capacity.
-		return nil, fmt.Errorf("inference: settled but failed to release capacity for job %q: %w", job.MarketJobID, err)
+		return nil, fmt.Errorf("inference: settled but failed to release capacity for job %q: %w", marketJobID, err)
 	}
 
 	s.mu.Lock()
 	job.Status = InferenceJobCompleted
-	job.UpdatedAt = time.Now().UTC()
+	job.UpdatedAt = nowUTC()
 	cp := job.snapshot()
 	s.mu.Unlock()
 
 	return &cp, nil
 }
+
+// nowUTC is the one clock this package reads, so every timestamp it writes is
+// in the same zone.
+func nowUTC() time.Time { return time.Now().UTC() }
 
 // failJob marks a job FAILED and returns any reserved market capacity.
 func (s *Service) failJob(jobID string) {

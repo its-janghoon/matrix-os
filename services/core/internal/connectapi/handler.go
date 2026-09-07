@@ -113,8 +113,9 @@ var (
 )
 
 // NewHandler builds the HTTP handler. It returns an error when no bindings are
-// given or a descriptor declares a streaming method, which this protocol form
-// cannot serve.
+// given, or when a descriptor declares a client-streaming method, which this
+// request-body-then-response shape cannot express. Server-streaming methods are
+// served with the Connect streaming framing (see streaming.go).
 func NewHandler(cfg Config) (http.Handler, error) {
 	if len(cfg.Bindings) == 0 {
 		return nil, errors.New("connectapi: at least one binding is required")
@@ -124,10 +125,6 @@ func NewHandler(cfg Config) (http.Handler, error) {
 	for _, b := range cfg.Bindings {
 		if b.Desc == nil || b.Impl == nil {
 			return nil, errors.New("connectapi: binding needs both a descriptor and an implementation")
-		}
-		if len(b.Desc.Streams) > 0 {
-			return nil, fmt.Errorf("connectapi: service %s declares streaming methods, which this handler cannot serve",
-				b.Desc.ServiceName)
 		}
 		for i := range b.Desc.Methods {
 			method := b.Desc.Methods[i]
@@ -140,6 +137,30 @@ func NewHandler(cfg Config) (http.Handler, error) {
 				fullMethod: fullMethod,
 				auth:       cfg.Auth,
 				public:     cfg.PublicReads && isReadMethod(method.MethodName),
+			})
+		}
+	}
+
+	for i := range cfg.Bindings {
+		b := cfg.Bindings[i]
+		for j := range b.Desc.Streams {
+			desc := b.Desc.Streams[j]
+			// Only server-streaming is served. A client-streaming or bidi method
+			// needs the client to frame its own request stream, which this
+			// request-body-then-response shape cannot express, and refusing is
+			// better than half-serving one.
+			if desc.ClientStreams {
+				return nil, fmt.Errorf(
+					"connectapi: %s.%s is client-streaming, which this handler cannot serve",
+					b.Desc.ServiceName, desc.StreamName)
+			}
+			path := "/" + b.Desc.ServiceName + "/" + desc.StreamName
+			mux.Handle(path, &streamHandler{
+				desc:       desc,
+				impl:       b.Impl,
+				fullMethod: path,
+				auth:       cfg.Auth,
+				public:     cfg.PublicReads && isReadMethod(desc.StreamName),
 			})
 		}
 	}

@@ -65,6 +65,42 @@ func (b *EchoBackend) Infer(_ context.Context, req InferenceRequest) (InferenceR
 	}, nil
 }
 
+// InferStream produces the same completion as Infer, one whitespace-separated
+// word at a time. The stub does not gain anything from streaming itself; it is
+// here so the streaming path is real and testable end to end without a GPU,
+// exactly as Infer makes the settlement path testable.
+//
+// The chunks concatenate to the identical completion Infer returns, and the
+// returned response is identical too, so what settles does not depend on which
+// method a caller used.
+func (b *EchoBackend) InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc) (InferenceResponse, error) {
+	resp, err := b.Infer(ctx, req)
+	if err != nil {
+		return InferenceResponse{}, err
+	}
+
+	// Split on the spaces rather than on words, so re-joining the deltas gives
+	// back the exact string including its whitespace. A stream whose pieces do
+	// not reassemble into what was billed for is worse than no stream.
+	remaining := resp.Completion
+	for remaining != "" {
+		if err := ctx.Err(); err != nil {
+			return resp, err
+		}
+		cut := strings.IndexByte(remaining, ' ')
+		var delta string
+		if cut < 0 {
+			delta, remaining = remaining, ""
+		} else {
+			delta, remaining = remaining[:cut+1], remaining[cut+1:]
+		}
+		if err := onChunk(delta); err != nil {
+			return resp, err
+		}
+	}
+	return resp, nil
+}
+
 // countTokens is a deterministic, dependency-free token estimator: the number of
 // whitespace-separated fields in s. It is not a real BPE tokenizer, but it is
 // stable and monotonic in input length, which is all the marketplace needs to

@@ -176,6 +176,8 @@ func mapInferenceError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, inference.ErrEmptyPrompt):
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, inference.ErrStreamNotSupported):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, inference.ErrNotAwaitingPayment):
 		// The job is at the wrong point in its lifecycle - not run yet, already
 		// paid, or expired - which is a precondition, not a bad argument.

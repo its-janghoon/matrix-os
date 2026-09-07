@@ -225,6 +225,53 @@ message SettleInferenceJobResponse {
     InferenceJob job = 1;
 }
 
+// StreamInferenceJobRequest submits an inference job and streams its completion
+// as it is produced. It is the hosted path: the node signs the payment with a
+// key it holds for the buyer once the model has finished.
+//
+// Streaming is deliberately unavailable on the CLIENT-SIGNED path. There the
+// completion is withheld until the buyer signs the invoice, and withholding is
+// the only enforcement because the provider has already worked; streaming the
+// answer out and then asking to be paid gives the whole thing away first.
+message StreamInferenceJobRequest {
+    // Buyer account ID. The node must hold this account's signing key.
+    string buyer = 1;
+    // Target inference-capable provider ID.
+    string provider = 2;
+    // Model identifier to run.
+    string model = 3;
+    // Single user prompt. Used when messages is empty.
+    string prompt = 4;
+    // Full chat transcript. Takes precedence over prompt.
+    repeated ChatMessage messages = 5;
+    // Optional maximum completion length in tokens. Zero means backend default.
+    uint32 max_tokens = 6;
+    // Optional sampling temperature. Zero means backend default.
+    double temperature = 7;
+    // Upfront estimate of the compute units to reserve. Zero defaults to one.
+    uint64 units_estimate = 8;
+}
+
+// StreamInferenceJobResponse is one message of a streamed completion. Every
+// message carries a delta; the last one also carries the finished job.
+message StreamInferenceJobResponse {
+    // The next piece of the completion. Concatenating every chunk's delta gives
+    // the whole completion, byte for byte.
+    string delta = 1;
+    // The job ID, on every chunk so a client can correlate without waiting for
+    // the end.
+    string job_id = 2;
+    // Set on the final chunk only: the settled job, with its usage, billed units
+    // and status. A client must not treat a stream as paid for until it has
+    // this.
+    InferenceJob job = 3;
+    // True on the final chunk when the provider's backend could not stream and
+    // the whole completion arrived as a single delta. Reported so a client can
+    // stop pretending there is a typing effect rather than having to guess which
+    // backends stream.
+    bool streamed_one_shot = 4;
+}
+
 // GetInferenceJobRequest looks up a single inference job by ID.
 message GetInferenceJobRequest {
     // Inference job ID to fetch.
@@ -272,6 +319,18 @@ service InferenceService {
     // a caller's behalf makes the operator a custodian, and a dApp, where it
     // would make wallet login decorative.
     rpc RunInferenceJob(RunInferenceJobRequest) returns (RunInferenceJobResponse) {}
+
+    // StreamInferenceJob submits a job and streams its completion as it is
+    // produced, then settles it. Input: buyer, provider, model, prompt or
+    // messages. Output: a stream of InferenceChunk, the last of which carries
+    // the settled job. Side effects: reserves capacity, runs the model, and
+    // settles the charge through consensus with a key the node holds for the
+    // buyer.
+    //
+    // A client that hangs up mid-stream aborts the run, so the provider stops
+    // generating tokens nobody will read; the job is then failed and its
+    // reservation released rather than billed.
+    rpc StreamInferenceJob(StreamInferenceJobRequest) returns (stream StreamInferenceJobResponse) {}
 
     // SettleInferenceJob submits the buyer's signed transfer for a job awaiting
     // payment and returns the completion. Input: the job ID and the signed

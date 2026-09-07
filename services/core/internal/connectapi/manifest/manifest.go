@@ -32,9 +32,22 @@ type Manifest struct {
 func Build(descs ...*grpc.ServiceDesc) Manifest {
 	services := make([]Service, 0, len(descs))
 	for _, desc := range descs {
-		methods := make([]string, 0, len(desc.Methods))
+		methods := make([]string, 0, len(desc.Methods)+len(desc.Streams))
 		for _, m := range desc.Methods {
 			methods = append(methods, m.MethodName)
+		}
+		// Server-streaming methods are served on the same endpoint (see
+		// connectapi/streaming.go), so a manifest that listed only the unary
+		// ones would tell a client the surface is smaller than it is - and the
+		// SDK checks itself against this file, so it would then be told a
+		// streaming method it correctly wraps is one the node does not serve.
+		for _, st := range desc.Streams {
+			if st.ClientStreams {
+				// Not served: a client would have to frame its own request
+				// stream, which this endpoint's shape cannot express.
+				continue
+			}
+			methods = append(methods, st.StreamName)
 		}
 		sort.Strings(methods)
 		services = append(services, Service{Name: desc.ServiceName, Methods: methods})

@@ -43,6 +43,28 @@ const r = await client.chat.completions.create({
 });
 ```
 
+Streaming works there too (`stream: true`), and this SDK also wraps the native
+streaming RPC:
+
+```ts
+for await (const chunk of client.streamInferenceJob({
+  buyer: myAccountId, provider: 'gpu-1', model: 'llama-3.3-70b', prompt: 'hello',
+})) {
+  if (chunk.job) console.log('settled', chunk.job.units);
+  else process.stdout.write(chunk.delta);
+}
+```
+
+Breaking out of that loop cancels the request, which aborts the run so the
+provider stops generating tokens nobody will read. The last chunk carries the
+settled job - do not treat a stream as paid for until you have it - and
+`streamedOneShot` tells you when the provider's backend could not really stream
+and the whole answer arrived as one delta.
+
+Streaming is the hosted path only. On the client-signed path the completion is
+withheld until you sign the invoice, and streaming it out first would give away
+the only thing holding you to the bargain.
+
 That route needs an API key whose `account` is set (under
 `security.api_keys`), because the OpenAI protocol carries no buyer field and the
 key is the only thing that can say whose on-chain balance to charge. The request

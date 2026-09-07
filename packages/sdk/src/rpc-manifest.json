@@ -16,6 +16,7 @@
         "GetInferenceJob",
         "RunInferenceJob",
         "SettleInferenceJob",
+        "StreamInferenceJob",
         "SubmitInferenceJob"
       ]
     },

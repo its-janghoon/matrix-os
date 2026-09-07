@@ -82,6 +82,14 @@ type Inference interface {
 	FulfillJob(ctx context.Context, jobID string) (*inference.InferenceJob, error)
 }
 
+// Streamer is the optional interface an Inference implementation provides when
+// it can stream a completion. It is optional so a caller can wire a non-
+// streaming inference service and have the route say so, rather than the type
+// system forbidding a configuration that is otherwise fine.
+type Streamer interface {
+	StreamJob(ctx context.Context, jobID string, onChunk inference.ChunkFunc) (*inference.InferenceJob, *inference.StreamResult, error)
+}
+
 // Router picks the provider for a model and enumerates what is servable.
 //
 // ProvidersForModel may return its candidates in any order. The route selects
@@ -207,14 +215,6 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			"'model' is required: it is what selects a provider on this network")
 		return
 	}
-	if req.Stream {
-		// Refuse rather than silently answering a streaming request with one
-		// whole body: a client that asked for a stream will try to parse SSE
-		// frames and fail in a way that looks like a broken response.
-		writeError(w, http.StatusBadRequest, "invalid_request_error",
-			`streaming is not supported yet; retry with "stream": false`)
-		return
-	}
 	if len(req.Messages) == 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request_error",
 			"'messages' must contain at least one message")
@@ -241,6 +241,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	provider := cheapest(candidates)
+
+	if req.Stream {
+		// From here the response is server-sent events, and a failure after the
+		// first frame cannot be an HTTP status. See stream.go.
+		h.streamChatCompletions(w, r, buyer, req, msgs, provider.ID)
+		return
+	}
 
 	job, err := h.cfg.Inference.SubmitInferenceJob(buyer, provider.ID, inference.InferenceRequest{
 		Model:       req.Model,
