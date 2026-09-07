@@ -207,6 +207,7 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 			Capacity:     ann.Capacity,
 			PricePerUnit: ann.PricePerUnit,
 			Available:    ann.Available,
+			Models:       ann.Models,
 		},
 		PublicKey:  ann.PublicKey,
 		PeerID:     ann.PeerID,
@@ -285,6 +286,7 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p 
 		Capacity:     p.Capacity,
 		PricePerUnit: p.PricePerUnit,
 		Available:    p.Available,
+		Models:       p.Models,
 		PeerID:       e.peerID,
 		Timestamp:    e.now().UnixNano(),
 	}

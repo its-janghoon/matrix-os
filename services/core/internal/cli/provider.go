@@ -26,6 +26,7 @@ func newProviderRegisterCommand(opts *globalOptions) *cobra.Command {
 		id       string
 		capacity uint64
 		price    uint64
+		models   []string
 	)
 	cmd := &cobra.Command{
 		Use:   "register",
@@ -53,6 +54,7 @@ func newProviderRegisterCommand(opts *globalOptions) *cobra.Command {
 				Id:           id,
 				Capacity:     capacity,
 				PricePerUnit: price,
+				Models:       models,
 			})
 			if err != nil {
 				return mapErr(opts.Addr, err)
@@ -67,6 +69,8 @@ func newProviderRegisterCommand(opts *globalOptions) *cobra.Command {
 	cmd.Flags().StringVar(&id, "id", "", "provider ID (required, unique)")
 	cmd.Flags().Uint64Var(&capacity, "capacity", 0, "total capacity in compute units (required, > 0)")
 	cmd.Flags().Uint64Var(&price, "price", 0, "price per compute unit in credits (required, > 0)")
+	cmd.Flags().StringSliceVar(&models, "models", nil,
+		"model identifiers this provider serves, comma separated (optional; a provider with none is reachable by id only)")
 	return cmd
 }
 

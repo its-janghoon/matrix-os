@@ -33,11 +33,14 @@ const PROVIDERS = `matrix status                  # endpoint + serving status
 matrix health                  # the gRPC health Check: SERVING / NOT_SERVING
 
 matrix provider register --id gpu-1 --capacity 100 --price 5
+matrix provider register --id gpu-2 --capacity 100 --price 3 \\
+  --models llama-3.3-70b,qwen-2.5-72b   # what a model request routes on
 matrix provider list                     # local providers
 matrix provider list --include-remote    # plus providers discovered over p2p`;
 
-const PROVIDER_OUT = `ID                       CAPACITY  AVAILABLE  PRICE/UNIT  ORIGIN  PEER
+const PROVIDER_OUT = `ID                       CAPACITY  AVAILABLE  PRICE/UNIT  ORIGIN  PEER  MODELS
 demo-inference-provider  100       100        5           local
+gpu-2                    100       100        3           local         llama-3.3-70b,qwen-2.5-72b
 quickstart-provider      100       90         5           local`;
 
 const JOBS = `matrix job submit --buyer <account-id> --provider gpu-1 --units 10

@@ -120,7 +120,15 @@ describe('decoding', () => {
       {
         body: {
           providers: [
-            { id: 'gpu-1', capacity: '20', pricePerUnit: '5', available: '17', origin: 'PROVIDER_ORIGIN_LOCAL', peerId: '' },
+            {
+              id: 'gpu-1',
+              capacity: '20',
+              pricePerUnit: '5',
+              available: '17',
+              origin: 'PROVIDER_ORIGIN_LOCAL',
+              peerId: '',
+              models: ['llama-3.3-70b', 'qwen-2.5-72b'],
+            },
           ],
         },
       },
@@ -135,7 +143,34 @@ describe('decoding', () => {
       available: 17n,
       origin: 'PROVIDER_ORIGIN_LOCAL',
       peerId: '',
+      models: ['llama-3.3-70b', 'qwen-2.5-72b'],
     });
+  });
+
+  it('reads a compute-only provider, which advertises no models, as an empty list', async () => {
+    const { client: c } = client([
+      {
+        body: {
+          providers: [
+            { id: 'cpu-1', capacity: '4', pricePerUnit: '1', available: '4', origin: 'PROVIDER_ORIGIN_LOCAL', peerId: '' },
+          ],
+        },
+      },
+    ]);
+
+    const [provider] = await c.listProviders();
+
+    expect(provider!.models).toEqual([]);
+  });
+
+  it('sends a model filter only when one is given, so an unfiltered call is unchanged', async () => {
+    const { client: c, calls } = client([{ body: { providers: [] } }, { body: { providers: [] } }]);
+
+    await c.listProviders();
+    await c.listProviders({ model: 'Llama-3.3-70B' });
+
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({ includeRemote: false });
+    expect(JSON.parse(String(calls[1]!.init.body))).toEqual({ includeRemote: false, model: 'Llama-3.3-70B' });
   });
 
   it('maps a job, including the fixed price', async () => {

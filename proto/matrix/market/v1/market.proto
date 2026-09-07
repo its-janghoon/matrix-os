@@ -51,6 +51,10 @@ message Provider {
     // For remote providers, the libp2p peer ID that announced the provider.
     // Empty for local providers.
     string peer_id = 6;
+    // Model identifiers this provider serves, normalized to lowercase and
+    // sorted. This is what a request naming a model is routed on; a
+    // compute-only provider advertises none and is never selected by model.
+    repeated string models = 7;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.
@@ -116,6 +120,10 @@ message RegisterProviderRequest {
     uint64 capacity = 2;
     // Price per compute unit in credits. Must be > 0.
     uint64 price_per_unit = 3;
+    // Optional model identifiers this provider serves. Normalized to lowercase,
+    // de-duplicated and sorted on registration. Omit for a compute-only
+    // provider; a provider that serves no model is never selected by model.
+    repeated string models = 4;
 }
 
 // RegisterProviderResponse returns the registered provider record.
@@ -130,6 +138,9 @@ message ListProvidersRequest {
     // addition to the local order book. When false, only local providers are
     // returned.
     bool include_remote = 1;
+    // When non-empty, return only providers that advertise this model and still
+    // have capacity to reserve. Matched case-insensitively.
+    string model = 2;
 }
 
 // ListProvidersResponse returns providers, each flagged by origin.

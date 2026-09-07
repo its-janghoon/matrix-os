@@ -40,6 +40,13 @@ market:
 inference:
   addr: 0.0.0.0:9092                     # gRPC: matrix.inference.v1.InferenceService
   echo_provider: demo-inference-provider # GPU-free backend; "" registers none
+  backends:                              # what this node actually serves
+    - id: my-gpu-box
+      kind: local-http                   # echo | openai | local-http
+      base_url: http://127.0.0.1:8000
+      models: [llama-3.3-70b]            # what a model request routes on
+      capacity: 1000
+      price_per_unit: 3
 
 connect:
   addr: 0.0.0.0:9093                     # HTTP/JSON for market + inference; "off" disables
@@ -153,6 +160,16 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'inference.echo_provider',
         def: 'demo-inference-provider',
         note: 'Registers a deterministic GPU-free backend under this provider id at start, so the inference path works with no models. Empty registers none.',
+      },
+      {
+        name: 'inference.backends',
+        def: 'none',
+        note: 'The backends this node serves. Each entry needs an id, a kind (echo, openai for any OpenAI-compatible vendor, or local-http for a model server on this machine), a capacity and a price_per_unit; base_url and api_key_env configure the upstream, and models lists what it serves. Each entry is registered twice at start: in the inference registry as the thing that fulfills the job, and on the order book as a provider that can reserve capacity and be paid.',
+      },
+      {
+        name: 'inference.backends[].models',
+        def: 'none',
+        note: 'The model identifiers this backend serves, lowercased and de-duplicated. A request naming a model is routed to the cheapest provider advertising it that still has capacity. A backend that declares no model is still reachable by naming its provider id.',
       },
     ],
   },

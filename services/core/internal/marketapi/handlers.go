@@ -65,6 +65,7 @@ func localProviderToProto(p market.Provider) *marketv1.Provider {
 		PricePerUnit: p.PricePerUnit,
 		Available:    p.Available,
 		Origin:       marketv1.ProviderOrigin_PROVIDER_ORIGIN_LOCAL,
+		Models:       p.Models,
 	}
 }
 
@@ -78,6 +79,7 @@ func remoteProviderToProto(rp marketexchange.RemoteProvider) *marketv1.Provider 
 		Available:    rp.Available,
 		Origin:       marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
 		PeerId:       rp.PeerID,
+		Models:       rp.Models,
 	}
 }
 
@@ -123,6 +125,7 @@ func (s *Service) RegisterProvider(ctx context.Context, req *marketv1.RegisterPr
 		ID:           req.GetId(),
 		Capacity:     req.GetCapacity(),
 		PricePerUnit: req.GetPricePerUnit(),
+		Models:       req.GetModels(),
 	}
 	if err := s.market.RegisterProvider(p); err != nil {
 		return nil, mapMarketError(err)
@@ -139,7 +142,17 @@ func (s *Service) RegisterProvider(ctx context.Context, req *marketv1.RegisterPr
 // remote P2P providers, each flagged by origin. Local entries are returned
 // first, then remote entries, each group ordered by ID.
 func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProvidersRequest) (*marketv1.ListProvidersResponse, error) {
-	locals := s.market.ListProviders()
+	// A model filter narrows both groups. Locals come from ProvidersForModel so
+	// the filter also drops providers with no capacity left to reserve, which is
+	// what a caller asking "who can serve this model" means.
+	model := req.GetModel()
+
+	var locals []market.Provider
+	if model != "" {
+		locals = s.market.ProvidersForModel(model)
+	} else {
+		locals = s.market.ListProviders()
+	}
 	out := make([]*marketv1.Provider, 0, len(locals))
 	for _, p := range locals {
 		out = append(out, localProviderToProto(p))
@@ -149,6 +162,9 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 		remotes := s.exchange.ListRemoteProviders()
 		sort.Slice(remotes, func(i, j int) bool { return remotes[i].ID < remotes[j].ID })
 		for _, rp := range remotes {
+			if model != "" && (rp.Available == 0 || !rp.ServesModel(model)) {
+				continue
+			}
 			out = append(out, remoteProviderToProto(rp))
 		}
 	}

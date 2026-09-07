@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"strings"
 	"text/tabwriter"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
@@ -18,12 +19,13 @@ func printJSON(w io.Writer, v interface{}) error {
 
 // providerRow is the human/JSON view of a provider.
 type providerRow struct {
-	ID           string `json:"id"`
-	Capacity     uint64 `json:"capacity"`
-	Available    uint64 `json:"available"`
-	PricePerUnit uint64 `json:"price_per_unit"`
-	Origin       string `json:"origin"`
-	PeerID       string `json:"peer_id,omitempty"`
+	ID           string   `json:"id"`
+	Capacity     uint64   `json:"capacity"`
+	Available    uint64   `json:"available"`
+	PricePerUnit uint64   `json:"price_per_unit"`
+	Origin       string   `json:"origin"`
+	PeerID       string   `json:"peer_id,omitempty"`
+	Models       []string `json:"models,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -34,6 +36,7 @@ func providerToRow(p *marketv1.Provider) providerRow {
 		PricePerUnit: p.GetPricePerUnit(),
 		Origin:       originString(p.GetOrigin()),
 		PeerID:       p.GetPeerId(),
+		Models:       p.GetModels(),
 	}
 }
 
@@ -123,9 +126,10 @@ func printProviders(w io.Writer, asJSON bool, provs []*marketv1.Provider) error 
 		return printJSON(w, rows)
 	}
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "ID\tCAPACITY\tAVAILABLE\tPRICE/UNIT\tORIGIN\tPEER")
+	fmt.Fprintln(tw, "ID\tCAPACITY\tAVAILABLE\tPRICE/UNIT\tORIGIN\tPEER\tMODELS")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\t%s\n", r.ID, r.Capacity, r.Available, r.PricePerUnit, r.Origin, r.PeerID)
+		fmt.Fprintf(tw, "%s\t%d\t%d\t%d\t%s\t%s\t%s\n", r.ID, r.Capacity, r.Available, r.PricePerUnit,
+			r.Origin, r.PeerID, strings.Join(r.Models, ","))
 	}
 	return tw.Flush()
 }

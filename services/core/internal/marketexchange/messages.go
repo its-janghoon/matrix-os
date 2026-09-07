@@ -62,8 +62,13 @@ type ProviderAnnouncement struct {
 	PricePerUnit uint64            `json:"price_per_unit"`
 	Available    uint64            `json:"available"`
 	PeerID       string            `json:"peer_id"`
-	Timestamp    int64             `json:"timestamp"`
-	Signature    []byte            `json:"signature"`
+	// Models are the model identifiers the announcing provider serves, so a
+	// remote provider can be routed to by model exactly like a local one. They
+	// are signed with the rest of the announcement: an unsigned model list would
+	// let any relaying peer advertise capabilities on someone else's behalf.
+	Models    []string `json:"models,omitempty"`
+	Timestamp int64    `json:"timestamp"`
+	Signature []byte   `json:"signature"`
 }
 
 // signingBytes returns the canonical, deterministic, length-prefixed
@@ -78,6 +83,12 @@ func (a *ProviderAnnouncement) signingBytes() []byte {
 	buf = appendUint64(buf, a.PricePerUnit)
 	buf = appendUint64(buf, a.Available)
 	buf = appendLenPrefixed(buf, []byte(a.PeerID))
+	// The count is signed alongside the entries so no two distinct lists share a
+	// payload (an empty list and a single empty model would otherwise collide).
+	buf = appendUint64(buf, uint64(len(a.Models)))
+	for _, m := range a.Models {
+		buf = appendLenPrefixed(buf, []byte(m))
+	}
 	buf = appendUint64(buf, uint64(a.Timestamp))
 	return buf
 }

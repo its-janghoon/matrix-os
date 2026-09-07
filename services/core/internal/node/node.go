@@ -66,20 +66,7 @@ type Config struct {
 	Market struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"market"`
-	Inference struct {
-		// Addr is the TCP listen address for the inference gRPC API
-		// (matrix.inference.v1.InferenceService). It runs as a parallel gRPC
-		// server to the market API, gated by the same EnableACLs auth. Default
-		// 0.0.0.0:9092.
-		Addr string `yaml:"addr"`
-		// EchoProvider, when non-empty, registers the GPU-free deterministic echo
-		// backend for this provider ID at startup so a fresh node can fulfill
-		// inference jobs locally without a GPU or a model server. It is the local
-		// demo provider; a real deployment registers a local-http or provider-API
-		// backend instead. When empty, no backend is auto-registered and providers
-		// must be registered out of band via GetInference().Registry().
-		EchoProvider string `yaml:"echo_provider"`
-	} `yaml:"inference"`
+	Inference InferenceConfig `yaml:"inference"`
 	// Agent configures the external agent-deployment gRPC API
 	// (matrix.agent.v1.AgentService): it lets a client submit a WebAssembly
 	// module, has the node run it, persists the deployment so it survives a
@@ -325,6 +312,57 @@ type APIKeyConfig struct {
 // this network - and is not baked in as a nonzero default here; an operator who
 // wants a metered runtime sets agent.run_price and agent.run_price_recipient
 // explicitly, exactly as they set the protocol fee or provider emission.
+// InferenceConfig configures the node's LLM inference surface: the external
+// gRPC API and the backends that actually fulfill jobs.
+type InferenceConfig struct {
+	// Addr is the TCP listen address for the inference gRPC API
+	// (matrix.inference.v1.InferenceService). It runs as a parallel gRPC
+	// server to the market API, gated by the same EnableACLs auth. Default
+	// 0.0.0.0:9092.
+	Addr string `yaml:"addr"`
+	// EchoProvider, when non-empty, registers the GPU-free deterministic echo
+	// backend for this provider ID at startup so a fresh node can fulfill
+	// inference jobs locally without a GPU or a model server. It is the local
+	// demo provider; a real deployment declares Backends instead.
+	EchoProvider string `yaml:"echo_provider"`
+	// Backends are the inference backends this node serves, each registered on
+	// the order book as a provider and in the inference registry as the thing
+	// that fulfills its jobs.
+	//
+	// Before this existed, a real backend could only be installed in-process via
+	// GetInference().Registry(), so contributing a GPU box or spare provider-API
+	// credits meant writing Go and rebuilding the node. Everything a provider
+	// needs to join is now config.
+	Backends []InferenceBackendConfig `yaml:"backends"`
+}
+
+// InferenceBackendConfig declares one inference backend and the provider it is
+// registered as. An API key is never carried here: `api_key_env` names the
+// environment variable the concrete backend reads it from.
+type InferenceBackendConfig struct {
+	// ID is the provider ID this backend fulfills for. It is registered on the
+	// market order book under this ID, and it is what `--provider` names.
+	ID string `yaml:"id"`
+	// Kind selects the backend implementation: "echo", "openai" (any
+	// OpenAI-compatible vendor, including reselling spare credits) or
+	// "local-http" (a model server on this machine).
+	Kind string `yaml:"kind"`
+	// BaseURL is the endpoint for "openai" and "local-http". Empty on "openai"
+	// means the public OpenAI API.
+	BaseURL string `yaml:"base_url"`
+	// APIKeyEnv names the environment variable holding the upstream API key for
+	// "openai". Empty defaults to OPENAI_API_KEY.
+	APIKeyEnv string `yaml:"api_key_env"`
+	// Models are the model identifiers this backend serves. They are what a
+	// request naming a model is routed on; a backend that declares none can
+	// still be reached by naming its provider ID explicitly.
+	Models []string `yaml:"models"`
+	// Capacity is the advertised capacity in compute units. Must be > 0.
+	Capacity uint64 `yaml:"capacity"`
+	// PricePerUnit is the price per compute unit in base units. Must be > 0.
+	PricePerUnit uint64 `yaml:"price_per_unit"`
+}
+
 type AgentConfig struct {
 	// Addr is the TCP listen address for the agent gRPC API
 	// (matrix.agent.v1.AgentService). Default 0.0.0.0:9094, distinct from the
@@ -1128,6 +1166,10 @@ func (n *Node) Start() error {
 			n.config.Inference.EchoProvider, demoInferenceCapacity, demoInferencePrice)
 	}
 
+	if err := n.registerConfiguredInferenceBackends(inferenceRegistry); err != nil {
+		return err
+	}
+
 	var inferenceAuth *admin.Authenticator
 	if n.config.Security.EnableACLs {
 		inferenceAuth = n.adminServer.GetAuthenticator()
@@ -1576,6 +1618,74 @@ func (n *Node) GetBridge() *bridge.Bridge {
 // not a consensus-ordered operation; see bridge_watch.go for that boundary.
 func (n *Node) GetBridgeWatcher() *bridge.Watcher {
 	return n.bridgeWatcher
+}
+
+// registerConfiguredInferenceBackends installs every backend declared under
+// `inference.backends` and registers each as a provider on the order book. It is
+// the whole reason a provider can join without writing Go: a backend used to be
+// installable only in-process through GetInference().Registry().
+//
+// The two registrations are deliberately separate concerns and both are needed.
+// The inference registry answers "what fulfills a job for this provider", while
+// the order book answers "does this provider exist, what does it cost, and does
+// it have capacity to reserve" - an inference job is a market job. Registering
+// only the backend is the mistake the demo provider already made once, and it
+// failed at submit time with "market: provider not found".
+func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry) error {
+	seen := make(map[string]struct{}, len(n.config.Inference.Backends))
+	if n.config.Inference.EchoProvider != "" {
+		seen[n.config.Inference.EchoProvider] = struct{}{}
+	}
+
+	for i, b := range n.config.Inference.Backends {
+		if b.ID == "" {
+			return fmt.Errorf("inference.backends[%d]: id must not be empty", i)
+		}
+		if _, dup := seen[b.ID]; dup {
+			return fmt.Errorf("inference.backends[%d]: provider id %q is declared twice "+
+				"(or collides with inference.echo_provider)", i, b.ID)
+		}
+		seen[b.ID] = struct{}{}
+		if b.Capacity == 0 {
+			return fmt.Errorf("inference.backends[%d] (%s): capacity must be > 0", i, b.ID)
+		}
+		if b.PricePerUnit == 0 {
+			return fmt.Errorf("inference.backends[%d] (%s): price_per_unit must be > 0", i, b.ID)
+		}
+
+		// Build and install the backend first: a bad kind or a missing API key
+		// should stop the node before it advertises capacity it cannot serve.
+		if _, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
+			Kind:      inference.BackendKind(b.Kind),
+			BaseURL:   b.BaseURL,
+			APIKeyEnv: b.APIKeyEnv,
+		}); err != nil {
+			return fmt.Errorf("inference.backends[%d] (%s): %w", i, b.ID, err)
+		}
+
+		// Only when absent, for the same reason the echo provider checks:
+		// RegisterProvider resets Available to Capacity, so re-registering on
+		// every restart would forget the capacity pending jobs already hold.
+		if _, exists := n.market.GetProvider(b.ID); !exists {
+			if err := n.market.RegisterProvider(market.Provider{
+				ID:           b.ID,
+				Capacity:     b.Capacity,
+				PricePerUnit: b.PricePerUnit,
+				Models:       b.Models,
+			}); err != nil {
+				return fmt.Errorf("inference.backends[%d] (%s): register on the market: %w", i, b.ID, err)
+			}
+		}
+
+		stored, _ := n.market.GetProvider(b.ID)
+		models := "none (reachable by provider id only)"
+		if len(stored.Models) > 0 {
+			models = strings.Join(stored.Models, ", ")
+		}
+		fmt.Printf("Inference: registered %s backend for provider %q (capacity %d, price %d/unit, models: %s).\n",
+			b.Kind, b.ID, stored.Capacity, stored.PricePerUnit, models)
+	}
+	return nil
 }
 
 // RegisterInferenceAccount makes acct's signing key available to the node so it

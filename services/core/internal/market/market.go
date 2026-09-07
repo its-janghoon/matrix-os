@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,65 @@ type Provider struct {
 	Capacity     uint64 `json:"capacity"`
 	PricePerUnit uint64 `json:"price_per_unit"`
 	Available    uint64 `json:"available"`
+	// Models are the model identifiers this provider will serve, lowercased,
+	// de-duplicated and sorted by RegisterProvider. It is what a request naming
+	// a model is routed on: without it a caller has to know a provider ID, and
+	// an inference job's reported model is only ever an echo of what the backend
+	// answered with. Empty means the provider advertises no model and is
+	// therefore never selected by model, which is the right reading for a
+	// compute-only provider.
+	Models []string `json:"models,omitempty"`
+}
+
+// NormalizeModel puts a model identifier in the one form the order book stores
+// and matches on: trimmed and lowercased. Model names are case-insensitive
+// across the vendors we proxy, so "Llama-3.3-70B" and "llama-3.3-70b" must not
+// be two different routing targets.
+func NormalizeModel(model string) string {
+	return strings.ToLower(strings.TrimSpace(model))
+}
+
+// normalizeModels normalizes, de-duplicates and sorts a model list, dropping
+// blank entries. Sorting is what makes a persisted provider record and a
+// re-registration of the same provider byte-identical.
+func normalizeModels(models []string) []string {
+	if len(models) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(models))
+	out := make([]string, 0, len(models))
+	for _, m := range models {
+		m = NormalizeModel(m)
+		if m == "" {
+			continue
+		}
+		if _, dup := seen[m]; dup {
+			continue
+		}
+		seen[m] = struct{}{}
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ServesModel reports whether the provider advertises the given model. The
+// comparison is on the normalized form, so a caller may pass a model name in
+// whatever case it arrived in.
+func (p Provider) ServesModel(model string) bool {
+	model = NormalizeModel(model)
+	if model == "" {
+		return false
+	}
+	for _, m := range p.Models {
+		if m == model {
+			return true
+		}
+	}
+	return false
 }
 
 // Job represents a paid compute job submitted by a buyer against a provider.
@@ -236,6 +296,7 @@ func (m *Market) RegisterProvider(p Provider) error {
 	}
 
 	p.Available = p.Capacity
+	p.Models = normalizeModels(p.Models)
 
 	m.providersMu.Lock()
 	if err := m.persistProvider(p); err != nil {
@@ -536,6 +597,36 @@ func (m *Market) ListProviders() []Provider {
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
+}
+
+// ProvidersForModel returns the local providers that advertise model and still
+// have capacity to reserve, cheapest first and breaking ties on ID so the choice
+// is deterministic. An unknown model, or one no provider advertises, returns an
+// empty slice rather than an error: "nobody serves this" is a routing outcome,
+// not a failure of the order book.
+func (m *Market) ProvidersForModel(model string) []Provider {
+	model = NormalizeModel(model)
+	if model == "" {
+		return nil
+	}
+
+	m.providersMu.RLock()
+	defer m.providersMu.RUnlock()
+
+	out := make([]Provider, 0, len(m.providers))
+	for _, p := range m.providers {
+		if p.Available == 0 || !p.ServesModel(model) {
+			continue
+		}
+		out = append(out, p)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PricePerUnit != out[j].PricePerUnit {
+			return out[i].PricePerUnit < out[j].PricePerUnit
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 

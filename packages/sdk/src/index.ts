@@ -100,6 +100,12 @@ export interface Provider {
   origin: ProviderOrigin;
   /** libp2p peer id, empty for a local provider. */
   peerId: string;
+  /**
+   * Model identifiers this provider serves, lowercased and sorted by the node.
+   * This is what a request naming a model is routed on; a compute-only provider
+   * advertises none and is reachable only by naming its id.
+   */
+  models: string[];
 }
 
 export interface Job {
@@ -240,6 +246,11 @@ function big(value: unknown): bigint {
   return 0n;
 }
 
+function strList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((v): v is string => typeof v === 'string');
+}
+
 function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
@@ -252,6 +263,7 @@ function decodeProvider(raw: Record<string, unknown>): Provider {
     available: big(raw.available),
     origin: (str(raw.origin) || 'PROVIDER_ORIGIN_UNSPECIFIED') as ProviderOrigin,
     peerId: str(raw.peerId),
+    models: strList(raw.models),
   };
 }
 
@@ -370,17 +382,35 @@ export class MatrixClient {
 
   // --- MarketService ---------------------------------------------------------
 
-  async registerProvider(input: { id: string; capacity: bigint | number; pricePerUnit: bigint | number }): Promise<Provider> {
+  /**
+   * Registers a provider on the order book. Pass `models` for an
+   * inference-capable provider so a request naming one of those models can be
+   * routed here; omit it for compute-only capacity.
+   */
+  async registerProvider(input: {
+    id: string;
+    capacity: bigint | number;
+    pricePerUnit: bigint | number;
+    models?: string[];
+  }): Promise<Provider> {
     const out = await this.call(MARKET, 'RegisterProvider', {
       id: input.id,
       capacity: String(input.capacity),
       pricePerUnit: String(input.pricePerUnit),
+      ...(input.models && input.models.length > 0 ? { models: input.models } : {}),
     });
     return decodeProvider(record(out.provider));
   }
 
-  async listProviders(input: { includeRemote?: boolean } = {}): Promise<Provider[]> {
-    const out = await this.call(MARKET, 'ListProviders', { includeRemote: input.includeRemote ?? false });
+  /**
+   * Lists providers. Passing `model` returns only those advertising it that
+   * still have capacity to reserve, cheapest first.
+   */
+  async listProviders(input: { includeRemote?: boolean; model?: string } = {}): Promise<Provider[]> {
+    const out = await this.call(MARKET, 'ListProviders', {
+      includeRemote: input.includeRemote ?? false,
+      ...(input.model ? { model: input.model } : {}),
+    });
     return list(out.providers).map(decodeProvider);
   }
 
