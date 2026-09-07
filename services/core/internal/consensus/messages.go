@@ -138,6 +138,14 @@ var (
 	// ErrPrevHashMismatch is returned when a block does not link to the expected
 	// previous committed block hash.
 	ErrPrevHashMismatch = errors.New("consensus: prev-block-hash does not link to head")
+
+	// ErrNonceAlreadyUsed is returned when a sender submits a DIFFERENT transfer
+	// at a nonce it has already committed or already has pending. It is the
+	// consensus-path equivalent of token.ErrNonceMismatch, and it is an error
+	// rather than a silent no-op precisely because the caller is about to pay
+	// twice: an identical re-submission of the same signed transaction stays
+	// idempotent and does not produce this.
+	ErrNonceAlreadyUsed = errors.New("consensus: sender nonce already used")
 )
 
 // Block is an ordered batch of signed transactions proposed for one consensus

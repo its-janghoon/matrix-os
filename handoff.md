@@ -149,12 +149,78 @@ between them, each config naming only the *other* peer's validator id:
 - A's peer id is unchanged across a restart, and B stays joined through it.
 - `FundAccount` is refused on both, naming 2 validators.
 
-Still not verified: separate hosts, NAT traversal, and real latency or packet
-loss. Two processes on one machine is not two machines, and this note should not
-be read as if it were.
+### Then two separate hosts, one of them behind a NAT
 
-**Three defects this found that a green test suite did not.** All three were
-invisible to a single node, which is the point:
+The two-process run above was one machine, so it was redone with two containers
+on separate bridge networks: **distinct network namespaces, distinct hostnames,
+distinct routable IPs, distinct routing tables, and no loopback path between
+them** - `10.77.0.10` and `192.168.50.20`, with an ESTABLISHED TCP connection
+between the two addresses. Node B was then moved behind a **NAT**: the host
+MASQUERADEs its private LAN outbound and drops everything inbound, so A sees B's
+traffic arriving from the NAT address `10.77.0.1` and cannot initiate to B at
+all (verified: `nc` to B's address from A fails, while B reaches A fine).
+
+Verified there: identical genesis balances, a signed transfer submitted from
+either side of the NAT committing at the same index/nonce/block on both, and
+`FundAccount` refused on both naming 2 validators.
+
+Still not verified: two separate physical machines, real WAN latency, and packet
+loss. Latency and loss could not be injected at all - this kernel
+(`6.18.44-fc-v24`) has no loadable modules and no `sch_netem` built in, so `tc
+qdisc ... netem` fails with "Specified qdisc kind is unknown". Two containers
+sharing one kernel is not two machines, and this note should not be read as if
+it were.
+
+**Two more defects that only separate hosts exposed**, on top of the three
+below:
+
+**4. A restart permanently partitioned the network.** `node.Start` dialed
+`bootstrap_peers` exactly once and nothing ever re-dialed. Restarting A left
+**zero connections and neither node able to commit, indefinitely** - confirmed
+by four transfers that are absent from the chain - and the only cure was
+restarting B, the NATted node an operator can least easily reach, because B is
+the only side that *can* dial. The same one-shot dial also means two nodes
+started together never connect if the dialed-to one is not listening yet.
+Fixed by `Node.startBootstrapDialer`: one pass at startup, then a 10s
+`Connectedness` check per configured peer with a re-dial, logging transitions
+only. `p2p.Host.IsConnected` is the new primitive.
+
+A success line is now logged too. Before, only failure was logged, so a working
+join and "no bootstrap peers configured" looked identical - answering "did it
+connect?" meant reading `/proc/net/tcp` inside the container's namespace.
+
+**5. One nonce could authorize two payments.** This is the serious one. A client
+asks the node for its next nonce, signs, submits; if it submits again before the
+first commits, the node reports the *same* next nonce and the client signs a
+second, different transfer at it. Both used to commit and both moved money:
+observed as history index 10 and 11 **both carrying nonce 10**, with both
+recipients credited 50. A sender who meant to pay once paid twice.
+
+Nothing in the consensus path checked it. `Engine.Submit` dedups on
+sender+nonce+**signature**, so two different transfers at one nonce are two
+different keys; `verifyBlockForHeightLocked` checked that same key;
+`commitAndApply` checks affordability and nothing else. `token.Chain.Append`
+does enforce a strict nonce, but signed transfers settle through consensus now
+and never reach it.
+
+Fixed with a `sender:nonce` uniqueness set, tracked exactly the way
+`committedTxs` already is - in memory, rehydrated from the committed chain at
+startup, so it stays a function of committed state and every node computes the
+same one. `Submit` now refuses a *different* transfer at a spent or pending
+nonce with `ErrNonceAlreadyUsed` (an identical re-submission stays idempotent),
+and block verification refuses a block that reuses one, which closes the
+malicious-leader path. Reserved-recipient consensus operations are exempt on
+purpose: the engine mints them from three counters (`providerOfferNonce`,
+`setChangeNonce`, `bondNonce`) that all start at zero for the same sender, so
+their nonces collide by construction and mean nothing.
+
+Re-verified on the NATted pair: with B stopped so nothing can reach quorum, the
+first submission sits pending and the second is refused by name; bringing B back
+commits exactly one transfer and credits exactly one recipient. The three new
+tests in `internal/consensus/nonce_test.go` all fail if the check is removed.
+
+**Three defects the two-process run found that a green test suite did not.** All
+three were invisible to a single node, which is the point:
 
 1. **Nothing printed the node's peer id or listen addresses,** so a second node
    was impossible to configure: `bootstrap_peers` wants
@@ -453,11 +519,13 @@ of which is code. Note also what that watcher's own comment says: the unlock is
 a per-node relayer and is NOT consensus-ordered, which is correct for a solo
 operator and not for a validator set.
 
-**A two-process libp2p join is now verified; a two-*machine* one is not.** Two
-processes with separate data directories agreed on the chain in both directions
-over real libp2p TCP, and that run turned up three defects (see "What two
-running nodes verified" above). Separate hosts, NAT and real latency remain
-untested.
+**Separate hosts and a NAT are now verified; two separate machines are not.**
+Two containers with distinct network namespaces, IPs and routing tables - one of
+them behind a NAT that blocks all inbound - agreed on the chain in both
+directions, and that run turned up five defects in total (see "What two running
+nodes verified" and the NAT section above). Two separate physical machines, real
+WAN latency and packet loss remain untested; latency and loss cannot be injected
+in this kernel at all, which has no `sch_netem`.
 
 **Copies of byte layouts.** The node owns four canonical payloads now (the
 ed25519 transfer, the ed25519 run authorization, and the two EIP-712 digests).
@@ -593,10 +661,12 @@ Each of these cost real time this session.
 
 Known and accepted, not blocking:
 
-- **A two-machine libp2p join is still unverified.** Two separate processes on
-  one machine now agree on the chain in both directions over real libp2p TCP,
-  which is what caught the peer-identity and `FundAccount` defects. Separate
-  hosts, NAT traversal and real latency are still untested.
+- **A two-machine libp2p join is still unverified.** Separate network
+  namespaces with distinct IPs, one behind a NAT, now agree on the chain in both
+  directions - which is what caught the peer-identity, `FundAccount`, bootstrap
+  re-dial and nonce-reuse defects. Two separate physical machines, real WAN
+  latency and packet loss are still untested; `sch_netem` is absent from this
+  kernel, so latency and loss cannot be injected here at all.
 - **`apps/console`'s native Tauri bundle still won't build in this sandbox**
   (missing `webkit2gtk`/`gtk`). The frontend itself builds.
 - **Wallet/agent metering nonces are non-monotonic across restarts** but kept

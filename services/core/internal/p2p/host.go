@@ -10,6 +10,7 @@ import (
 	"github.com/libp2p/go-libp2p"
 	libp2pcrypto "github.com/libp2p/go-libp2p/core/crypto"
 	"github.com/libp2p/go-libp2p/core/host"
+	"github.com/libp2p/go-libp2p/core/network"
 	"github.com/libp2p/go-libp2p/core/peer"
 	"github.com/multiformats/go-multiaddr"
 )
@@ -144,6 +145,22 @@ func (h *Host) Connect(ctx context.Context, addr string) error {
 	}
 
 	return nil
+}
+
+// IsConnected reports whether the peer named by a /p2p/<id> multiaddr currently
+// has a live connection, so a caller can re-dial only the ones that dropped.
+// A malformed address is reported as an error, not as "not connected", because
+// re-dialling it forever would never help.
+func (h *Host) IsConnected(addr string) (bool, error) {
+	peerAddr, err := multiaddr.NewMultiaddr(addr)
+	if err != nil {
+		return false, fmt.Errorf("invalid peer address: %w", err)
+	}
+	info, err := peer.AddrInfoFromP2pAddr(peerAddr)
+	if err != nil {
+		return false, fmt.Errorf("failed to parse peer info: %w", err)
+	}
+	return h.host.Network().Connectedness(info.ID) == network.Connected, nil
 }
 
 // GetHost returns the underlying libp2p host

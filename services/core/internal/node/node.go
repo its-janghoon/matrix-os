@@ -1046,13 +1046,8 @@ func (n *Node) Start() error {
 	// operator's first two-node attempt hits this before anything else.
 	n.printPeerAddresses()
 
-	// Connect to bootstrap peers
-	for _, peerAddr := range n.config.Network.BootstrapPeers {
-		if err := n.p2pHost.Connect(n.ctx, peerAddr); err != nil {
-			// Log but don't fail on bootstrap peer connection errors
-			fmt.Printf("Warning: failed to connect to bootstrap peer %s: %v\n", peerAddr, err)
-		}
-	}
+	// Connect to bootstrap peers, and keep them connected.
+	n.startBootstrapDialer()
 
 	// Initialize admin server with authentication if enabled
 	var apiKeys []*admin.APIKey
@@ -1814,6 +1809,112 @@ func (n *Node) printPeerAddresses() {
 		}
 		fmt.Printf("  %s%s\n", full, note)
 	}
+}
+
+// bootstrapRedialInterval is how often a dropped bootstrap peer is re-dialled.
+//
+// It is short because the cost of a tick is one Connectedness lookup per
+// configured peer - no syscall, no dial - and the cost of being disconnected is
+// that the node contributes nothing to consensus.
+const bootstrapRedialInterval = 10 * time.Second
+
+// startBootstrapDialer dials every configured bootstrap peer and then keeps
+// re-dialling any that is not connected, for as long as the node runs.
+//
+// WHY A LOOP AND NOT ONE DIAL. This used to be a single pass at startup with a
+// warning on failure and nothing afterwards. On a network where every node is
+// long-lived and mutually dialable that is invisible. It is not invisible on a
+// real one:
+//
+//   - Two nodes started together: whichever comes up first fails its dial
+//     because the other is not listening yet, and never tries again.
+//   - A node RESTARTS: every peer that dialed it loses the connection and none
+//     of them re-dials, so the network silently stops making progress.
+//   - The peer that dropped is behind NAT: it is the only side that CAN dial,
+//     so nothing reconnects it, ever.
+//
+// Reproduced on two hosts with node B behind a NAT: restarting A left zero
+// connections and neither node able to commit a transfer, indefinitely, and the
+// only cure was restarting the NATted node - the box an operator can least
+// easily reach.
+//
+// Transitions are logged, not ticks, so a healthy node stays quiet and a
+// reconnect is visible. The first successful connection is logged too: silence
+// used to be the only signal that a join worked, which is indistinguishable
+// from having no bootstrap peers configured at all.
+func (n *Node) startBootstrapDialer() {
+	peers := n.config.Network.BootstrapPeers
+	if len(peers) == 0 {
+		return
+	}
+
+	// One entry per peer, so a flapping link or a permanently wrong address
+	// produces one line per state change rather than one per tick.
+	type peerState struct {
+		connected bool
+		warned    bool
+	}
+	state := make(map[string]*peerState, len(peers))
+	for _, addr := range peers {
+		state[addr] = &peerState{}
+	}
+
+	dial := func(addr string) {
+		st := state[addr]
+		live, err := n.p2pHost.IsConnected(addr)
+		if err != nil {
+			// A malformed address never becomes valid, so say so once and stop.
+			if !st.warned {
+				st.warned = true
+				fmt.Printf("Warning: bootstrap peer %s is not a usable address: %v\n", addr, err)
+			}
+			return
+		}
+		if live {
+			if !st.connected {
+				st.connected, st.warned = true, false
+				fmt.Printf("Connected to bootstrap peer %s\n", addr)
+			}
+			return
+		}
+		if st.connected {
+			st.connected = false
+			fmt.Printf("Lost the connection to bootstrap peer %s; re-dialling\n", addr)
+		}
+		if err := n.p2pHost.Connect(n.ctx, addr); err != nil {
+			// Keep the original warning, once per outage rather than per tick,
+			// and say that retrying is happening so silence afterwards is not
+			// read as having given up.
+			if !st.warned {
+				st.warned = true
+				fmt.Printf("Warning: failed to connect to bootstrap peer %s: %v\n  (re-dialling every %s)\n",
+					addr, err, bootstrapRedialInterval)
+			}
+			return
+		}
+		st.connected, st.warned = true, false
+		fmt.Printf("Connected to bootstrap peer %s\n", addr)
+	}
+
+	// One pass now, so a node that can join does so before it starts serving.
+	for _, addr := range peers {
+		dial(addr)
+	}
+
+	go func() {
+		ticker := time.NewTicker(bootstrapRedialInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-n.ctx.Done():
+				return
+			case <-ticker.C:
+				for _, addr := range peers {
+					dial(addr)
+				}
+			}
+		}
+	}()
 }
 
 // unpaidInferenceSweepInterval is how often expired payment requests are swept.

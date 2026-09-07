@@ -290,6 +290,35 @@ type Engine struct {
 	// can never be applied twice. It is the consensus analogue of token.Chain's
 	// per-sender nonce gate.
 	committedTxs map[string]struct{}
+	// committedNonces and mempoolNonces make a sender's NONCE unique, which
+	// committedTxs alone does not: its key includes the signature, so two
+	// DIFFERENT transfers signed at the same nonce are two different keys and
+	// both used to commit and both apply.
+	//
+	// That is not a theoretical hole. A client asks the node for its next nonce,
+	// signs, and submits; if it submits again before the first transfer commits,
+	// the node reports the same next nonce and the client signs a second transfer
+	// at it. Both were admitted, both were included, and both moved money - a
+	// user who meant to pay once paid twice. Reproduced on two hosts: two
+	// transfers landed at index 10 and 11 of the history, both carrying nonce 10,
+	// and both recipients were credited.
+	//
+	// The apply path could not catch it either: commitAndApply checks
+	// affordability and nothing else, and no nonce check exists anywhere in the
+	// consensus path. token.Chain.Append does enforce one, but signed transfers
+	// settle through consensus now and never reach it.
+	//
+	// Both sets are keyed sender:nonce and hold only ORDINARY value transfers.
+	// Reserved-recipient consensus operations are exempt because the engine mints
+	// them itself from three independent counters (providerOfferNonce,
+	// setChangeNonce, bondNonce) that all start at zero for the same sender, so
+	// their nonces legitimately collide and mean nothing.
+	//
+	// committedNonces is rehydrated from the committed chain at startup, exactly
+	// as committedTxs is, so it is derived only from committed state and every
+	// node computes the identical set.
+	committedNonces map[string]struct{}
+	mempoolNonces   map[string]struct{}
 	// appliedTxs records, per committed transaction dedup key, whether the
 	// transfer actually MOVED credits (true) or was deterministically skipped at
 	// apply time because the sender could not afford it (false). It lets a caller
@@ -441,6 +470,8 @@ func New(cfg Config) (*Engine, error) {
 		epochLength:        orUint64C(cfg.EpochLength, DefaultEpochLength),
 		approvedChanges:    make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:         make(map[string]struct{}),
+		committedNonces:    make(map[string]struct{}),
+		mempoolNonces:      make(map[string]struct{}),
 		committedTxs:       make(map[string]struct{}),
 		appliedTxs:         make(map[string]bool),
 		settleWaiters:      make(map[string][]chan struct{}),
@@ -583,6 +614,9 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.mu.Lock()
 		for i := range b.Txs {
 			e.committedTxs[mempoolKey(&b.Txs[i])] = struct{}{}
+			if nk, checked := nonceKey(&b.Txs[i]); checked {
+				e.committedNonces[nk] = struct{}{}
+			}
 		}
 		e.mu.Unlock()
 	}
@@ -670,6 +704,22 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	if _, ok := e.mempoolSet[key]; ok {
 		return nil
 	}
+	// The exact same signed transaction is idempotent (handled above). A
+	// DIFFERENT transfer at a nonce the sender has already spent, or has pending,
+	// is refused - loudly, so a client that would otherwise pay twice is told
+	// why instead of getting a silent success.
+	if nk, checked := nonceKey(tx); checked {
+		if _, spent := e.committedNonces[nk]; spent {
+			return fmt.Errorf("%w: sender %s has already committed a transfer at nonce %d",
+				ErrNonceAlreadyUsed, tx.SenderID(), tx.Nonce)
+		}
+		if _, pending := e.mempoolNonces[nk]; pending {
+			return fmt.Errorf("%w: sender %s already has a different transfer pending at nonce %d; "+
+				"wait for it to settle, then sign the next nonce",
+				ErrNonceAlreadyUsed, tx.SenderID(), tx.Nonce)
+		}
+		e.mempoolNonces[nk] = struct{}{}
+	}
 	e.mempoolSet[key] = struct{}{}
 	e.mempool = append(e.mempool, *tx)
 	return nil
@@ -679,6 +729,23 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 // signature hex. Two submissions of the same signed tx collapse to one.
 func mempoolKey(tx *token.Transaction) string {
 	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, tx.Signature)
+}
+
+// nonceKey identifies a sender's use of one nonce, and reports whether the
+// transaction is subject to the uniqueness rule at all.
+//
+// Only ordinary value transfers are. A reserved-recipient consensus operation -
+// a bond or withdrawal, a validator set change, a provider registry change - is
+// minted by the engine from its own counter, and the three counters all start at
+// zero for the same sender, so their nonces collide by construction and carry no
+// meaning. Holding them to a uniqueness rule would reject the engine's own
+// operations; each already has its own validation (verifyStakeTxLocked,
+// verifySetChangeLocked, verifyProviderChangeLocked) and its own dedup.
+func nonceKey(tx *token.Transaction) (string, bool) {
+	if IsStakeRecipient(tx.To) || IsSetChangeRecipient(tx.To) || IsProviderChangeRecipient(tx.To) {
+		return "", false
+	}
+	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
 }
 
 // driver is the round engine. It ticks at the propose interval; on each tick it
@@ -985,6 +1052,11 @@ func (e *Engine) dropSetChangesFromMempool(b *Block) {
 		k := mempoolKey(&e.mempool[i])
 		if _, remove := drop[k]; remove {
 			delete(e.mempoolSet, k)
+			// Dropped without committing, so the nonce was never spent: release
+			// the hold or the sender could never use that nonce again.
+			if nk, checked := nonceKey(&e.mempool[i]); checked {
+				delete(e.mempoolNonces, nk)
+			}
 			continue
 		}
 		kept = append(kept, e.mempool[i])
@@ -1161,6 +1233,7 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	// invalidates the whole block, so a malicious leader cannot smuggle a forged
 	// transfer past honest voters.
 	seenInBlock := make(map[string]struct{}, len(b.Txs))
+	seenNonceInBlock := make(map[string]struct{}, len(b.Txs))
 	for i := range b.Txs {
 		if err := b.Txs[i].Verify(); err != nil {
 			return fmt.Errorf("%w: tx %d: %v", ErrInvalidMessage, i, err)
@@ -1198,6 +1271,23 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 			return fmt.Errorf("%w: tx %d duplicated within block", ErrInvalidMessage, i)
 		}
 		seenInBlock[key] = struct{}{}
+		// Reject a block that reuses a sender's nonce, whether against an
+		// already-committed transfer or against another transfer in this same
+		// block. Submit refuses these at the door, so an honest leader cannot
+		// build such a block; this is what stops a MALICIOUS leader from
+		// smuggling two same-nonce transfers past honest validators, which is
+		// how one nonce came to authorize two payments.
+		if nk, checked := nonceKey(&b.Txs[i]); checked {
+			if _, spent := e.committedNonces[nk]; spent {
+				return fmt.Errorf("%w: tx %d reuses sender %s nonce %d (already committed)",
+					ErrInvalidMessage, i, b.Txs[i].SenderID(), b.Txs[i].Nonce)
+			}
+			if _, dup := seenNonceInBlock[nk]; dup {
+				return fmt.Errorf("%w: tx %d reuses sender %s nonce %d within the block",
+					ErrInvalidMessage, i, b.Txs[i].SenderID(), b.Txs[i].Nonce)
+			}
+			seenNonceInBlock[nk] = struct{}{}
+		}
 	}
 	return nil
 }
@@ -2575,6 +2665,16 @@ func (e *Engine) advanceHeight(committed *Block) {
 	for k := range committedKeys {
 		e.committedTxs[k] = struct{}{}
 	}
+	// A committed transfer's nonce is spent for good, applied or deterministically
+	// skipped: it is in the agreed ordered log either way, so every node marks it
+	// the same. A sender whose transfer was skipped as unaffordable signs the NEXT
+	// nonce to retry - WaitForSettlement reports applied=false, so it can tell.
+	for i := range committed.Txs {
+		if nk, checked := nonceKey(&committed.Txs[i]); checked {
+			e.committedNonces[nk] = struct{}{}
+			delete(e.mempoolNonces, nk)
+		}
+	}
 	kept := e.mempool[:0]
 	for i := range e.mempool {
 		k := mempoolKey(&e.mempool[i])
@@ -2676,6 +2776,9 @@ func (e *Engine) pruneStaleSetChangesLocked() {
 		if IsSetChangeRecipient(e.mempool[i].To) {
 			if err := e.verifySetChangeLocked(&e.mempool[i], e.height); err != nil {
 				delete(e.mempoolSet, mempoolKey(&e.mempool[i]))
+				if nk, checked := nonceKey(&e.mempool[i]); checked {
+					delete(e.mempoolNonces, nk)
+				}
 				continue
 			}
 		}
