@@ -20,6 +20,10 @@
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
 
+"@matrix-os/protocol@link:../protocol":
+  version "0.0.0"
+  uid ""
+
 "@oxc-project/types@=0.148.0":
   version "0.148.0"
   resolved "https://registry.yarnpkg.com/@oxc-project/types/-/types-0.148.0.tgz#811d188a2e1af35784461b8a0490e13a3d76837c"

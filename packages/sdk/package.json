@@ -33,6 +33,7 @@
     "@types/node": "^26.4.1",
     "typescript": "^5.9.2",
     "vite": "^8",
-    "vitest": "^5.0.0"
+    "vitest": "^5.0.0",
+    "@matrix-os/protocol": "link:../protocol"
   }
 }

@@ -527,19 +527,57 @@ nodes verified" and the NAT section above). Two separate physical machines, real
 WAN latency and packet loss remain untested; latency and loss cannot be injected
 in this kernel at all, which has no `sch_netem`.
 
-**Copies of byte layouts.** The node owns four canonical payloads now (the
-ed25519 transfer, the ed25519 run authorization, and the two EIP-712 digests).
-`packages/sdk` and `apps/web` each carry TypeScript copies of what they need,
-because there is no workspace linkage. Every copy is pinned to a shared golden
-vector, so a drift fails a test - but a workspace, or publishing the SDK, would
-remove a copy rather than guard it.
+**Copies of byte layouts: down from three to two, and the last one is pinned
+properly.** The node owns four canonical payloads (the ed25519 transfer, the
+ed25519 run authorization, and the two EIP-712 digests).
+
+`packages/protocol` is now the one TypeScript implementation of the two ed25519
+layouts. `apps/web/src/lib/wallet/signing.ts` is a re-export of it and has no
+implementation left. The blocker was real: a plain relative import across the app
+root type-checks and then fails the build, because Turbopack refuses to resolve
+a module outside its inferred root. What fixes it is a package boundary plus two
+lines of `next.config.js` (`transpilePackages` and `turbopack.root`).
+
+`packages/sdk` keeps its own implementation on purpose - it is PUBLISHED, so it
+cannot depend at runtime on a private workspace package, and it must stay
+dependency-free. Its copy is held byte-identical by a differential test over
+hundreds of randomized inputs (`src/layout-parity.test.ts`), including the edges
+a golden vector says nothing about: an empty recipient, a zero-length prevHash,
+a negative timestamp, multi-byte characters, and values above 2^53. Verified to
+fail on an injected one-bit drift.
+
+The EIP-712 digests in `apps/web/src/lib/wallet/eip712.ts` are still a separate
+copy; they depend on ethers, which the dependency-free shared package will not
+take. Moving them needs a keccak implementation in `packages/protocol` or a
+second package that may depend on ethers.
+
+**CI now runs the SDK and the contracts.** It ran neither. The SDK had tests and
+nothing executed them - which matters now that the layout-parity guard lives
+there - and the Solidity tests covering the mint threshold, the timelock and the
+bridge attestation threshold were never run either. A guard CI never runs is not
+a guard.
 
 **Client-streaming** is refused by `connectapi` by design; nothing needs it.
 
-**No multisig, and no vesting contract.** Unchanged from the proposal, and worth
-restating next to the wallet work: `MatrixToken.mint` is still `onlyOwner` with
-a single address, and that key can issue to the cap. Moving it to a Safe belongs
-before any mainnet deploy.
+**No vesting contract.** Still open.
+
+The multisig half is done. `MatrixToken.mint` was `onlyOwner`: one address could
+issue up to the 1e27 cap in a single transaction, sitting next to
+`WrappedMatrix.sol`, which already required a threshold of attestor signatures
+for exactly that reason. `Ownable` is removed rather than pointed at a Safe,
+because an owner pointed at a Safe is a deploy-time convention nothing enforces
+- the next deploy script or a later `transferOwnership` puts an EOA back in
+charge and the contract cannot tell.
+
+Every mint now needs a threshold of distinct registered minter signatures (the
+same construction and signature rules as `WrappedMatrix`) AND a 2-day timelock:
+`proposeMint` starts the clock, the proposal is on-chain and visible,
+`executeMint` lands it, and the same threshold can `cancelMint` during the
+delay. A proposal expires 7 days after becoming executable. The threshold,
+minter set, cap and delay are all immutable with no changing authority, so
+altering any of them means redeploying. `scripts/deploy.ts` requires `MINTERS` on
+mainnet or sepolia and refuses a threshold below 2 or a set smaller than 2: a
+1-of-1 set satisfies the m-of-n code and is exactly the key this replaced.
 
 ## Product decisions made this session
 

@@ -81,3 +81,52 @@ jobs:
     - name: Build
       working-directory: apps/web
       run: corepack yarn build
+
+  sdk:
+    name: SDK (packages/sdk)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    - name: Enable corepack
+      run: corepack enable
+    - name: Install dependencies
+      working-directory: packages/sdk
+      run: corepack yarn install --frozen-lockfile
+    # This job did not exist. The SDK had tests and nothing ran them, which is
+    # why it matters now: its published signing layouts are a SECOND copy of the
+    # canonical ones in packages/protocol, held byte-identical by the
+    # differential test in src/layout-parity.test.ts. A guard CI never runs is
+    # not a guard.
+    - name: Typecheck
+      working-directory: packages/sdk
+      run: corepack yarn typecheck
+    - name: Test
+      working-directory: packages/sdk
+      run: corepack yarn test
+    - name: Build
+      working-directory: packages/sdk
+      run: corepack yarn build
+
+  contracts:
+    name: Contracts (contracts)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '22'
+    # Also new. The Solidity tests cover the mint threshold and timelock that
+    # replaced MatrixToken's single owner key, plus the bridge attestation
+    # threshold, and nothing in CI was running any of them.
+    - name: Install dependencies
+      working-directory: contracts
+      run: npm ci
+    - name: Compile
+      working-directory: contracts
+      run: npx hardhat compile
+    - name: Test
+      working-directory: contracts
+      run: npx hardhat test

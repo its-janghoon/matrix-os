@@ -19,7 +19,8 @@
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "react-icons": "^5.5.0",
-    "sonner": "^2.0.3"
+    "sonner": "^2.0.3",
+    "@matrix-os/protocol": "link:../../packages/protocol"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
