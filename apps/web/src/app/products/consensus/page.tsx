@@ -3,9 +3,9 @@
 import { Button } from '@/components/Button';
 import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
-import { ConsensusRound } from '@/components/diagrams';
+import { ConsensusRound, ValidatorSetChange } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
-import { FiArrowRight, FiBookOpen, FiGlobe, FiLayers, FiZap } from 'react-icons/fi';
+import { FiArrowRight, FiBookOpen, FiGlobe, FiLayers, FiShield, FiUsers, FiZap } from 'react-icons/fi';
 
 export default function ConsensusPage() {
   return (
@@ -63,6 +63,60 @@ export default function ConsensusPage() {
                   A node that missed a block fetches it from a peer with the precommit quorum that committed it
                 </CheckItem>
                 <CheckItem>Both compute and inference settle here by default</CheckItem>
+              </ul>
+            </Card>
+          </div>
+        </Section>
+
+        {/* The validator set is chain state, which the page did not mention while
+            it still was not. */}
+        <Section>
+          <div className='mx-auto max-w-3xl text-center'>
+            <Eyebrow>Membership</Eyebrow>
+            <h2 className='mt-4 text-3xl font-bold tracking-tight sm:text-4xl'>
+              The validator set is part of the chain
+            </h2>
+            <p className='mt-4 text-lg text-grayscale-300'>
+              Admitting or ejecting a validator is a transaction in a committed block, not a coordinated restart.
+            </p>
+          </div>
+
+          <ValidatorSetChange className='mt-10' />
+
+          <div className='mt-4 grid grid-cols-1 gap-6 md:grid-cols-2'>
+            <Card>
+              <div className='flex items-center gap-3'>
+                <IconBadge icon={FiUsers} />
+                <h3 className='text-xl font-semibold'>A change needs a quorum of operators</h3>
+              </div>
+              <ul className='mt-6 space-y-3'>
+                <CheckItem>
+                  Each operator lists the changes they will vote for; a node prevotes nil on anything else
+                </CheckItem>
+                <CheckItem>
+                  So one validator cannot propose removing all the others and have it wave through
+                </CheckItem>
+                <CheckItem>
+                  A committed change takes effect at an epoch boundary, so every node switches sets at the same height
+                </CheckItem>
+                <CheckItem>The set the chain arrived at survives a restart; config seeds genesis only</CheckItem>
+              </ul>
+            </Card>
+
+            <Card>
+              <div className='flex items-center gap-3'>
+                <IconBadge icon={FiShield} tone='secondary' />
+                <h3 className='text-xl font-semibold'>Equivocation is provable, so it is punished</h3>
+              </div>
+              <ul className='mt-6 space-y-3'>
+                <CheckItem>
+                  Two votes for different blocks at one height, round and phase, both signed by the offender
+                </CheckItem>
+                <CheckItem>Every node verifies the proof itself rather than trusting the peer that relayed it</CheckItem>
+                <CheckItem>The network votes to eject the offender with no config entry needed</CheckItem>
+                <CheckItem>
+                  There is no stake yet, so an ejected validator loses its place and nothing else
+                </CheckItem>
               </ul>
             </Card>
           </div>

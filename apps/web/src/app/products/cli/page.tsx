@@ -62,8 +62,12 @@ export default function CliPage() {
                 <ul className='mt-6 space-y-3'>
                   <CheckItem>Check node status and health over the gRPC market API</CheckItem>
                   <CheckItem>Register providers and submit, complete, and cancel jobs</CheckItem>
-                  <CheckItem>Read balances and the committed token chain</CheckItem>
+                  <CheckItem>Submit an LLM inference job and read its completion</CheckItem>
+                  <CheckItem>Read balances, and the chain of signed transfers</CheckItem>
                   <CheckItem>Sign and submit native MATRIX transfers from a local ed25519 wallet</CheckItem>
+                  <CheckItem>
+                    Fund an account from the genesis reward pool, or run the whole loop with one quickstart command
+                  </CheckItem>
                 </ul>
                 <div className='mt-6'>
                   <Button href='/docs/cli' variant='secondary' size='md'>
