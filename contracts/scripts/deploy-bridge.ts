@@ -38,8 +38,14 @@ async function main() {
   console.log("  attestors:", attestors);
   console.log("  threshold:", threshold);
 
+  // MINT_CAP is an optional deploy-time policy cap in 18-decimal base units;
+  // unset (or 0) selects the contract's documented DEFAULT_MINT_CAP.
+  const rawCap = process.env.MINT_CAP;
+  const mintCap = rawCap && rawCap.trim() !== "" ? BigInt(rawCap.trim()) : 0n;
+  console.log("  mintCap (0=default):", mintCap.toString());
+
   const factory = await ethers.getContractFactory("WrappedMatrix");
-  const wmatrix = await factory.deploy(attestors, threshold);
+  const wmatrix = await factory.deploy(attestors, threshold, mintCap);
   await wmatrix.waitForDeployment();
 
   const address = await wmatrix.getAddress();
@@ -49,6 +55,7 @@ async function main() {
   console.log("  decimals:          ", await wmatrix.decimals());
   console.log("  attestorCount:     ", (await wmatrix.attestorCount()).toString());
   console.log("  threshold:         ", (await wmatrix.threshold()).toString());
+  console.log("  mintCap:           ", (await wmatrix.mintCap()).toString());
   console.log("  ERC20_PER_NATIVE:  ", (await wmatrix.ERC20_PER_NATIVE_UNIT()).toString());
   console.log("  initial totalSupply:", (await wmatrix.totalSupply()).toString());
   console.log(

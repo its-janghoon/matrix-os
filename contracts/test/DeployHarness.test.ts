@@ -43,7 +43,10 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
     expect(result.attestorCount).to.equal(String(cfg.attestors.length));
     expect(result.args.threshold).to.equal(cfg.threshold);
     expect(result.erc20PerNativeUnit).to.equal(ERC20_PER_NATIVE_UNIT.toString());
-    // Bridge token starts with zero supply — every token is minted via attestation.
+    // With no MINT_CAP set, the deploy resolves cap_ == 0 to the contract's
+    // documented DEFAULT_MINT_CAP (1e27, the full wrapped supply ceiling).
+    expect(result.mintCap).to.equal((10n ** 27n).toString());
+    // Bridge token starts with zero supply, every token is minted via attestation.
     expect(result.totalSupply).to.equal("0");
 
     // The harness must report deployment gas.
@@ -61,7 +64,7 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
     // Deploy a fresh instance with a single known attestor so we can sign an
     // attestation locally and drive the real mint code path.
     const attestor = ethers.Wallet.createRandom();
-    const cfg = { attestors: [attestor.address], threshold: 1 };
+    const cfg = { attestors: [attestor.address], threshold: 1, mintCap: 0n };
     const result = await deployWrappedMatrix(cfg);
 
     const factory = await ethers.getContractFactory("WrappedMatrix");

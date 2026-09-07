@@ -411,3 +411,40 @@ func (s *Service) FundAccount(ctx context.Context, req *marketv1.FundAccountRequ
 	}
 	return &marketv1.FundAccountResponse{Account: req.GetAccount(), Balance: bal}, nil
 }
+
+// GetBridgeReconciliation returns the lock-and-mint bridge backing snapshot,
+// making the reconciliation report a node endpoint rather than a manual query.
+//
+// It is a read of the node's own escrow accounting: the reconciler verifies the
+// on-ledger escrow balance equals the (locked - unlocked) accounting and returns
+// the snapshot stamped with the committed block height it reflects, so the
+// report is reproducible from public data. When the node has no bridge
+// configured (bridge.contract unset, the default) the reconciler is nil and this
+// returns FailedPrecondition rather than nil-panicking; when the escrow balance
+// and the accounting disagree the reconciler errors and this returns Internal,
+// since that signals a backing-invariant violation, not a client mistake. It is
+// gated behind the same auth as the other surfaces by the server interceptors.
+func (s *Service) GetBridgeReconciliation(ctx context.Context, req *marketv1.GetBridgeReconciliationRequest) (*marketv1.GetBridgeReconciliationResponse, error) {
+	if s.reconciler == nil {
+		return nil, status.Error(codes.FailedPrecondition,
+			"bridge reconciliation is not available: no bridge is configured on this node (set bridge.contract)")
+	}
+	snap, err := s.reconciler.Reconcile()
+	if err != nil {
+		// A reconciliation error is an escrow/accounting mismatch: a backing
+		// invariant broke, which is a server-side fault, not a bad request.
+		return nil, status.Error(codes.Internal, err.Error())
+	}
+	outstandingERC20 := "0"
+	if snap.OutstandingERC20 != nil {
+		outstandingERC20 = snap.OutstandingERC20.String()
+	}
+	return &marketv1.GetBridgeReconciliationResponse{
+		LockedNative:      snap.LockedNative,
+		UnlockedNative:    snap.UnlockedNative,
+		OutstandingNative: snap.OutstandingNative,
+		EscrowBalance:     snap.EscrowBalance,
+		OutstandingErc20:  outstandingERC20,
+		BlockHeight:       snap.BlockHeight,
+	}, nil
+}

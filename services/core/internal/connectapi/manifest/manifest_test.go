@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/ecirlabs/matrix-core/internal/connectapi/manifest"
+	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 )
@@ -20,9 +21,14 @@ const manifestPath = "../../../../../packages/sdk/src/rpc-manifest.json"
 // notices - the exact way the console ended up with a client for a protocol the
 // daemon did not serve.
 func TestCheckedInManifestIsCurrent(t *testing.T) {
+	// Build from the SAME service set cmd/rpcmanifest serves (market, inference,
+	// and agent), so this guard matches what actually gets written to the SDK
+	// manifest. Leaving a service out here would let the checked-in file drift
+	// for that service undetected.
 	want, err := manifest.JSON(manifest.Build(
 		&marketv1.MarketService_ServiceDesc,
 		&inferencev1.InferenceService_ServiceDesc,
+		&agentv1.AgentService_ServiceDesc,
 	))
 	if err != nil {
 		t.Fatalf("render manifest: %v", err)
@@ -41,14 +47,20 @@ func TestCheckedInManifestIsCurrent(t *testing.T) {
 }
 
 func TestBuildIsSortedAndStable(t *testing.T) {
-	m := manifest.Build(&marketv1.MarketService_ServiceDesc, &inferencev1.InferenceService_ServiceDesc)
-	if len(m.Services) != 2 {
-		t.Fatalf("got %d services, want 2", len(m.Services))
+	m := manifest.Build(
+		&marketv1.MarketService_ServiceDesc,
+		&inferencev1.InferenceService_ServiceDesc,
+		&agentv1.AgentService_ServiceDesc,
+	)
+	if len(m.Services) != 3 {
+		t.Fatalf("got %d services, want 3", len(m.Services))
 	}
 	// Services and methods are sorted, so the JSON does not churn between runs
 	// and a diff means a real change.
-	if m.Services[0].Name > m.Services[1].Name {
-		t.Fatal("services are not sorted by name")
+	for i := 1; i < len(m.Services); i++ {
+		if m.Services[i-1].Name > m.Services[i].Name {
+			t.Fatal("services are not sorted by name")
+		}
 	}
 	for _, s := range m.Services {
 		for i := 1; i < len(s.Methods); i++ {

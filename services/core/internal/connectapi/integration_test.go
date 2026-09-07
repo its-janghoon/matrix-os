@@ -136,3 +136,85 @@ func quote(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)
 }
+
+// stubReconciler is a marketapi.Reconciler returning a fixed snapshot, so the
+// browser-facing reconciliation path can be exercised over real HTTP without a
+// bridge.
+type stubReconciler struct{ snap *marketapi.BridgeSnapshot }
+
+func (s stubReconciler) Reconcile() (*marketapi.BridgeSnapshot, error) { return s.snap, nil }
+
+// TestBrowserCanReadBridgeReconciliation proves the reconciliation report is
+// reachable over the same Connect JSON path a browser uses: the response carries
+// the snapshot with uint64 fields as strings (protojson) and OutstandingERC20 as
+// a decimal string, so a JS client reads the big wrapped-supply value losslessly.
+func TestBrowserCanReadBridgeReconciliation(t *testing.T) {
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("kv.New: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	mkt, err := market.NewMarket(store)
+	if err != nil {
+		t.Fatalf("market.NewMarket: %v", err)
+	}
+	chain := token.NewChain(store)
+	settled := token.NewSettledLedger(mkt.Ledger(), chain)
+
+	svc, err := marketapi.NewService(mkt, settled, chain, nil, nil)
+	if err != nil {
+		t.Fatalf("marketapi.NewService: %v", err)
+	}
+	wantERC20 := token.NativeToERC20(250)
+	svc.SetReconciler(stubReconciler{snap: &marketapi.BridgeSnapshot{
+		LockedNative:      1_000,
+		UnlockedNative:    750,
+		OutstandingNative: 250,
+		EscrowBalance:     250,
+		OutstandingERC20:  wantERC20,
+		BlockHeight:       99,
+	}})
+
+	handler, err := connectapi.NewHandler(connectapi.Config{
+		Bindings:       []connectapi.Binding{{Desc: &marketv1.MarketService_ServiceDesc, Impl: svc}},
+		AllowedOrigins: []string{"*"},
+	})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	req, err := http.NewRequest(http.MethodPost,
+		srv.URL+"/matrix.market.v1.MarketService/GetBridgeReconciliation", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := srv.Client().Do(req)
+	if err != nil {
+		t.Fatalf("GetBridgeReconciliation: %v", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d body %s", resp.StatusCode, raw)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		t.Fatalf("decode %s: %v", raw, err)
+	}
+	if got, _ := out["outstandingNative"].(string); got != "250" {
+		t.Fatalf("outstandingNative = %q, want \"250\": %v", got, out)
+	}
+	if got, _ := out["escrowBalance"].(string); got != "250" {
+		t.Fatalf("escrowBalance = %q, want \"250\"", got)
+	}
+	if got, _ := out["outstandingErc20"].(string); got != wantERC20.String() {
+		t.Fatalf("outstandingErc20 = %q, want %q", got, wantERC20.String())
+	}
+	if got, _ := out["blockHeight"].(string); got != "99" {
+		t.Fatalf("blockHeight = %q, want \"99\"", got)
+	}
+}

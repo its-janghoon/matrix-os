@@ -1014,6 +1014,30 @@ func (n *Node) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to build the transfer settlement coordinator: %w", err)
 	}
+
+	// Construct the lock-and-mint bridge (opt-in; nil when bridge.contract is
+	// unset) BEFORE the market API server so the reconciliation report can be a
+	// node endpoint. The bridge is built over this node's own market ledger and
+	// KV store, so its escrow accounting is the same ledger the rest of the node
+	// settles on and Bridge.Reconcile is a real 1:1 backing check. The
+	// burn->unlock watcher for the same bridge is wired further down (it needs
+	// the node context and runs in the background); only the bridge object itself
+	// is needed here to back GetBridgeReconciliation.
+	nodeBridge, err := newConfiguredBridge(n.market.Ledger(), n.kvStore, n.config.Bridge)
+	if err != nil {
+		return fmt.Errorf("failed to initialize bridge: %w", err)
+	}
+	n.bridge = nodeBridge
+	if nodeBridge != nil {
+		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d.\n",
+			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID)
+	}
+	// The reconciler is nil when no bridge is configured, so
+	// GetBridgeReconciliation reports FailedPrecondition rather than an empty
+	// snapshot. When present it stamps the committed consensus height onto the
+	// snapshot so the report is anchored to a stated, reproducible point.
+	bridgeReconciler := newBridgeReconciler(nodeBridge, n.consensus)
+
 	marketServer, err := marketapi.NewServer(marketapi.Config{
 		Addr:            n.config.Market.Addr,
 		Auth:            marketAuth,
@@ -1024,6 +1048,15 @@ func (n *Node) Start() error {
 		Funder:          n.treasury,
 		Settler:         settlementCoordinator,
 		TransferSettler: transferCoordinator,
+		// Reconciler is a marketapi.Reconciler interface value. Passing a typed
+		// nil *bridgeReconciler would be a non-nil interface, defeating the
+		// "no bridge -> FailedPrecondition" check, so only set it when present.
+		Reconciler: func() marketapi.Reconciler {
+			if bridgeReconciler == nil {
+				return nil
+			}
+			return bridgeReconciler
+		}(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)
@@ -1196,21 +1229,23 @@ func (n *Node) Start() error {
 		}
 	}
 
-	// Initialize the lock-and-mint bridge subsystem over this node's own market
-	// ledger and KV store, and (when configured) run the always-on burn->unlock
-	// watcher against it. This is the piece that makes the bridge a matrixd
-	// subsystem rather than an out-of-process demo: because the Bridge here holds
-	// BOTH halves on one ledger (Lock moves native into bridge/escrow, the
+	// Run the always-on burn->unlock watcher against the node's bridge (when
+	// configured). The Bridge itself was constructed earlier (before the market
+	// API server) so its reconciliation report could be exposed as a node
+	// endpoint; here we add the relayer half. This is what makes the bridge a
+	// matrixd subsystem rather than an out-of-process demo: because the Bridge
+	// holds BOTH halves on one ledger (Lock moves native into bridge/escrow, the
 	// watcher's ProcessBurn releases it back out), escrow accounting is coherent
 	// and Bridge.Reconcile is a real invariant check. cmd/bridge-watch, by
 	// contrast, applies burns to a throwaway ledger it seeds, so it can only ever
 	// demonstrate the decode+unlock step.
 	//
 	// The whole subsystem is opt-in and off by default: with no bridge.contract
-	// configured, newConfiguredBridge returns nil and the node runs exactly as it
-	// did before this wiring existed. A config that enables bridge.watch without
-	// a contract, chain id, or rpc_url is rejected here rather than silently
-	// ignored, so a deployment that believes it is relaying never comes up quiet.
+	// configured, newConfiguredBridge returned nil above and the node runs
+	// exactly as it did before this wiring existed. A config that enables
+	// bridge.watch without a contract, chain id, or rpc_url is rejected here
+	// rather than silently ignored, so a deployment that believes it is relaying
+	// never comes up quiet.
 	//
 	// AUTHORITY (honest, unchanged by this wiring): the watcher is a per-node
 	// polling relayer. Running it inside matrixd does not make the unlock
@@ -1218,16 +1253,6 @@ func (n *Node) Start() error {
 	// whichever node runs the watcher. That is the correct model for a solo/dev
 	// node or a single operator-run relayer node; consensus-ordered unlock is a
 	// separate design change (see bridge_watch.go).
-	nodeBridge, err := newConfiguredBridge(n.market.Ledger(), n.kvStore, n.config.Bridge)
-	if err != nil {
-		return fmt.Errorf("failed to initialize bridge: %w", err)
-	}
-	n.bridge = nodeBridge
-	if nodeBridge != nil {
-		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d.\n",
-			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID)
-	}
-
 	ethClient, err := dialBridgeClient(n.config.Bridge)
 	if err != nil {
 		return fmt.Errorf("failed to initialize bridge watcher: %w", err)

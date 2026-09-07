@@ -153,6 +153,31 @@ export interface Balance {
   balance: bigint;
 }
 
+/**
+ * A lock-and-mint bridge backing snapshot: proof that the native MATRIX held in
+ * escrow equals the wrapped supply the Ethereum WrappedMatrix contract should
+ * show. It is a read of the node's own escrow accounting at a stated committed
+ * height, so it is reproducible from public data rather than a manual query.
+ */
+export interface BridgeReconciliation {
+  /** Cumulative native base units ever locked into escrow. */
+  lockedNative: bigint;
+  /** Cumulative native base units ever unlocked (released on a processed burn). */
+  unlockedNative: bigint;
+  /** Native base units currently in escrow (lockedNative - unlockedNative). */
+  outstandingNative: bigint;
+  /** The on-ledger bridge escrow balance; equals outstandingNative or the node errors. */
+  escrowBalance: bigint;
+  /**
+   * outstandingNative converted to ERC-20 base units (18 decimals): the wrapped
+   * total supply the Ethereum contract must show. It is a bigint because the
+   * value (up to 1e27) does not fit a 64-bit integer.
+   */
+  outstandingErc20: bigint;
+  /** The committed consensus block height the snapshot reflects. */
+  blockHeight: bigint;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
@@ -481,6 +506,28 @@ export class MatrixClient {
       amount: String(input.amount),
     });
     return { account: str(out.account), balance: big(out.balance) };
+  }
+
+  /**
+   * Fetch the lock-and-mint bridge reconciliation snapshot: the native MATRIX
+   * locked/unlocked/outstanding in escrow, the escrow balance, the equivalent
+   * wrapped ERC-20 supply, and the committed height the snapshot reflects.
+   *
+   * It is a read-only report, reproducible from public data. A node with no
+   * bridge configured refuses it with a `failed_precondition` MatrixError; an
+   * escrow/accounting mismatch (a broken 1:1 backing invariant) surfaces as an
+   * `internal` MatrixError rather than a snapshot.
+   */
+  async bridgeReconciliation(): Promise<BridgeReconciliation> {
+    const out = await this.call(MARKET, 'GetBridgeReconciliation', {});
+    return {
+      lockedNative: big(out.lockedNative),
+      unlockedNative: big(out.unlockedNative),
+      outstandingNative: big(out.outstandingNative),
+      escrowBalance: big(out.escrowBalance),
+      outstandingErc20: big(out.outstandingErc20),
+      blockHeight: big(out.blockHeight),
+    };
   }
 
   // --- InferenceService ------------------------------------------------------

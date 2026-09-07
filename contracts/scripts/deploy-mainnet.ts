@@ -31,6 +31,15 @@ export interface DeployConfig {
   attestors: string[];
   /** Distinct signatures required to authorize a mint (the m in m-of-n). */
   threshold: number;
+  /**
+   * Maximum total wrapped supply that may ever be minted (18-decimal base
+   * units). It is a deploy-time policy knob: 0n selects the contract's
+   * documented DEFAULT_MINT_CAP (1e27, the full wrapped supply ceiling), and a
+   * tighter value bounds minting below the whole supply per the token-and-bridge
+   * policy proposal. It is never a hardcoded literal here; it comes from the
+   * MINT_CAP env var and defaults to 0n (the contract default).
+   */
+  mintCap: bigint;
 }
 
 export interface DeployResult {
@@ -41,7 +50,9 @@ export interface DeployResult {
   args: {
     attestors: string[];
     threshold: number;
+    mintCap: string;
   };
+  mintCap: string;
   block: number | null;
   deploymentGas: string | null;
   name: string;
@@ -68,6 +79,23 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
 
   if (!Number.isInteger(threshold) || threshold < 1) {
     throw new Error(`THRESHOLD must be a positive integer (got '${process.env.THRESHOLD}')`);
+  }
+
+  // MINT_CAP is the deploy-time policy cap in 18-decimal base units. Unset (or
+  // "0") selects the contract's documented DEFAULT_MINT_CAP; any other value
+  // must be a positive integer that the contract further bounds at <= its
+  // default (the full wrapped supply ceiling).
+  const rawCap = process.env.MINT_CAP;
+  let mintCap = 0n;
+  if (rawCap && rawCap.trim() !== "") {
+    try {
+      mintCap = BigInt(rawCap.trim());
+    } catch {
+      throw new Error(`MINT_CAP must be an integer number of base units (got '${rawCap}')`);
+    }
+    if (mintCap < 0n) {
+      throw new Error(`MINT_CAP must not be negative (got '${rawCap}')`);
+    }
   }
 
   if (isReal && !process.env.PRIVATE_KEY) {
@@ -109,7 +137,7 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
     );
   }
 
-  return { attestors, threshold };
+  return { attestors, threshold, mintCap };
 }
 
 /**
@@ -124,7 +152,7 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
   const factory = await ethers.getContractFactory("WrappedMatrix");
 
   // Report the estimated deployment gas before broadcasting.
-  const deployTx = await factory.getDeployTransaction(cfg.attestors, cfg.threshold);
+  const deployTx = await factory.getDeployTransaction(cfg.attestors, cfg.threshold, cfg.mintCap);
   let deploymentGas: string | null = null;
   try {
     deploymentGas = (await ethers.provider.estimateGas(deployTx)).toString();
@@ -133,7 +161,7 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
     deploymentGas = null;
   }
 
-  const wmatrix = (await factory.deploy(cfg.attestors, cfg.threshold)) as unknown as WrappedMatrix;
+  const wmatrix = (await factory.deploy(cfg.attestors, cfg.threshold, cfg.mintCap)) as unknown as WrappedMatrix;
   await wmatrix.waitForDeployment();
 
   const address = await wmatrix.getAddress();
@@ -144,7 +172,11 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
     network: network.name,
     chainId: net.chainId.toString(),
     deployer: deployer.address,
-    args: { attestors: cfg.attestors, threshold: cfg.threshold },
+    args: {
+      attestors: cfg.attestors,
+      threshold: cfg.threshold,
+      mintCap: cfg.mintCap.toString(),
+    },
     block: deployReceipt?.blockNumber ?? null,
     deploymentGas: deployReceipt?.gasUsed?.toString() ?? deploymentGas,
     name: await wmatrix.name(),
@@ -152,6 +184,9 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
     decimals: Number(await wmatrix.decimals()),
     attestorCount: (await wmatrix.attestorCount()).toString(),
     erc20PerNativeUnit: (await wmatrix.ERC20_PER_NATIVE_UNIT()).toString(),
+    // The resolved on-chain cap (the contract turns 0 into DEFAULT_MINT_CAP), so
+    // the record reflects what will actually be enforced, not the raw input.
+    mintCap: (await wmatrix.mintCap()).toString(),
     totalSupply: (await wmatrix.totalSupply()).toString(),
   };
 }
@@ -174,6 +209,7 @@ async function main() {
   console.log("  deployer:  ", deployer.address);
   console.log("  attestors: ", cfg.attestors);
   console.log("  threshold: ", cfg.threshold);
+  console.log("  mintCap:   ", cfg.mintCap === 0n ? "0 (contract DEFAULT_MINT_CAP)" : cfg.mintCap.toString());
 
   const result = await deployWrappedMatrix(cfg);
 
@@ -183,6 +219,7 @@ async function main() {
   console.log("  decimals:           ", result.decimals);
   console.log("  attestorCount:      ", result.attestorCount);
   console.log("  threshold:          ", result.args.threshold);
+  console.log("  mintCap:            ", result.mintCap);
   console.log("  ERC20_PER_NATIVE:   ", result.erc20PerNativeUnit);
   console.log("  initial totalSupply:", result.totalSupply);
   console.log("  chainId:            ", result.chainId);
@@ -195,14 +232,16 @@ async function main() {
   // Emit the exact verify command for the recorded constructor args.
   const argsCsv = result.args.attestors.join(",");
   console.log("\nTo verify on Etherscan (ETHERSCAN_API_KEY must be set):");
-  console.log(`  ATTESTORS='${argsCsv}' THRESHOLD=${result.args.threshold} \\`);
+  console.log(
+    `  ATTESTORS='${argsCsv}' THRESHOLD=${result.args.threshold} MINT_CAP=${result.mintCap} \\`
+  );
   console.log(
     `    npx hardhat run scripts/verify-mainnet.ts --network ${result.network}`
   );
   console.log("  # or directly:");
   console.log(
     `  npx hardhat verify --network ${result.network} ${result.address} ` +
-      `'[${result.args.attestors.map((a) => `"${a}"`).join(",")}]' ${result.args.threshold}`
+      `'[${result.args.attestors.map((a) => `"${a}"`).join(",")}]' ${result.args.threshold} ${result.mintCap}`
   );
 
   console.log(

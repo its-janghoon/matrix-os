@@ -60,7 +60,9 @@ async function main() {
   });
 
   const factory = await ethers.getContractFactory("WrappedMatrix");
-  const wmatrix = await factory.deploy(bootstrap.attestors, THRESHOLD);
+  // 0 selects the contract's documented DEFAULT_MINT_CAP; this local demo does
+  // not exercise the cap so it uses the default ceiling.
+  const wmatrix = await factory.deploy(bootstrap.attestors, THRESHOLD, 0);
   await wmatrix.waitForDeployment();
   const contract = await wmatrix.getAddress();
 

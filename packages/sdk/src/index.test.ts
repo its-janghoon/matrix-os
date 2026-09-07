@@ -249,6 +249,7 @@ describe('coverage against the served surface', () => {
       'ListTransactions',
       'SubmitSignedTransfer',
       'FundAccount',
+      'GetBridgeReconciliation',
     ],
     'matrix.inference.v1.InferenceService': ['SubmitInferenceJob', 'FulfillInferenceJob', 'GetInferenceJob'],
     'matrix.agent.v1.AgentService': ['DeployAgent', 'ListAgents', 'GetAgent'],

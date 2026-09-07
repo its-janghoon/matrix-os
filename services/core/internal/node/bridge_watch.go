@@ -9,6 +9,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/marketapi"
 )
 
 // This file wires the lock-and-mint bridge into matrixd as a node subsystem.
@@ -177,6 +178,62 @@ func dialBridgeClient(cfg BridgeConfig) (bridge.EthClient, error) {
 		return nil, fmt.Errorf("bridge: watch is enabled but bridge.watch.rpc_url is not set")
 	}
 	return bridge.NewHTTPEthClient(cfg.Watch.RPCURL, nil), nil
+}
+
+// heightSource reports the committed consensus height, so the reconciliation
+// snapshot can be anchored to a stated block. It is the narrow read the
+// reconciler needs from the consensus engine (satisfied by *consensus.Engine
+// via Height()), declared here so bridgeReconciler does not depend on the whole
+// engine surface and a test can supply a fixed height.
+type heightSource interface {
+	// Height returns the committed chain length (the number of blocks committed
+	// so far), which is the height the snapshot reflects.
+	Height() uint64
+}
+
+// bridgeReconciler adapts the node's *bridge.Bridge to marketapi.Reconciler: it
+// runs Bridge.Reconcile and stamps the resulting snapshot with the committed
+// consensus height, so GetBridgeReconciliation returns a report anchored to a
+// stated, reproducible point. It is the seam that keeps internal/marketapi free
+// of an internal/bridge import (which would cycle through internal/node).
+type bridgeReconciler struct {
+	bridge *bridge.Bridge
+	height heightSource
+}
+
+// newBridgeReconciler builds the adapter, or returns nil when no bridge is
+// configured so the market service leaves GetBridgeReconciliation reporting
+// FailedPrecondition rather than serving an empty snapshot. A nil height source
+// is tolerated (the snapshot's block height is reported as 0) so the reconciler
+// still works on a node wired without consensus.
+func newBridgeReconciler(b *bridge.Bridge, h heightSource) *bridgeReconciler {
+	if b == nil {
+		return nil
+	}
+	return &bridgeReconciler{bridge: b, height: h}
+}
+
+// Reconcile implements marketapi.Reconciler. It surfaces the same escrow /
+// accounting mismatch error Bridge.Reconcile raises (which the handler maps to
+// codes.Internal) and, on success, copies the snapshot into the marketapi shape
+// with the committed height stamped in.
+func (r *bridgeReconciler) Reconcile() (*marketapi.BridgeSnapshot, error) {
+	snap, err := r.bridge.Reconcile()
+	if err != nil {
+		return nil, err
+	}
+	var height uint64
+	if r.height != nil {
+		height = r.height.Height()
+	}
+	return &marketapi.BridgeSnapshot{
+		LockedNative:      snap.LockedNative,
+		UnlockedNative:    snap.UnlockedNative,
+		OutstandingNative: snap.OutstandingNative,
+		EscrowBalance:     snap.EscrowBalance,
+		OutstandingERC20:  snap.OutstandingERC20,
+		BlockHeight:       height,
+	}, nil
 }
 
 // runBridgeWatcher starts the watcher's polling loop in a goroutine and returns

@@ -67,7 +67,7 @@ describe("WrappedMatrix", () => {
       ethers.computeAddress(new ethers.SigningKey(k).publicKey)
     );
     const factory = await ethers.getContractFactory("WrappedMatrix");
-    wmatrix = (await factory.deploy(attestorAddrs, THRESHOLD)) as unknown as WrappedMatrix;
+    wmatrix = (await factory.deploy(attestorAddrs, THRESHOLD, 0)) as unknown as WrappedMatrix;
     await wmatrix.waitForDeployment();
     chainId = (await ethers.provider.getNetwork()).chainId;
   });
@@ -90,7 +90,7 @@ describe("WrappedMatrix", () => {
 
     it("reverts on empty attestor set", async () => {
       const factory = await ethers.getContractFactory("WrappedMatrix");
-      await expect(factory.deploy([], 1)).to.be.revertedWithCustomError(
+      await expect(factory.deploy([], 1, 0)).to.be.revertedWithCustomError(
         factory,
         "InvalidAttestorSet"
       );
@@ -99,14 +99,14 @@ describe("WrappedMatrix", () => {
     it("reverts when threshold exceeds attestor count", async () => {
       const factory = await ethers.getContractFactory("WrappedMatrix");
       await expect(
-        factory.deploy(attestorAddrs, ATTESTOR_KEYS.length + 1)
+        factory.deploy(attestorAddrs, ATTESTOR_KEYS.length + 1, 0)
       ).to.be.revertedWithCustomError(factory, "InvalidAttestorSet");
     });
 
     it("reverts on duplicate attestor", async () => {
       const factory = await ethers.getContractFactory("WrappedMatrix");
       await expect(
-        factory.deploy([attestorAddrs[0], attestorAddrs[0]], 1)
+        factory.deploy([attestorAddrs[0], attestorAddrs[0]], 1, 0)
       ).to.be.revertedWithCustomError(factory, "InvalidAttestor");
     });
   });
@@ -193,6 +193,106 @@ describe("WrappedMatrix", () => {
       await expect(
         wmatrix.mint(recipient.address, 0n, lockId, sigs)
       ).to.be.revertedWithCustomError(wmatrix, "ZeroAmount");
+    });
+  });
+
+  describe("mint cap", () => {
+    const lockId1 = ethers.zeroPadValue("0xca9001", 32);
+    const lockId2 = ethers.zeroPadValue("0xca9002", 32);
+
+    // Deploy a fresh WrappedMatrix with an explicit tight cap so the cap is
+    // reachable in a test without minting the full 1e27 ceiling.
+    async function deployWithCap(cap: bigint): Promise<WrappedMatrix> {
+      const factory = await ethers.getContractFactory("WrappedMatrix");
+      const wm = (await factory.deploy(attestorAddrs, THRESHOLD, cap)) as unknown as WrappedMatrix;
+      await wm.waitForDeployment();
+      return wm;
+    }
+
+    // Mint `amount` to recipient on `wm` under lock `lockId`, signing with the
+    // first two attestor keys in ascending order.
+    async function mintOn(wm: WrappedMatrix, amount: bigint, lockId: string) {
+      const contract = await wm.getAddress();
+      const digest = buildDigest(recipient.address, amount, lockId, chainId, contract);
+      const sigs = orderedSignatures(ATTESTOR_KEYS.slice(0, 2), digest);
+      return wm.mint(recipient.address, amount, lockId, sigs);
+    }
+
+    it("defaults cap_ == 0 to DEFAULT_MINT_CAP (1e27)", async () => {
+      const wm = await deployWithCap(0n);
+      const defaultCap = 10n ** 27n;
+      expect(await wm.DEFAULT_MINT_CAP()).to.equal(defaultCap);
+      expect(await wm.mintCap()).to.equal(defaultCap);
+    });
+
+    it("stores an explicit cap below the default", async () => {
+      const cap = 10n * ERC20_PER_NATIVE_UNIT;
+      const wm = await deployWithCap(cap);
+      expect(await wm.mintCap()).to.equal(cap);
+    });
+
+    it("rejects a cap above DEFAULT_MINT_CAP at construction", async () => {
+      const factory = await ethers.getContractFactory("WrappedMatrix");
+      const overCap = 10n ** 27n + 1n;
+      await expect(
+        factory.deploy(attestorAddrs, THRESHOLD, overCap)
+      ).to.be.revertedWithCustomError(factory, "MintCapExceeded");
+    });
+
+    it("mints right up to the cap", async () => {
+      const cap = 6n * ERC20_PER_NATIVE_UNIT;
+      const wm = await deployWithCap(cap);
+
+      // Two mints that together exactly reach the cap both succeed.
+      await mintOn(wm, 4n * ERC20_PER_NATIVE_UNIT, lockId1);
+      await mintOn(wm, 2n * ERC20_PER_NATIVE_UNIT, lockId2);
+
+      expect(await wm.totalSupply()).to.equal(cap);
+    });
+
+    it("reverts a single mint that would exceed the cap", async () => {
+      const cap = 5n * ERC20_PER_NATIVE_UNIT;
+      const wm = await deployWithCap(cap);
+      const over = cap + ERC20_PER_NATIVE_UNIT;
+
+      await expect(mintOn(wm, over, lockId1))
+        .to.be.revertedWithCustomError(wm, "MintCapExceeded")
+        .withArgs(cap, over);
+
+      // Nothing was minted and the lock is still spendable (the revert rolled
+      // back the mintedLockId write too).
+      expect(await wm.totalSupply()).to.equal(0n);
+      expect(await wm.mintedLockId(lockId1)).to.equal(false);
+    });
+
+    it("reverts a later mint that would push cumulative supply over the cap", async () => {
+      const cap = 5n * ERC20_PER_NATIVE_UNIT;
+      const wm = await deployWithCap(cap);
+
+      // First mint sits under the cap.
+      await mintOn(wm, 4n * ERC20_PER_NATIVE_UNIT, lockId1);
+      expect(await wm.totalSupply()).to.equal(4n * ERC20_PER_NATIVE_UNIT);
+
+      // A second mint that alone is fine but would push the TOTAL over the cap
+      // reverts, and the surviving supply is exactly the first mint.
+      const second = 2n * ERC20_PER_NATIVE_UNIT; // 4 + 2 = 6 > cap 5
+      await expect(mintOn(wm, second, lockId2))
+        .to.be.revertedWithCustomError(wm, "MintCapExceeded")
+        .withArgs(cap, 6n * ERC20_PER_NATIVE_UNIT);
+      expect(await wm.totalSupply()).to.equal(4n * ERC20_PER_NATIVE_UNIT);
+    });
+
+    it("allows minting again after a burn frees headroom under the cap", async () => {
+      const cap = 5n * ERC20_PER_NATIVE_UNIT;
+      const wm = await deployWithCap(cap);
+
+      await mintOn(wm, 5n * ERC20_PER_NATIVE_UNIT, lockId1); // at the cap
+      // Burning reduces totalSupply, so a fresh lock can mint back up to the cap.
+      await wm.connect(recipient).burn(2n * ERC20_PER_NATIVE_UNIT, "c".repeat(64));
+      expect(await wm.totalSupply()).to.equal(3n * ERC20_PER_NATIVE_UNIT);
+
+      await mintOn(wm, 2n * ERC20_PER_NATIVE_UNIT, lockId2);
+      expect(await wm.totalSupply()).to.equal(5n * ERC20_PER_NATIVE_UNIT);
     });
   });
 

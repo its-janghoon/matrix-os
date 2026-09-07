@@ -32,6 +32,18 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
  *            exact multiple of ERC20_PER_NATIVE_UNIT so it maps losslessly back
  *            to native base units.
  *
+ *      MINT CAP: mint() additionally enforces a total-supply cap (mintCap) so a
+ *      bug, or a compromised-but-under-threshold attestor set, can never mint
+ *      unbounded wrapped supply. The cap is a deploy-time policy parameter (the
+ *      constructor's cap_): 0 selects the documented DEFAULT_MINT_CAP of 1e27
+ *      (the full wrapped supply ceiling, i.e. the native cap scaled to 18
+ *      decimals), and a real deployment following the token-and-bridge policy
+ *      passes a tighter value. The cap is immutable - there is deliberately no
+ *      cap-raising authority, since a single address able to raise the cap would
+ *      be exactly the trust anchor the m-of-n attestor design avoids; raising it
+ *      is a redeploy, which is visible and governable. See the mintCap and
+ *      constructor docs.
+ *
  *      NATIVE <-> WRAPPED SCALE (single source of truth:
  *      services/core/internal/token/supply.go): native has 9 decimals, this
  *      wrapped token has 18, so 1 native base unit == 1e9 wMATRIX base units
@@ -57,6 +69,30 @@ contract WrappedMatrix is ERC20, ERC20Permit {
     ///         one conversion factor shared with supply.go. Burn amounts must be
     ///         exact multiples of this so they map losslessly to native units.
     uint256 public constant ERC20_PER_NATIVE_UNIT = 1e9;
+
+    /// @notice The documented default mint cap: the full wrapped supply cap of
+    ///         1e27 base units (== 1,000,000,000 whole MATRIX * 1e18), which is
+    ///         exactly the native cap of 1e18 base units scaled up by
+    ///         ERC20_PER_NATIVE_UNIT (see the NATIVE <-> WRAPPED SCALE note
+    ///         above and services/core/internal/token/supply.go). It is used
+    ///         when the constructor is given cap_ == 0, so a deployment that does
+    ///         not name a tighter policy cap still cannot mint past the total
+    ///         native supply. This is NOT a policy number: it is the arithmetic
+    ///         ceiling of the whole coin supply. A real deployment following
+    ///         docs/proposals/token-and-bridge-policy.md gate 3 passes a tighter
+    ///         cap (e.g. a percentage of supply) as the constructor's cap_.
+    uint256 public constant DEFAULT_MINT_CAP = 1e27;
+
+    /// @notice The maximum total wrapped supply this contract will ever mint.
+    ///         mint() reverts with MintCapExceeded if a mint would push
+    ///         totalSupply above this value. It is fixed at construction (see the
+    ///         constructor's cap_ parameter): there is deliberately NO
+    ///         cap-raising authority, because a single address able to raise the
+    ///         cap could dilute holders and would be a trust anchor the m-of-n
+    ///         attestor design specifically avoids. Raising the cap requires
+    ///         redeploying with a new value, which is a visible, governable act
+    ///         rather than a silent owner call. See the constructor doc.
+    uint256 public immutable mintCap;
 
     /// @notice The number of DISTINCT registered attestor signatures required to
     ///         authorize a mint (the m in m-of-n).
@@ -98,13 +134,27 @@ contract WrappedMatrix is ERC20, ERC20Permit {
     error NonMultipleBurn(uint256 amount);
     /// @notice Raised when a mint or burn amount is zero.
     error ZeroAmount();
+    /// @notice Raised when a mint would push totalSupply above mintCap. `cap` is
+    ///         the configured cap and `wouldBe` is the totalSupply the mint would
+    ///         have produced.
+    error MintCapExceeded(uint256 cap, uint256 wouldBe);
 
     /**
      * @param attestors The validator secp256k1 attestor addresses (the n).
      * @param threshold_ The number of distinct signatures required to mint (m),
      *        1 <= m <= n.
+     * @param cap_ The maximum total wrapped supply that may ever be minted. It
+     *        is a deploy-time policy parameter, not a hardcoded literal: pass a
+     *        tighter cap (e.g. a percentage of supply per the token-and-bridge
+     *        policy proposal) to bound minting below the full supply. Passing 0
+     *        selects the documented DEFAULT_MINT_CAP (1e27, the whole wrapped
+     *        supply ceiling), so an unspecified cap still cannot exceed the total
+     *        native supply. A cap_ above DEFAULT_MINT_CAP is rejected: nothing
+     *        should ever be able to mint more wrapped tokens than the native
+     *        supply cap allows. The cap is immutable; see the mintCap doc for why
+     *        there is no cap-raising authority.
      */
-    constructor(address[] memory attestors, uint256 threshold_)
+    constructor(address[] memory attestors, uint256 threshold_, uint256 cap_)
         ERC20("Wrapped Matrix", "wMATRIX")
         ERC20Permit("Wrapped Matrix")
     {
@@ -121,6 +171,14 @@ contract WrappedMatrix is ERC20, ERC20Permit {
         }
         attestorCount = n;
         threshold = threshold_;
+
+        uint256 resolvedCap = cap_ == 0 ? DEFAULT_MINT_CAP : cap_;
+        // The wrapped supply can never legitimately exceed the native supply
+        // cap scaled to 18 decimals; reject a configured cap that claims it can.
+        if (resolvedCap > DEFAULT_MINT_CAP) {
+            revert MintCapExceeded(DEFAULT_MINT_CAP, resolvedCap);
+        }
+        mintCap = resolvedCap;
     }
 
     /**
@@ -178,6 +236,13 @@ contract WrappedMatrix is ERC20, ERC20Permit {
             valid++;
         }
         if (valid < threshold) revert ThresholdNotMet(valid, threshold);
+
+        // Enforce the mint cap: a bug or a compromised-but-under-threshold set
+        // must never be able to mint more wrapped supply than the native supply
+        // backing it. Checked against totalSupply() so it bounds the cumulative
+        // wrapped supply, not any single mint.
+        uint256 wouldBe = totalSupply() + amount;
+        if (wouldBe > mintCap) revert MintCapExceeded(mintCap, wouldBe);
 
         mintedLockId[lockId] = true;
         _mint(recipient, amount);

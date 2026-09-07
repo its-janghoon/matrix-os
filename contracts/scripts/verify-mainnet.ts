@@ -27,13 +27,19 @@ interface VerifyInput {
   address: string;
   attestors: string[];
   threshold: number;
+  // The resolved mint cap constructor arg (18-decimal base units). It must be
+  // the value the contract was actually deployed with (the deploy record stores
+  // the resolved cap, not the raw 0-means-default input), or Etherscan rejects
+  // the verification for mismatched constructor args.
+  mintCap: string;
 }
 
 function resolveVerifyInput(): VerifyInput {
   if (process.env.ADDRESS && process.env.ATTESTORS) {
     const attestors = process.env.ATTESTORS.split(",").map((a) => ethers.getAddress(a.trim()));
     const threshold = Number(process.env.THRESHOLD ?? "2");
-    return { address: ethers.getAddress(process.env.ADDRESS), attestors, threshold };
+    const mintCap = (process.env.MINT_CAP ?? "0").trim();
+    return { address: ethers.getAddress(process.env.ADDRESS), attestors, threshold, mintCap };
   }
 
   const recordPath = resolve(__dirname, `../deployments/wrapped-matrix.${network.name}.json`);
@@ -48,6 +54,9 @@ function resolveVerifyInput(): VerifyInput {
     address: record.address,
     attestors: record.args.attestors,
     threshold: record.args.threshold,
+    // Prefer the resolved on-chain cap the record captured; fall back to the
+    // raw constructor arg for records written before the cap existed.
+    mintCap: (record.mintCap ?? record.args.mintCap ?? "0").toString(),
   };
 }
 
@@ -61,10 +70,11 @@ async function main() {
   console.log("  address:  ", input.address);
   console.log("  attestors:", input.attestors);
   console.log("  threshold:", input.threshold);
+  console.log("  mintCap:  ", input.mintCap);
 
   await run("verify:verify", {
     address: input.address,
-    constructorArguments: [input.attestors, input.threshold],
+    constructorArguments: [input.attestors, input.threshold, input.mintCap],
   });
 
   console.log("Verification submitted.");

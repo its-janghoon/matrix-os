@@ -24,6 +24,7 @@
         "CompleteJob",
         "FundAccount",
         "GetBalance",
+        "GetBridgeReconciliation",
         "GetJob",
         "GetTransaction",
         "ListJobs",

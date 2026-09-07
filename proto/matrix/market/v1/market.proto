@@ -313,6 +313,40 @@ message FundAccountResponse {
     uint64 balance = 2;
 }
 
+// GetBridgeReconciliationRequest asks the node for the current lock-and-mint
+// bridge backing snapshot. It takes no arguments: the snapshot is a read of the
+// node's own escrow accounting at the moment it is served.
+message GetBridgeReconciliationRequest {}
+
+// GetBridgeReconciliationResponse carries a lock-and-mint bridge backing
+// snapshot proving native MATRIX held in escrow equals the wrapped supply the
+// Ethereum contract should show. Every field is derived from the node's own
+// on-ledger escrow accounting, so the report is reproducible from public data
+// rather than a manual query, and it is served only after the node has verified
+// the on-ledger escrow balance equals the (locked - unlocked) accounting.
+message GetBridgeReconciliationResponse {
+    // Cumulative native base units (9 decimals) ever locked into escrow.
+    uint64 locked_native = 1;
+    // Cumulative native base units ever unlocked (released on a processed burn).
+    uint64 unlocked_native = 2;
+    // Native base units currently held in escrow backing the wrapped supply
+    // (locked_native - unlocked_native).
+    uint64 outstanding_native = 3;
+    // The actual bridge escrow account balance on the node's ledger. The node
+    // only returns a snapshot when this equals outstanding_native; a mismatch is
+    // reported as an error instead.
+    uint64 escrow_balance = 4;
+    // outstanding_native converted to ERC-20 base units (18 decimals) - the
+    // wrapped total supply the Ethereum WrappedMatrix contract must show if it
+    // is correctly backed 1:1. It is a decimal string because the value is a
+    // big integer (up to 1e27) that does not fit a uint64.
+    string outstanding_erc20 = 5;
+    // The committed consensus block height the snapshot reflects, so the report
+    // is anchored to a stated point and reproducible: any node replaying the
+    // committed chain to this height derives the same escrow accounting.
+    uint64 block_height = 6;
+}
+
 // MarketService is the external gRPC surface of the Matrix OS compute
 // marketplace. It exposes the local order book, remote P2P providers, the
 // compute-credit ledger, signed settlement, and the token chain so external
@@ -391,4 +425,16 @@ service MarketService {
     // FailedPrecondition, and is gated behind the same auth as other
     // state-mutating RPCs.
     rpc FundAccount(FundAccountRequest) returns (FundAccountResponse) {}
+
+    // GetBridgeReconciliation returns the lock-and-mint bridge backing snapshot:
+    // the native MATRIX locked/unlocked/outstanding in escrow, the escrow
+    // balance, the equivalent wrapped ERC-20 supply, and the committed block
+    // height the snapshot reflects. Input: none. Output: the reconciliation
+    // report. No side effects; it is a read of the node's own escrow accounting
+    // at a stated height, so it is reproducible from public data rather than a
+    // manual query. Returns FailedPrecondition when the node has no bridge
+    // configured (bridge.contract unset), and Internal when the on-ledger escrow
+    // balance disagrees with the (locked - unlocked) accounting, which signals a
+    // backing-invariant violation. Gated behind the same auth as other surfaces.
+    rpc GetBridgeReconciliation(GetBridgeReconciliationRequest) returns (GetBridgeReconciliationResponse) {}
 }

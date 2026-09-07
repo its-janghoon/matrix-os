@@ -22,6 +22,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math/big"
 	"net"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
@@ -69,6 +70,10 @@ type Service struct {
 	// market on its own), SubmitSignedTransfer falls back to the per-node
 	// token.SettledLedger path and the history RPCs read the token.Chain.
 	transferSettler TransferSettler
+	// reconciler, when non-nil, backs GetBridgeReconciliation with the node's
+	// lock-and-mint bridge. When nil (no bridge configured, the default), the RPC
+	// returns codes.FailedPrecondition rather than panicking.
+	reconciler Reconciler
 	// authEnforced reports whether the server in front of this Service requires
 	// authentication on every mutating RPC. FundAccount refuses to run when it is
 	// false: unlike SubmitSignedTransfer, a funding request carries no per-request
@@ -165,6 +170,48 @@ type TransferSettler interface {
 	TransferAt(index uint64) (*TransferView, error)
 }
 
+// BridgeSnapshot is the marketapi-facing shape of a bridge reconciliation
+// report. It is declared here (consumer side) so the market API does not import
+// internal/bridge (which imports internal/market and would risk an import cycle
+// through internal/node) and tests can build one directly. It mirrors
+// bridge.Reconciliation. OutstandingERC20 is a *big.Int because the wrapped
+// supply (up to 1e27) does not fit a uint64.
+type BridgeSnapshot struct {
+	// LockedNative is the cumulative native base units ever locked.
+	LockedNative uint64
+	// UnlockedNative is the cumulative native base units ever unlocked.
+	UnlockedNative uint64
+	// OutstandingNative is LockedNative - UnlockedNative: the native currently in
+	// escrow backing the wrapped supply.
+	OutstandingNative uint64
+	// EscrowBalance is the actual escrow account balance on the ledger; the
+	// Reconciler only returns a snapshot when it equals OutstandingNative.
+	EscrowBalance uint64
+	// OutstandingERC20 is OutstandingNative converted to ERC-20 base units (18
+	// decimals): the wrapped supply the Ethereum contract must show.
+	OutstandingERC20 *big.Int
+	// BlockHeight is the committed consensus height the snapshot reflects, so the
+	// report is anchored to a stated point and reproducible from the committed
+	// chain.
+	BlockHeight uint64
+}
+
+// Reconciler produces the lock-and-mint bridge backing snapshot for
+// GetBridgeReconciliation. It exists because the node's bridge lives in
+// internal/bridge; declaring the capability the market API needs here (consumer
+// side) keeps marketapi free of that import and lets a test supply a fake.
+//
+// It is satisfied by node.bridgeReconciler, which wraps the node's
+// *bridge.Bridge and stamps the committed block height. A nil Reconciler means
+// the node has no bridge configured, in which case GetBridgeReconciliation
+// returns FailedPrecondition rather than panicking.
+type Reconciler interface {
+	// Reconcile returns the current backing snapshot, or an error if the escrow
+	// balance and the (locked - unlocked) accounting disagree (a backing-invariant
+	// violation).
+	Reconcile() (*BridgeSnapshot, error)
+}
+
 // JobSettler settles a compute job through consensus and finalizes it.
 //
 // It exists because CompleteJob used to charge the buyer with a direct
@@ -196,6 +243,13 @@ func (s *Service) SetJobSettler(settler JobSettler) { s.settler = settler }
 // token.Chain, which is only appropriate for a Service with no consensus engine
 // behind it.
 func (s *Service) SetTransferSettler(settler TransferSettler) { s.transferSettler = settler }
+
+// SetReconciler installs the bridge reconciliation source for
+// GetBridgeReconciliation. It is called once during construction, before the
+// server serves, so no locking is needed. With no reconciler installed (no
+// bridge configured, the default) GetBridgeReconciliation returns
+// FailedPrecondition.
+func (s *Service) SetReconciler(reconciler Reconciler) { s.reconciler = reconciler }
 
 // SetAuthEnforced records whether the server hosting this Service requires
 // authentication on every mutating RPC. It is set by NewServer from cfg.Auth and
@@ -241,6 +295,10 @@ type Config struct {
 	// chain. A node with a consensus engine must set it; see the TransferSettler
 	// doc.
 	TransferSettler TransferSettler
+	// Reconciler, when non-nil, backs GetBridgeReconciliation with the node's
+	// lock-and-mint bridge. When nil (no bridge configured), that RPC returns
+	// FailedPrecondition. See the Reconciler doc.
+	Reconciler Reconciler
 }
 
 // NewServer builds a market gRPC server. It installs the admin auth
@@ -256,6 +314,7 @@ func NewServer(cfg Config) (*Server, error) {
 	svc.SetAuthEnforced(cfg.Auth != nil)
 	svc.SetJobSettler(cfg.Settler)
 	svc.SetTransferSettler(cfg.TransferSettler)
+	svc.SetReconciler(cfg.Reconciler)
 
 	var opts []grpc.ServerOption
 	if cfg.Auth != nil {

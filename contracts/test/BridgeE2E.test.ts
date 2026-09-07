@@ -91,7 +91,7 @@ describe("Bridge end-to-end (Go attestation -> Solidity mint)", function () {
     });
 
     const factory = await ethers.getContractFactory("WrappedMatrix");
-    wmatrix = (await factory.deploy(bootstrap.attestors, THRESHOLD)) as unknown as WrappedMatrix;
+    wmatrix = (await factory.deploy(bootstrap.attestors, THRESHOLD, 0)) as unknown as WrappedMatrix;
     await wmatrix.waitForDeployment();
   });
 
