@@ -1,6 +1,6 @@
 # Handoff
 
-State of `main` as of `15ebd3f`. Everything below was run, not inferred; where
+State of `main` as of `cb4db0c`. Everything below was run, not inferred; where
 something is unverified it says so.
 
 ## Build and check
@@ -171,7 +171,7 @@ addressable; a permitted target is delivered into that agent's inbox.
 `docs/proposals/token-and-bridge-policy.md`). `WrappedMatrix.sol` gained an
 immutable total-supply mint cap (a constructor param; over-cap `mint` reverts
 `MintCapExceeded`) with new hardhat tests. The cap is deliberately immutable with
-no raising authority — raising it is a redeploy — consistent with the operator's
+no raising authority - raising it is a redeploy - consistent with the operator's
 solo/no-raise posture; the proposal's "raisable-after-a-clean-period" authority
 was intentionally not built. `bridge.Reconcile()` is exposed as a node endpoint
 `GetBridgeReconciliation` (gRPC + connectapi HTTP), backed by the node's own
@@ -184,10 +184,10 @@ The monetary-policy numbers are decided and wired into the generated config
 forces nothing):
 
 - **Fee rate: 100 basis points,** the code cap.
-- **Emission: the recommended schedule** — `per_block` 280,000,000,000,
+- **Emission: the recommended schedule** - `per_block` 280,000,000,000,
   `half_life` 1,000,000, about `1.44 x per_block x half_life` ≈ 4e17 base units,
   ~40% of the 1e18 native cap, matching the proposal's provider allocation.
-- **Stake off** — permissioned for the first release.
+- **Stake off** - permissioned for the first release.
 - **Fundraising:** solo, no raise, which is why the bridge mint cap is immutable
   rather than raisable.
 
@@ -200,13 +200,175 @@ acts:
   registering a provider needs an operator quorum. Until then the emission is
   armed and pays nothing.
 - **Agent metering price is 0** (unmetered) until set.
-- **Permissioned vs. open launch is a config switch** — currently permissioned,
+- **Permissioned vs. open launch is a config switch** - currently permissioned,
   stake off. Turning on stake means choosing `min_bond` / `unbonding_period`.
 
 Also still open from the proposal: headcount and vesting, jurisdiction for the
 issuing entity, and the audit budget. A real mainnet/testnet bridge deploy still
 needs the operator's funded key, an RPC endpoint, and an external audit; the
 contracts are undeployed by design (45 hardhat tests pass locally).
+
+## Pending: the product surface
+
+Consensus and the token are done enough to build on. What is missing is the three
+ways a person actually reaches the network: a provider selling compute, a
+developer calling an API, and an end user in a dApp. Every item below was checked
+against `main`, not remembered.
+
+### a. A provider cannot join without editing Go
+
+The market side works: `RegisterProvider` (RPC, SDK, and `matrix provider
+register --id --capacity --price`) takes a provider with a capacity and a unit
+price. Two things block a real one.
+
+- **An inference backend can only be registered in-process.** `node.Config`'s
+  `inference:` block has exactly two fields, `addr` and `echo_provider`, and its
+  own comment says a real deployment "must be registered out of band via
+  `GetInference().Registry()`". Someone with a GPU box or spare API credits has
+  to write Go and rebuild the node.
+- **A provider never declares which models it serves.** `market.Provider` is
+  `ID`, `Capacity`, `PricePerUnit`, `Available`. `InferenceJob.Model` is echoed
+  back off the backend's response; it is not routing data. There is nothing to
+  route a model request on.
+
+Needs: an `inference.backends` config list (id, kind, base_url, api_key_env,
+models, price_per_unit) registered through the existing
+`inference.Registry.RegisterFromConfig`, and a `models` field on `Provider` (a
+proto change) set by `RegisterProvider`.
+
+Nothing else about a provider is missing. Earnings already work: billing is
+token-based (`UnitsFor(usage)` over the backend's reported `prompt_tokens` /
+`completion_tokens`), it settles buyer -> provider through consensus, and the
+emission is armed. Cashing out is the bridge, which is built and undeployed.
+
+### b. Nothing serves an OpenAI-compatible route
+
+`OpenAIBackend` *calls* `/v1/chat/completions`; nothing *serves* it. A developer
+cannot reach us by changing `base_url` in the openai SDK, which is the one thing
+that makes an inference API adoptable. Today they must name a provider id and
+make two calls (`SubmitInferenceJob`, then `FulfillInferenceJob`).
+
+Needs: a `POST /v1/chat/completions` handler mapping the request onto
+submit+fulfill and the response onto the OpenAI shape; model -> provider
+selection (which needs (a)); and streaming. `connectapi` rejects streaming
+methods by design and the protos declare none, so streaming is its own piece of
+work.
+
+Latency is already handled: `INFERENCE_JOB_STATUS_SETTLING` exists so the
+completion can return before the settlement commits.
+
+### c. The node signs for the user, so wallet login means nothing
+
+`node.signingAccts` holds buyer signing keys, and the compute, inference and
+agent-metering coordinators all sign on the buyer's behalf; `node.go` states the
+intent plainly ("custody is one decision for the whole node"). On a node the user
+runs themselves that is right. On a public endpoint it makes the operator a
+custodian, and in a dApp it means the user's wallet is not what authorises the
+spend.
+
+`SubmitSignedTransfer` is now the pattern to copy in the other direction: the
+client signs, the node verifies and relays into consensus, and
+`node/transfer_settlement.go` says it "deliberately mirrors the compute/inference
+settlement model". The inference path should mirror it back - a buyer-signed
+payment authorisation submitted with the job.
+
+A browser needs one more thing: `connectapi` requires a valid API key on *every*
+method, reads included, and a browser cannot hold a secret. Reads should be open
+and writes signature-authorised.
+
+### d. No browser wallet, and no rate limiting anywhere
+
+`token.Account` is a single ed25519 keypair, so generating one in the browser and
+sealing it with a passkey is natural. Nothing does it yet. A top-up flow also
+needs a relayer that turns USDC into native MATRIX (DEX buy, then
+`WrappedMatrix.burn`) so the words "wMATRIX" never reach the user.
+
+Searching `services/core` for `rate.Limiter` or `RateLimit` finds nothing.
+`maxRequestBytes` (4 MiB) is the only bound, and `connectapi`'s `AllowedOrigins`
+default is `"*"`, which its own comment calls "the wrong one for a public
+deployment". Both need fixing before any endpoint is public.
+
+### Order
+
+`a -> b -> c -> d`. (a) first because without providers there is nothing for (b)
+or (c) to sell, and it is a proto field plus a config parser.
+
+## Product decisions made this session
+
+Policy, not engineering. Recorded so they are not re-litigated.
+
+**Two servers, two names, deliberately.**
+
+| Host | What it is | Nature |
+| --- | --- | --- |
+| `rpc.ecirlabs.com` | a `matrixd` node (market + inference over connectapi) | replaceable infrastructure, holds no keys |
+| `seed.ecirlabs.com` | a libp2p bootstrap peer | replaceable |
+| `api.ecirlabs.com` | the OpenAI-compatible gateway, keys and quotas | a company product |
+
+Do not merge them. "A user can bypass us" has to be checkable, and it is only
+checkable if the bypass has its own address. Every chain runs servers - MetaMask
+defaults to Infura, Ethereum ships hardcoded bootnodes - so the property to
+protect is not their absence but that they are verifiable and substitutable. The
+SDK's `DEFAULT_ENDPOINT` is `http://127.0.0.1:9093`, the user's own node, and
+that default stays.
+
+**No fiat, therefore no custody.** There is no card processor and no prepaid
+balance. An API key is a proof of account ownership; the balance lives on-chain
+and each request settles from it. That removes the custodian problem from the
+gateway, which is also why (c) matters: the node has to stop signing for users.
+
+**Reselling spare API credits is supply we want.** A provider pointing
+`OpenAIBackend` at any OpenAI-compatible vendor brings that whole catalogue onto
+the network. It costs one hop more than going direct, it inherits the upstream's
+content policy, and the provider carries the currency and ToS risk - all of which
+are the provider's judgement, not ours to prevent. Do not gate it with
+`approved_providers`. It is how a marketplace launches with a catalogue instead
+of an empty list, and real GPU providers then undercut the proxies on the models
+they can serve.
+
+Quality selects itself here in a way it cannot for GPU work, because the output
+is checkable: the buyer holds the prompt and the completion and can recount the
+tokens with the model's tokeniser, so an inflated `usage` is detectable. Keep
+trying cheap - do not add a minimum job size.
+
+**Self-dealing is not blocked, because the emission already prices it.**
+`distributeEmissionLocked` splits the per-block budget pro rata by
+`credited[id]`, the amount that provider was actually paid in that block, not by
+headcount. With self-dealt volume V, honest volume H, per-block emission E and
+fee rate f, a farmer pays `f*V` and collects `E*V/(V+H)`:
+
+- the optimum is finite (`V = sqrt(E*H/f) - H`), so looping does not scale;
+- it pays at all only while `H < E/f`, so at the 100bp cap it loses money at any
+  size once honest volume per block passes 100x the per-block emission;
+- the worst case is bounded by the emission budget itself, and the farmer paid
+  the protocol fee to reach it. That is an advertising spend, and it is fine.
+
+So the exposure is a number, not a missing feature: `per_block` sets the size of
+the farmable window. 280,000,000,000 was chosen against the token allocation, not
+against expected launch volume, so it is worth a second look - or arm it at 0 and
+raise it once real volume exists. No reputation system is needed; repeat purchase
+from distinct buyers is already visible in committed settlements if we ever want
+to weight by it.
+
+**Permissioned now, permissionless as a stated destination.** Stake is off and
+`approved_changes` gates admission, so this is permissioned with capital at risk.
+That is the standard launch posture (Ethereum's beacon genesis set, Solana, Sui,
+Aptos and the Cosmos hub all started this way) and it is where DePIN compute
+networks tend to stay: an open settlement layer with a gated service layer. What
+blocks opening the set is technical rather than political - only equivocation is
+provable from committed state, so a bond is a deposit rather than collateral
+against the offences that matter in an open set (censoring, withholding, lying
+about off-chain work). The order to open it: make job settlement prove provider
+fraud, broaden slashing past equivocation, size `min_bond` against value at risk
+per block, then drop operator approval for admission while keeping it for
+removal. Until then the site must not claim permissionless.
+
+**What privacy we can honestly claim.** A dApp is a static page and need not
+touch our servers, so "we do not store your chats" is true. Two things are not:
+the settlement is on-chain forever (who paid whom, how much, when), and the
+provider sees the prompt, because the model runs on their hardware. There is no
+confidential computing here. Say "we do not store this", never "nobody sees
+this".
 
 ## Things to know before changing consensus
 
