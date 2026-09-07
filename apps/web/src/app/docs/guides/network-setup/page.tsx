@@ -56,6 +56,28 @@ consensus: validator set is now 3 members, quorum 3`;
 
 const VETO_LOG = `consensus: refusing to vote for a block that would add:9f2c1e4b... (not in consensus.approved_changes)`;
 
+const JOIN_CONFIG = `# on the JOINING node, before it starts:
+network:
+  listen_addr: /ip4/0.0.0.0/tcp/9000
+  bootstrap_peers:
+    - /ip4/<a running peer>/tcp/9000/p2p/<its peer id>
+consensus:
+  validators:                 # the GENESIS ids, NOT the set in force now
+    - 689cf718481d3c13cf4e370526d5228d758e0c2c9b6f5eb3bbc0540c20eede31
+    - 4b1d0c9a...
+  epoch_length: 100           # must match every node
+genesis:                      # must match the network's config EXACTLY
+  reward_pool: 1000000000000000000
+  # allocations: ...the same named allocations the network started with...`;
+
+const JOIN_ADMIT = `# the joining node's startup log:
+Consensus identity: 9f2c1e4b...   # <- give this hex id to the operators
+
+# an existing operator, in their own config, once a quorum of them agree:
+consensus:
+  approved_changes:
+    - add:9f2c1e4b...`;
+
 const STAKE = `consensus:
   stake:
     enabled: true
@@ -206,7 +228,85 @@ export default function NetworkSetupPage() {
                     investigate an offence yourself; detection, recording and gossip carry on either way.
                   </p>
 
-                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>5. Bonded stake</h2>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>5. Joining a running network</h2>
+                  <p className='mb-4 text-gray-300'>
+                    Everything above starts nodes together from the same genesis. That is not how a network grows. A
+                    node that arrives late has an <strong className='text-white'>empty store</strong>: it downloads
+                    the chain from its bootstrap peers and replays it from height zero. Two fields in its config have
+                    to be exactly right or it never gets off the ground, and the mistakes are quiet ones.
+                  </p>
+                  <CodeSample label='config.yaml' code={JOIN_CONFIG} />
+
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>
+                    consensus.validators must be the GENESIS set, not the current one
+                  </h3>
+                  <p className='mb-4 text-gray-300'>
+                    This is the counterintuitive one. To accept the block at each height a replaying node checks that
+                    its proposer was the leader for <em>that</em> height, evaluated against the validator set as it
+                    stood <em>then</em>. So it needs the set the chain started from - the{' '}
+                    <strong className='text-white'>genesis</strong> set - to validate early history. It then replays
+                    the committed set changes and arrives at the current set by itself, exactly as an existing node
+                    does across a restart.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    Hand it the set <em>in force now</em> instead and it computes the wrong leader for height 0: the
+                    proposer that actually led block 0 is not the leader under today&apos;s larger set, so it refuses
+                    block 0, nothing after it can link, and the node sits at height 0 forever. There is no error that
+                    names the real cause - it just never catches up. Configure the genesis ids and let the node
+                    derive the rest.
+                  </p>
+
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>
+                    genesis: must match the network&apos;s exactly
+                  </h3>
+                  <p className='mb-4 text-gray-300'>
+                    The chain carries <strong className='text-white'>transactions</strong>, never the balances they
+                    started from. Genesis allocations and the reward pool are applied from{' '}
+                    <em>the node&apos;s own config</em> at first start, once, and the node then applies the
+                    downloaded transactions on top. So a node whose <code className='text-white'>genesis</code>{' '}
+                    differs from the network&apos;s ends up with <strong className='text-white'>the same blocks and
+                    different balances</strong>: it agrees on history and disagrees about money, which is the worst
+                    kind of disagreement because nothing looks broken until a balance is read. Copy the network&apos;s
+                    genesis config verbatim - the same allocations and the same{' '}
+                    <code className='text-white'>reward_pool</code>.
+                  </p>
+
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>Getting admitted as a validator</h3>
+                  <p className='mb-4 text-gray-300'>
+                    A correctly configured joining node downloads and applies blocks straight away, but it is not yet
+                    a validator. Until a quorum admits it, it <strong className='text-white'>follows without
+                    voting</strong>: it applies every committed block to its ledger and stays perfectly in sync, it
+                    just does not propose or vote. That is a useful state on its own - a read-only replica that
+                    agrees on every balance without any say in the set.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    To make it a validator, admission goes through the same set-change path as section 4. The node
+                    prints its consensus identity at startup; that hex id is what other operators put under{' '}
+                    <code className='text-white'>consensus.approved_changes</code> as an{' '}
+                    <code className='text-white'>add:</code>. It needs a quorum of operators to list it, and it lands
+                    at the next epoch boundary.
+                  </p>
+                  <CodeSample label='join + admit' code={JOIN_ADMIT} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>epoch_length</code> must match every node here too, for the reason
+                    in section 3: it is when set changes take effect, and nodes that disagree about it would switch
+                    sets at different heights and fork.
+                  </p>
+
+                  <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h3 className='mb-2 text-lg font-bold text-white'>On a staked network, bond before admission</h3>
+                    <p className='mb-0 text-gray-100'>
+                      If the network runs bonded stake (section 6), a joining node cannot be admitted until it has
+                      posted at least the minimum bond. Fund its consensus account - the id it prints at startup -
+                      then set <code className='text-white'>consensus.stake.bond</code>; the node bonds the shortfall
+                      itself from that account and keeps topping it up. Until the account holds enough it says so in
+                      the log and does nothing, so an unfunded staked joiner fails loudly rather than quietly. The
+                      quorum still has to approve the <code className='text-white'>add:</code> - a bond is necessary
+                      to be admitted, not sufficient.
+                    </p>
+                  </div>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>6. Bonded stake</h2>
                   <p className='mb-4 text-gray-300'>
                     Off by default. With it on, three things change: voting power becomes an account&apos;s bonded
                     native MATRIX, admission requires a minimum bond, and a validator proven to have equivocated
@@ -262,7 +362,7 @@ export default function NetworkSetupPage() {
                     </p>
                   </div>
 
-                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>6. Paying for it: the fee and the emission</h2>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>7. Paying for it: the fee and the emission</h2>
                   <p className='mb-4 text-gray-300'>
                     Both off by default, because what a network charges and what it pays out is monetary policy and
                     not something a generated config should decide.
