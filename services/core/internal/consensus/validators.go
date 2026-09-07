@@ -79,17 +79,34 @@ func (vs *ValidatorSet) PublicKey(id string) (ed25519.PublicKey, bool) {
 	return k, ok
 }
 
-// LeaderForRound returns the account ID of the round-robin leader for round r.
-// The leader is ids[r mod N], so leadership rotates through the sorted set and
-// every node computes the same leader for a given round.
-func (vs *ValidatorSet) LeaderForRound(round uint64) string {
+// LeaderFor returns the account ID of the round-robin leader for a given
+// (height, round). The leader is ids[(height+round) mod N], so leadership
+// rotates through the sorted set and every node computes the same leader,
+// because both height and round are values the whole network agrees on.
+//
+// HEIGHT is in there, and it has to be. Leadership used to depend on the round
+// alone, and the round resets to zero on every commit - so on a healthy chain
+// round 0 came round again at every height and ids[0] proposed every block for
+// the life of the network. Nothing rotated, because rotation only happened on a
+// TIMEOUT and a leader that keeps committing never times out. That gave one
+// validator a permanent veto over what got into a block: it could drop any
+// transaction indefinitely and never lose its turn. It also meant a transaction
+// submitted to any other node was never proposed at all, since a node can only
+// propose from its own mempool.
+//
+// Including the height makes the turn pass on every commit, which is what
+// "round-robin leader" was always supposed to mean.
+func (vs *ValidatorSet) LeaderFor(height, round uint64) string {
 	n := uint64(len(vs.ids))
-	return vs.ids[round%n]
+	// height+round can overflow only after 2^64 blocks; the wrap would still be
+	// deterministic and identical on every node, so it is not a correctness
+	// concern.
+	return vs.ids[(height+round)%n]
 }
 
-// IsLeader reports whether id is the leader for round r.
-func (vs *ValidatorSet) IsLeader(id string, round uint64) bool {
-	return vs.LeaderForRound(round) == id
+// IsLeader reports whether id is the leader for a given (height, round).
+func (vs *ValidatorSet) IsLeader(id string, height, round uint64) bool {
+	return vs.LeaderFor(height, round) == id
 }
 
 // Quorum returns the number of votes required to commit: a strict Byzantine

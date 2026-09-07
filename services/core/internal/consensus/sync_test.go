@@ -407,23 +407,27 @@ func TestAcceptSyncedBlockRejectsBadBodies(t *testing.T) {
 		t.Fatalf("accepting an unlinked block: err = %v, want ErrPrevHashMismatch", err)
 	}
 
-	// A body attributed to a validator who does not lead its round.
+	// A body attributed to a validator who does not lead its (height, round).
+	// The height matters: leadership is ids[(height+round) mod N], so a validator
+	// that does not lead height 0 may well lead height 1. The non-leader has to
+	// be chosen for the height the forged body actually claims.
 	head, _, err := nodes[0].chain.Head()
 	if err != nil {
 		t.Fatalf("head: %v", err)
 	}
+	const forgedHeight = uint64(1)
 	notLeader := ""
 	for _, id := range eng.vset().IDs() {
-		if !eng.vset().IsLeader(id, block.Round) {
+		if !eng.vset().IsLeader(id, forgedHeight, block.Round) {
 			notLeader = id
 			break
 		}
 	}
 	if notLeader == "" {
-		t.Fatal("expected at least one validator that does not lead round 0")
+		t.Fatalf("expected at least one validator that does not lead height %d round %d", forgedHeight, block.Round)
 	}
 	wrongLeader := *block
-	wrongLeader.Height = 1
+	wrongLeader.Height = forgedHeight
 	wrongLeader.PrevBlockHash = head
 	wrongLeader.ProposerID = notLeader
 	if err := eng.acceptSyncedBlock(&wrongLeader); !errors.Is(err, ErrWrongLeader) {

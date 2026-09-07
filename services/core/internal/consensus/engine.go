@@ -627,7 +627,7 @@ func (e *Engine) tick(ctx context.Context) {
 	}
 
 	// Only the leader proposes, only if this node is a validator with a key.
-	if !e.isValidator.Load() || !e.vset().IsLeader(e.selfID, e.round) {
+	if !e.isValidator.Load() || !e.vset().IsLeader(e.selfID, e.height, e.round) {
 		e.mu.Unlock()
 		e.flushPendingVotes(ctx, height, pending)
 		return
@@ -897,7 +897,7 @@ func (e *Engine) verifyProposalEnvelope(p *Proposal) error {
 	if !ok {
 		return ErrNotValidator
 	}
-	if !e.vset().IsLeader(p.ProposerID, p.Round) {
+	if !e.vset().IsLeader(p.ProposerID, p.Block.Height, p.Round) {
 		return ErrWrongLeader
 	}
 	if err := p.VerifySignature(pub); err != nil {
@@ -996,12 +996,13 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	if len(b.PrevBlockHash) != HashSize || string(b.PrevBlockHash) != string(e.headHash) {
 		return ErrPrevHashMismatch
 	}
-	// Proposer must be a validator and the correct leader for the block's round.
+	// Proposer must be a validator and the correct leader for the block's height
+	// and round.
 	pub, ok := e.vset().PublicKey(b.ProposerID)
 	if !ok {
 		return ErrNotValidator
 	}
-	if !e.vset().IsLeader(b.ProposerID, b.Round) {
+	if !e.vset().IsLeader(b.ProposerID, b.Height, b.Round) {
 		return ErrWrongLeader
 	}
 	if err := b.VerifySignature(pub); err != nil {

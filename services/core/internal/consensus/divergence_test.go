@@ -84,10 +84,11 @@ func otherValidators(accts []*token.Account, exclude *token.Account, count int) 
 }
 
 // leaderForRound returns the validator account whose ID is the round-robin
-// leader for round r among accts, given the deterministic ValidatorSet ordering.
-func leaderForRound(t *testing.T, vs *ValidatorSet, accts []*token.Account, round uint64) *token.Account {
+// leader for (height, round) among accts, given the deterministic ValidatorSet
+// ordering.
+func leaderForRound(t *testing.T, vs *ValidatorSet, accts []*token.Account, height, round uint64) *token.Account {
 	t.Helper()
-	id := vs.LeaderForRound(round)
+	id := vs.LeaderFor(height, round)
 	for _, a := range accts {
 		if a.AccountID() == id {
 			return a
@@ -134,7 +135,7 @@ func TestConsensusNoDivergenceAcrossRotation(t *testing.T) {
 	// The subject node is a passive follower (Self == the round-0 leader so it can
 	// vote), driven only through handleProposal/handleVote. Using a no-op transport
 	// keeps its own publishes from feeding anything back.
-	subject := leaderForRound(t, vs, accts, 0)
+	subject := leaderForRound(t, vs, accts, 0, 0)
 	eng, err := New(Config{
 		Transport:  noopTransport{},
 		Validators: vs,
@@ -171,8 +172,8 @@ func TestConsensusNoDivergenceAcrossRotation(t *testing.T) {
 	// with different transaction contents so their hashes differ.
 	txA := signedTransfer(t, sender, "recipient-A", 100, 0)
 	txB := signedTransfer(t, sender, "recipient-B", 200, 1)
-	leader0 := leaderForRound(t, vs, accts, 0)
-	leader1 := leaderForRound(t, vs, accts, 1)
+	leader0 := leaderForRound(t, vs, accts, 0, 0)
+	leader1 := leaderForRound(t, vs, accts, 0, 1)
 	blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
 	blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB})
 	if string(blockA.Hash()) == string(blockB.Hash()) {
@@ -254,8 +255,8 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 		t.Fatalf("set: %v", err)
 	}
 
-	leader0 := leaderForRound(t, vs, accts, 0)
-	leader1 := leaderForRound(t, vs, accts, 1)
+	leader0 := leaderForRound(t, vs, accts, 0, 0)
+	leader1 := leaderForRound(t, vs, accts, 0, 1)
 	subject := leader0
 
 	// Each case gets its own engine so one case's votes cannot influence another.

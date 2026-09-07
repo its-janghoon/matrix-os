@@ -59,6 +59,9 @@ type Service struct {
 	chain    *token.Chain
 	exchange *marketexchange.Exchange
 	funder   Funder
+	// settler, when non-nil, settles CompleteJob through consensus instead of by
+	// a direct ledger transfer. See the JobSettler doc for why that matters.
+	settler JobSettler
 	// authEnforced reports whether the server in front of this Service requires
 	// authentication on every mutating RPC. FundAccount refuses to run when it is
 	// false: unlike SubmitSignedTransfer, a funding request carries no per-request
@@ -87,6 +90,29 @@ func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Cha
 	}
 	return &Service{market: m, settled: settled, chain: chain, exchange: exchange, funder: funder}, nil
 }
+
+// JobSettler settles a compute job through consensus and finalizes it.
+//
+// It exists because CompleteJob used to charge the buyer with a direct
+// market.Ledger transfer. That has two problems on anything but a single node.
+// It is not agreed: the transfer lands on one node's copy of the ledger and no
+// other node ever hears about it, so balances diverge. And it is not
+// authorized: no signature from the payer is involved, so any caller who can
+// reach the RPC can move any account's balance. Settling through consensus
+// fixes both - the payment is a signed transfer from the buyer that a quorum
+// commits, and every node applies it.
+//
+// It is satisfied by node.ComputeSettlementCoordinator.
+type JobSettler interface {
+	SettleAndCompleteJob(ctx context.Context, jobID string) (*market.Job, error)
+}
+
+// SetJobSettler installs the consensus settlement path for CompleteJob. It is
+// called once during construction, before the server serves, so no locking is
+// needed. With no settler installed CompleteJob falls back to the direct ledger
+// transfer, which is only appropriate for a Service with no consensus engine
+// behind it (tests, and a library caller wiring the market on its own).
+func (s *Service) SetJobSettler(settler JobSettler) { s.settler = settler }
 
 // SetAuthEnforced records whether the server hosting this Service requires
 // authentication on every mutating RPC. It is set by NewServer from cfg.Auth and
@@ -123,6 +149,10 @@ type Config struct {
 	// Funder backs the FundAccount RPC (optional). When nil, FundAccount returns
 	// codes.Unimplemented. It is satisfied by *token.Treasury.
 	Funder Funder
+	// Settler, when non-nil, makes CompleteJob settle through consensus rather
+	// than by a direct ledger transfer. A node with a consensus engine must set
+	// it; see the JobSettler doc.
+	Settler JobSettler
 }
 
 // NewServer builds a market gRPC server. It installs the admin auth
@@ -136,6 +166,7 @@ func NewServer(cfg Config) (*Server, error) {
 	// Record whether this server authenticates every mutating RPC. FundAccount
 	// (unsigned, unlike SubmitSignedTransfer) refuses to run without it.
 	svc.SetAuthEnforced(cfg.Auth != nil)
+	svc.SetJobSettler(cfg.Settler)
 
 	var opts []grpc.ServerOption
 	if cfg.Auth != nil {
@@ -267,6 +298,40 @@ func mapMarketError(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	default:
 		return status.Error(codes.Internal, err.Error())
+	}
+}
+
+// mapSettlementError turns a consensus-settlement failure into a gRPC status.
+//
+// It cannot match the settlement sentinels by identity: they live in
+// internal/node, which imports this package, so importing it back would be a
+// cycle. The market and token sentinels DO match through the wrapping, and they
+// are the ones a caller can act on differently (a missing job, an unaffordable
+// price, a job in the wrong state). Everything else - no signing account for
+// the buyer, a settlement that committed but was skipped as unaffordable - is a
+// precondition the caller has to fix, and the message says which. A settlement
+// that could not be confirmed in time is DeadlineExceeded: the reservation is
+// intact and retrying re-drives the same transfer rather than signing a second
+// one, so a retry cannot double-charge.
+func mapSettlementError(err error) error {
+	if err == nil {
+		return nil
+	}
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		return status.Error(codes.DeadlineExceeded, err.Error())
+	case errors.Is(err, context.Canceled):
+		return status.Error(codes.Canceled, err.Error())
+	case errors.Is(err, market.ErrJobNotFound),
+		errors.Is(err, market.ErrProviderNotFound),
+		errors.Is(err, market.ErrInsufficientFunds),
+		errors.Is(err, market.ErrInsufficientCapacity),
+		errors.Is(err, market.ErrInvalidJobState),
+		errors.Is(err, market.ErrInvalidProvider),
+		errors.Is(err, market.ErrSelfDealing):
+		return mapMarketError(err)
+	default:
+		return status.Error(codes.FailedPrecondition, err.Error())
 	}
 }
 

@@ -1,32 +1,80 @@
-'use client';
-
+import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
-import { FiCopy } from 'react-icons/fi';
-import { toast } from 'sonner';
 import { GITHUB_URL } from '@/lib/releases';
 
-const copyCode = (code: string) => {
-  navigator.clipboard.writeText(code);
-  toast.success('Code copied to clipboard');
+export const metadata = {
+  title: 'matrix CLI',
+  description:
+    'The matrix command line: every command, every flag, and which of the node’s three ports each one talks to. Verified against the binary’s own --help.',
 };
 
-// Declared at module scope, not inside the page component. Defining it during
-// render creates a new component type on every render, which throws away the
-// subtree's state each time - react-hooks/static-components flags exactly this.
-const CodeBlock = ({ label, code }: { label: string; code: string }) => (
-  <div className='bg-black rounded-lg p-4'>
-    <div className='flex justify-between items-center mb-2'>
-      <span className='text-sm text-gray-100'>{label}</span>
-      <button onClick={() => copyCode(code)} className='p-2 hover:bg-gray-800 rounded transition-colors'>
-        <FiCopy className='w-4 h-4' />
-      </button>
-    </div>
-    <pre className='text-sm text-gray-100 overflow-x-auto whitespace-pre-wrap break-words'>
-      <code>{code}</code>
-    </pre>
-  </div>
-);
+/**
+ * This page carried a box stating that "the matrix.inference.v1
+ * InferenceService is not yet wired into the node, so the CLI does not expose
+ * an inference command". Both halves were false: the node serves it on 9092
+ * and `matrix inference submit` has been there the whole time. It also omitted
+ * `fund`, `quickstart`, `tx get`, and the --wallet and --inference-addr flags.
+ *
+ * Everything below was taken from `matrix --help` and from running the
+ * commands against a node, including the outputs quoted verbatim.
+ */
+const BUILD = `# from services/core
+go build -o matrix ./cmd/matrix
+go install ./cmd/matrix     # or put it on your PATH
+
+matrix --help               # the full command tree`;
+
+const DEMO = `matrix --api-key <key> quickstart
+# wallet -> funded buyer -> registered provider -> job -> settlement, in one command
+# --provider --capacity --price --units --fund --wallet all override the defaults`;
+
+const PROVIDERS = `matrix status                  # endpoint + serving status
+matrix health                  # the gRPC health Check: SERVING / NOT_SERVING
+
+matrix provider register --id gpu-1 --capacity 100 --price 5
+matrix provider list                     # local providers
+matrix provider list --include-remote    # plus providers discovered over p2p`;
+
+const PROVIDER_OUT = `ID                       CAPACITY  AVAILABLE  PRICE/UNIT  ORIGIN  PEER
+demo-inference-provider  100       100        5           local
+quickstart-provider      100       90         5           local`;
+
+const JOBS = `matrix job submit --buyer <account-id> --provider gpu-1 --units 10
+matrix job complete --id <job-id>    # settles: moves native MATRIX buyer -> provider
+matrix job cancel --id <job-id>      # releases the reserved capacity, charges nothing
+
+matrix balance --account <account-id>
+matrix fund --account <account-id> --amount 1000000   # from the genesis reward pool`;
+
+const WALLET = `matrix wallet create           # refuses to overwrite an existing file
+matrix wallet show             # the account id (which is the public key)
+matrix wallet balance
+matrix wallet transfer --to <recipient-account-id> --amount 200
+
+# every wallet command takes --wallet to use a file other than ~/.matrix/wallet.json`;
+
+const INFERENCE = `matrix inference submit \\
+  --buyer <account-id> \\
+  --provider demo-inference-provider \\
+  --model demo \\
+  --prompt "one sentence about peer-to-peer compute"
+
+matrix inference get --id <job-id>
+# --fulfill defaults to true: the job is reserved, run and settled in one call.
+# --fulfill=false reserves only.`;
+
+const INFERENCE_OUT = `id:         13ac1c62-5013-4c31-8cbd-c5f3b7848d23
+buyer:      c5b097824f2e2222a278af3dbe4b519fa653a96e44ff08891668b3a2a708d5d9
+provider:   demo-inference-provider
+model:      demo
+status:     completed
+units:      5
+completion: echo: user: one sentence about peer-to-peer compute`;
+
+const TX = `matrix tx list --limit 20      # ascending height order
+matrix tx list --start 10 --limit 20
+matrix tx get --height 3`;
 
 export default function MatrixCliDocs() {
   return (
@@ -37,153 +85,144 @@ export default function MatrixCliDocs() {
           <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
-            {/* Main Content */}
             <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
-              <div className='max-w-4xl mx-auto'>
+              <div className='mx-auto max-w-4xl'>
                 <article className='text-gray-100'>
-                  {/* Hero */}
-                  <div className='bg-gradient-to-r from-blue-500/10 via-cyan-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
-                    <h1 className='text-4xl font-bold text-white mb-4'>The matrix CLI</h1>
+                  <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
+                    <h1 className='mb-4 text-4xl font-bold text-white'>The matrix CLI</h1>
                     <p className='text-xl text-gray-100'>
-                      <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>matrix</code> is the command-line
-                      operations tool for a Matrix OS node. It drives a running node over its gRPC market API
-                      (<code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>matrix.market.v1.MarketService</code>,
-                      default <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>127.0.0.1:9091</code>):
-                      check node health, manage compute providers and jobs, read balances and the token chain, and
-                      manage an ed25519 wallet to sign and submit native MATRIX transfers.
+                      <code className='text-white'>matrix</code> drives a running node: health, providers, jobs,
+                      balances, inference, and a local wallet that signs transfers so the node never sees a private
+                      key.
                     </p>
                   </div>
 
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>Install / build</h2>
-                  <p className='text-gray-100 leading-relaxed mb-4'>
-                    Build the binary from <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>services/core</code>, then run{' '}
-                    <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>matrix --help</code> to see the full
-                    command tree:
+                  <h2 className='mb-4 mt-8 text-3xl font-bold text-white'>Build it</h2>
+                  <CodeSample label='shell' code={BUILD} />
+                  <p className='mt-4 text-gray-300'>
+                    Or take a prebuilt binary from{' '}
+                    <a href='/download' className='text-accent-200 underline hover:text-accent-100'>
+                      a release
+                    </a>
+                    .
                   </p>
-                  <div className='space-y-8'>
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <CodeBlock
-                        label='Build and explore the CLI'
-                        code={`# from services/core
-go build -o matrix ./cmd/matrix
-# optionally install onto your PATH
-go install ./cmd/matrix
 
-# see the full command tree
-matrix --help`}
-                      />
-                    </div>
-
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Global flags</h3>
-                      <ul className='text-gray-100 space-y-2 list-disc pl-6 mb-0'>
-                        <li>
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>--addr</code> (default{' '}
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>127.0.0.1:9091</code>): node
-                          market gRPC endpoint.
-                        </li>
-                        <li>
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>--api-key</code>: API key for
-                          nodes running with ACLs, sent as the <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>authorization</code> gRPC
-                          metadata header.
-                        </li>
-                        <li>
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>--timeout</code> (default{' '}
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>10s</code>): per-RPC timeout.
-                        </li>
-                        <li>
-                          <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>--json</code>: emit
-                          machine-readable JSON instead of human-friendly tables.
-                        </li>
-                      </ul>
-                    </div>
-                  </div>
-
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Common commands</h2>
-                  <div className='space-y-8'>
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Node status and providers</h3>
-                      <CodeBlock
-                        label='Status, health, and provider management'
-                        code={`matrix status                 # report serving status + endpoint
-matrix health                 # gRPC health Check -> SERVING / NOT_SERVING
-
-# Advertise local compute capacity on the order book.
-matrix provider register --id provider-1 --capacity 100 --price 5
-
-# List providers (add --include-remote for P2P-discovered providers).
-matrix provider list --include-remote`}
-                      />
-                    </div>
-
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Jobs, balances, and transactions</h3>
-                      <CodeBlock
-                        label='Reserve, settle, and inspect'
-                        code={`# Reserve provider capacity for a paid compute job.
-matrix job submit --buyer <account-id> --provider provider-1 --units 10
-matrix job complete --id <job-id>     # settle (transfers native MATRIX)
-matrix job cancel --id <job-id>       # return reserved capacity
-
-matrix balance --account <account-id>
-matrix tx list --start 10 --limit 20`}
-                      />
-                    </div>
-
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Wallet</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        The wallet is an ed25519 keypair stored at{' '}
-                        <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>~/.matrix/wallet.json</code>{' '}
-                        with <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>0600</code> permissions.
-                        The private key is never printed or logged; transfers are signed locally and only the public
-                        key, signature, and transfer fields are sent to the node.
-                      </p>
-                      <CodeBlock
-                        label='Create a wallet and submit a signed transfer'
-                        code={`matrix wallet create          # refuses to overwrite an existing file
-matrix wallet show            # show the account ID / public key
-matrix wallet balance
-
-# Sign and submit a native MATRIX transfer.
-matrix wallet transfer --to <recipient-account-id> --amount 200`}
-                      />
-                    </div>
-                  </div>
-
-                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mt-8 mb-8'>
-                    <h3 className='text-xl font-bold text-white mb-3'>Note on inference</h3>
-                    <p className='text-gray-100 leading-relaxed mb-0'>
-                      The <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>matrix.inference.v1</code>{' '}
-                      InferenceService is not yet wired into the node, so the CLI does not expose an{' '}
-                      <code className='text-gray-100 bg-gray-800 px-1.5 py-0.5 rounded'>inference</code> command.
-                      Inference operations remain internal until the service is served over gRPC.
-                    </p>
-                  </div>
-
-                  <h2 className='text-2xl font-bold text-white mb-4'>Next steps</h2>
-                  <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Global flags</h2>
+                  <ul className='list-disc space-y-3 pl-6 text-gray-300'>
                     <li>
-                      <a href='/docs/quickstart' className='text-blue-400 hover:text-blue-300 underline'>
-                        Quick Start Guide →
-                      </a>
+                      <code className='text-white'>--addr</code> (default{' '}
+                      <code className='text-white'>127.0.0.1:9091</code>) - the market gRPC endpoint. Almost every
+                      command talks to this one.
                     </li>
                     <li>
-                      <a href='/docs/configuration' className='text-blue-400 hover:text-blue-300 underline'>
-                        Configuration →
-                      </a>
+                      <code className='text-white'>--inference-addr</code> (default{' '}
+                      <code className='text-white'>127.0.0.1:9092</code>) - the inference gRPC endpoint. It is a
+                      separate server on a separate port, so pointing <code className='text-white'>--addr</code> at a
+                      remote node is not enough for <code className='text-white'>matrix inference</code>; it is a flag
+                      on the <code className='text-white'>inference</code> commands only.
                     </li>
                     <li>
-                      <a
-                        href={`${GITHUB_URL}/blob/main/services/core/cmd/matrix/README.md`}
-                        target='_blank'
-                        rel='noopener noreferrer'
-                        className='text-blue-400 hover:text-blue-300 underline'
-                      >
-                        Full matrix CLI README on GitHub →
-                      </a>
+                      <code className='text-white'>--api-key</code> - sent as the{' '}
+                      <code className='text-white'>authorization</code> gRPC metadata header. Required on a node with{' '}
+                      <code className='text-white'>security.enable_acls</code> on, which is the default a generated
+                      config writes.
+                    </li>
+                    <li>
+                      <code className='text-white'>--timeout</code> (default <code className='text-white'>10s</code>)
+                      and <code className='text-white'>--json</code> for machine-readable output.
                     </li>
                   </ul>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>The whole loop in one command</h2>
+                  <CodeSample label='shell' code={DEMO} />
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Node and providers</h2>
+                  <CodeSample label='shell' code={PROVIDERS} />
+                  <p className='mb-4 mt-4 text-gray-300'>
+                    <code className='text-white'>provider list</code> on a freshly initialized node already has one
+                    entry - the GPU-free echo provider the node registers so the inference path works before you have
+                    a model server:
+                  </p>
+                  <CodeSample label='output' code={PROVIDER_OUT} />
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Jobs and balances</h2>
+                  <CodeSample label='shell' code={JOBS} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>fund</code> moves native MATRIX out of the genesis reward pool; it
+                    never mints, so the billion-MATRIX cap holds however often you call it.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>job complete</code> settles through consensus: the payment is a
+                    transfer <em>signed by the buyer</em> that a quorum commits and every node applies. The node
+                    therefore needs the buyer&apos;s signing key, which it resolves from the wallet files under{' '}
+                    <code className='text-white'>~/.matrix</code>. A job whose buyer it holds no key for is refused
+                    with <code className='text-white'>FailedPrecondition</code> and the reservation left intact, so
+                    you can cancel it. That refusal is the point: paying out of an account without its owner&apos;s
+                    signature is what this path exists to stop.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Wallet</h2>
+                  <p className='mb-4 text-gray-300'>
+                    An ed25519 keypair at <code className='text-white'>~/.matrix/wallet.json</code>, mode{' '}
+                    <code className='text-white'>0600</code>. The private key is never printed or logged: a transfer
+                    is signed locally and only the public key, the signature and the transfer fields go to the node.
+                  </p>
+                  <CodeSample label='shell' code={WALLET} />
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Inference</h2>
+                  <CodeSample label='shell' code={INFERENCE} />
+                  <p className='mb-4 mt-4 text-gray-300'>What a run against the demo provider prints:</p>
+                  <CodeSample label='output' code={INFERENCE_OUT} />
+                  <p className='mt-4 text-gray-300'>
+                    An inference job is a compute job with a prompt attached: it reserves capacity from a registered
+                    provider, runs on that provider&apos;s backend, and settles at that provider&apos;s price through
+                    consensus - which means the node needs the buyer&apos;s signing key. It resolves one from the
+                    wallet files under <code className='text-white'>~/.matrix</code>, so the wallet you created above
+                    works and an arbitrary account id does not.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Transactions</h2>
+                  <CodeSample label='shell' code={TX} />
+                  <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h3 className='mb-2 text-lg font-bold text-white'>What tx list does and does not show</h3>
+                    <p className='mb-0 text-gray-100'>
+                      These read the signed-transfer chain, which is what{' '}
+                      <code className='text-white'>wallet transfer</code> and{' '}
+                      <code className='text-white'>SubmitSignedTransfer</code> append to. Job and inference
+                      settlements go through consensus and land in the committed block chain instead, so a node whose
+                      only activity was marketplace jobs reports{' '}
+                      <code className='text-white'>chain length: 0</code> here while balances have plainly moved. Use{' '}
+                      <code className='text-white'>matrix balance</code> to see settlement.
+                    </p>
+                  </div>
+
+                  <div className='mt-10 rounded-xl border border-primary-400/20 bg-primary-400/10 p-6'>
+                    <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
+                    <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
+                      <li>
+                        <a href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
+                          Quickstart
+                        </a>{' '}
+                        - a node and a settled job in about a minute
+                      </li>
+                      <li>
+                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                          Configuration
+                        </a>{' '}
+                        - every field, including where the API key lives
+                      </li>
+                      <li>
+                        <a
+                          href={`${GITHUB_URL}/blob/main/services/core/cmd/matrix/README.md`}
+                          target='_blank'
+                          rel='noopener noreferrer'
+                          className='text-accent-200 underline hover:text-accent-100'
+                        >
+                          The CLI&apos;s own README
+                        </a>
+                      </li>
+                    </ul>
+                  </div>
                 </article>
               </div>
             </main>

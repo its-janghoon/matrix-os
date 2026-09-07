@@ -519,7 +519,7 @@ func TestSetChangeFromANonValidatorMakesTheBlockInvalid(t *testing.T) {
 	}
 	leader := leaderForRound(t, eng.vset(), []*token.Account{
 		nodes[0].acct, nodes[1].acct, nodes[2].acct, nodes[3].acct,
-	}, 0)
+	}, 0, 0)
 
 	tx := signedTransfer(t, outsider, AddValidatorRecipient(newcomer.PublicKey), 0, 0)
 	block := buildSignedBlock(t, leader, 0, 0, head, []token.Transaction{*tx})
@@ -1095,6 +1095,56 @@ func TestEjectionCanBeTurnedOff(t *testing.T) {
 	for i, nd := range nodes {
 		if !nd.engine.vset().Contains(offenderID) {
 			t.Fatalf("node %d ejected the offender with eject_equivocators off", i)
+		}
+	}
+}
+
+// TestLeadershipRotatesOnEveryCommit is the regression for a flaw the set-change
+// work exposed rather than caused: leadership was ids[round mod N], and the
+// round resets to zero on every commit, so on a chain that keeps committing
+// round 0 came round again at every height and ONE validator proposed every
+// block for the life of the network. Rotation only ever happened on a timeout,
+// and a leader that keeps committing never times out.
+//
+// The cost was not cosmetic. That validator had a permanent veto over what got
+// into a block, and a transaction submitted to any other node was never
+// proposed at all, because a node can only propose from its own mempool.
+func TestLeadershipRotatesOnEveryCommit(t *testing.T) {
+	nodes, stop := setChangeCluster(t, 4, 100)
+	defer stop()
+
+	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
+	defer stopTraffic()
+
+	waitFor(t, 15*time.Second, "a run of committed blocks", func() bool {
+		return nodes[0].engine.Height() >= 8
+	})
+
+	proposers := make(map[string]int)
+	for h := uint64(0); h < 8; h++ {
+		block, err := nodes[0].chain.BlockAt(h)
+		if err != nil {
+			t.Fatalf("block at %d: %v", h, err)
+		}
+		proposers[block.ProposerID]++
+	}
+	if len(proposers) < 2 {
+		t.Fatalf("8 blocks were proposed by %d validator(s): %v - leadership is not rotating", len(proposers), proposers)
+	}
+
+	// And every node must attribute a height to the same leader, or they would
+	// reject each other's blocks.
+	for h := uint64(0); h < 8; h++ {
+		var want string
+		for i, nd := range nodes {
+			got := nd.engine.vset().LeaderFor(h, 0)
+			if i == 0 {
+				want = got
+				continue
+			}
+			if got != want {
+				t.Fatalf("nodes disagree about the leader of height %d: %s vs %s", h, want, got)
+			}
 		}
 	}
 }

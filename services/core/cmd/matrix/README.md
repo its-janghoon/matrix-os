@@ -73,6 +73,7 @@ These persistent flags apply to every subcommand:
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--addr` | `127.0.0.1:9091` | Node market gRPC endpoint (`host:port`). This is the node's `Market.Addr`. |
+| `--inference-addr` | `127.0.0.1:9092` | Node inference gRPC endpoint. A separate server on a separate port, so `--addr` does not cover it. Registered on the `inference` commands only. |
 | `--api-key` | _(empty)_ | API key for nodes running with ACLs. Sent as the `authorization` gRPC metadata header, which is exactly what the node's authenticator reads. Only needed when the node is started with ACLs enabled; otherwise the market API is open. |
 | `--timeout` | `10s` | Per-RPC timeout. |
 | `--json` | `false` | Emit machine-readable JSON instead of human-friendly tables. |
@@ -111,12 +112,27 @@ matrix job get --id <job-id>
 matrix job list                     # all jobs
 matrix job list --buyer <account-id>
 
-# Settle a job (transfers credits buyer -> provider).
+# Settle a job (moves native MATRIX buyer -> provider).
 matrix job complete --id <job-id>
 
 # Cancel a job (returns reserved capacity).
 matrix job cancel --id <job-id>
 ```
+
+`job complete` settles through consensus: the payment is a transfer SIGNED BY
+THE BUYER that a quorum commits and every node applies. So the node needs the
+buyer's signing key, which it resolves from the wallet files under `~/.matrix`.
+A job whose buyer the node holds no key for is refused, with the reservation
+left intact so it can be cancelled:
+
+```
+Error: FailedPrecondition: settle job "98a1df95-...": node: no signing account
+for buyer: "b8cba113..."
+```
+
+That refusal is the point. Settling with a direct ledger write instead would
+charge an account without its owner's signature, and would move credits on this
+node's copy of the ledger only, where no other node would ever see them.
 
 ### Funding
 
@@ -195,10 +211,48 @@ check is always unauthenticated.
 
 ## Inference
 
-The `matrix.inference.v1` InferenceService is **not yet wired into the node**
-(it is not started by `cmd/matrixd`), so this CLI does not expose an `inference`
-command. Inference operations remain internal until the service is served over
-gRPC.
+`matrixd` serves `matrix.inference.v1.InferenceService` on its own port
+(`inference.addr`, default `0.0.0.0:9092`), and the CLI drives it:
+
+```sh
+matrix inference submit \
+  --buyer <account-id> \
+  --provider demo-inference-provider \
+  --model demo \
+  --prompt "one sentence about peer-to-peer compute"
+
+matrix inference get --id <job-id>
+```
+
+```
+id:         13ac1c62-5013-4c31-8cbd-c5f3b7848d23
+buyer:      c5b097824f2e2222a278af3dbe4b519fa653a96e44ff08891668b3a2a708d5d9
+provider:   demo-inference-provider
+model:      demo
+status:     completed
+units:      5
+completion: echo: user: one sentence about peer-to-peer compute
+```
+
+`--fulfill` defaults to true, so the job is reserved, run and settled in one
+call; `--fulfill=false` reserves only. `demo-inference-provider` is the GPU-free
+echo backend a freshly initialized node registers (`inference.echo_provider`),
+both in the inference registry and on the market, so this works before you have
+a model server.
+
+Two things follow from an inference job being a compute job with a prompt
+attached:
+
+- It reserves capacity from a **registered market provider** and settles at that
+  provider's price. `--provider` must name one; `matrix provider list` shows
+  which.
+- Settlement goes through consensus and needs the **buyer's signing key**. The
+  node resolves one from the wallet files under `~/.matrix`, so a wallet created
+  with `matrix wallet create` works and an arbitrary account id does not. A
+  multi-tenant deployment supplies its own custodial resolver instead.
+
+These commands talk to the inference port, not the market port, so `--addr`
+alone is not enough for a remote node - use `--inference-addr` as well.
 
 ## Exit codes
 

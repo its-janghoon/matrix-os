@@ -175,10 +175,25 @@ func (s *Service) ListJobs(ctx context.Context, req *marketv1.ListJobsRequest) (
 	return &marketv1.ListJobsResponse{Jobs: out}, nil
 }
 
-// CompleteJob settles a pending/running job, transferring credits buyer -> provider.
+// CompleteJob settles a pending/running job, moving native MATRIX buyer ->
+// provider.
+//
+// With a JobSettler configured - which is what the node does - the payment is a
+// signed transfer from the buyer that consensus commits and every node applies.
+// The buyer's signing key is therefore required, and a job whose buyer this
+// node holds no key for is refused rather than charged: paying out of an
+// account without its owner's signature is the thing this path exists to stop.
+// The reservation is left intact on a refusal so the caller can cancel it.
 func (s *Service) CompleteJob(ctx context.Context, req *marketv1.CompleteJobRequest) (*marketv1.CompleteJobResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if s.settler != nil {
+		job, err := s.settler.SettleAndCompleteJob(ctx, req.GetId())
+		if err != nil {
+			return nil, mapSettlementError(err)
+		}
+		return &marketv1.CompleteJobResponse{Job: jobToProto(*job)}, nil
 	}
 	if err := s.market.CompleteJob(req.GetId()); err != nil {
 		return nil, mapMarketError(err)

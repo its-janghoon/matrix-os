@@ -255,7 +255,7 @@ type Node struct {
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
 	connectServer    *connectapi.Server
-	inferenceAccts   *walletAccounts
+	signingAccts     *walletAccounts
 	bridge           *bridge.Bridge
 	bridgeWatcher    *bridge.Watcher
 	bridgeWatchDone  chan struct{}
@@ -266,6 +266,16 @@ type Node struct {
 	matrices         map[string]*matrix.Matrix
 	matricesMu       sync.RWMutex
 }
+
+// The market listing the demo inference provider is registered with. It exists
+// so an inference job can be submitted, reserved and settled on a fresh node
+// with no GPU and no model server; a real deployment registers its own provider
+// at its own price. These match `matrix quickstart`'s demo provider so the two
+// demos behave the same.
+const (
+	demoInferenceCapacity = 100
+	demoInferencePrice    = 5
+)
 
 // Initialize creates a new node configuration
 func Initialize(configPath string) error {
@@ -680,6 +690,24 @@ func (n *Node) Start() error {
 		marketAuth = n.adminServer.GetAuthenticator()
 	}
 	marketSettled := token.NewSettledLedger(n.market.Ledger(), n.tokenChain)
+
+	// One signing-account resolver for the whole node. Settling a job - compute
+	// or inference - is a transfer FROM the buyer, so it needs the buyer's key;
+	// the resolver reads the wallet files under ~/.matrix, which is the
+	// single-operator model the quickstart uses, and never fabricates custody. A
+	// multi-tenant deployment replaces it with its own custodial resolver.
+	n.signingAccts = newWalletAccounts()
+
+	// CompleteJob settles through consensus. It used to charge the buyer with a
+	// direct market.Ledger transfer, which on more than one node is not agreed -
+	// the credits move on this node's copy and nowhere else - and on any node is
+	// not authorized, because no signature from the payer is involved. The
+	// coordinator signs a transfer as the buyer, waits for a quorum to commit and
+	// apply it, and only then finalizes the job.
+	settlementCoordinator, err := NewComputeSettlementCoordinator(n.market, n.consensus, n.signingAccts)
+	if err != nil {
+		return fmt.Errorf("failed to build the compute settlement coordinator: %w", err)
+	}
 	marketServer, err := marketapi.NewServer(marketapi.Config{
 		Addr:     n.config.Market.Addr,
 		Auth:     marketAuth,
@@ -688,6 +716,7 @@ func (n *Node) Start() error {
 		Chain:    n.tokenChain,
 		Exchange: n.exchange,
 		Funder:   n.treasury,
+		Settler:  settlementCoordinator,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)
@@ -709,20 +738,18 @@ func (n *Node) Start() error {
 	//
 	// ACCOUNTS RESOLVER (honest choice): settling an inference job requires the
 	// buyer's private key to sign the consensus transfer, so the Service is given
-	// an Accounts resolver rather than assuming custody. For a dev/local node the
-	// node resolves buyer signing keys from the local wallet directory
-	// (~/.matrix by default): a node fulfilling inference on behalf of a buyer it
-	// holds the key for. This is exactly the single-operator model the quickstart
-	// uses. A multi-tenant deployment supplies its own custodial resolver via
+	// an Accounts resolver rather than assuming custody. It is the SAME resolver
+	// the compute-settlement coordinator uses (n.signingAccts, built above), so
+	// custody is one decision for the whole node rather than one per marketplace.
+	// A multi-tenant deployment supplies its own custodial resolver via
 	// GetInference() before serving; the wallet resolver only knows keys that
 	// exist as wallet files under its directory, so it never fabricates custody.
-	n.inferenceAccts = newWalletAccounts()
 	inferenceRegistry := inference.NewRegistry()
 	inferenceSvc, err := inference.NewService(inference.Config{
 		Market:   n.market,
 		Registry: inferenceRegistry,
 		Settler:  n.consensus,
-		Accounts: n.inferenceAccts,
+		Accounts: n.signingAccts,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create inference service: %w", err)
@@ -739,7 +766,26 @@ func (n *Node) Start() error {
 		if err := inferenceRegistry.Register(n.config.Inference.EchoProvider, inference.NewEchoBackend()); err != nil {
 			return fmt.Errorf("failed to register echo inference backend: %w", err)
 		}
-		fmt.Printf("Inference: registered echo backend for demo provider %q.\n", n.config.Inference.EchoProvider)
+		// An inference job is a market job: it reserves capacity from a REGISTERED
+		// provider and settles at that provider's price. Registering the backend
+		// alone left the one command this demo provider exists for -
+		// `matrix inference submit --provider demo-inference-provider` - failing
+		// with "market: provider not found" on a freshly initialized node.
+		//
+		// Only when it is not already there: RegisterProvider resets Available to
+		// Capacity, so re-registering on every restart would forget the capacity
+		// currently reserved by pending jobs.
+		if _, exists := n.market.GetProvider(n.config.Inference.EchoProvider); !exists {
+			if err := n.market.RegisterProvider(market.Provider{
+				ID:           n.config.Inference.EchoProvider,
+				Capacity:     demoInferenceCapacity,
+				PricePerUnit: demoInferencePrice,
+			}); err != nil {
+				return fmt.Errorf("failed to register the demo inference provider on the market: %w", err)
+			}
+		}
+		fmt.Printf("Inference: registered echo backend for demo provider %q (capacity %d, price %d/unit).\n",
+			n.config.Inference.EchoProvider, demoInferenceCapacity, demoInferencePrice)
 	}
 
 	var inferenceAuth *admin.Authenticator
@@ -1123,14 +1169,14 @@ func (n *Node) GetBridgeWatcher() *bridge.Watcher {
 	return n.bridgeWatcher
 }
 
-// RegisterInferenceAccount makes acct's signing key available to the inference
-// Service so the node can sign consensus settlement transfers on behalf of that
-// buyer. It complements the on-disk wallet resolver for in-process/test callers
-// that hold an account in memory rather than as a wallet file. A nil account is
-// a no-op.
+// RegisterInferenceAccount makes acct's signing key available to the node so it
+// can sign consensus settlement transfers on behalf of that buyer, for both
+// compute jobs and inference jobs. It complements the on-disk wallet resolver
+// for in-process/test callers that hold an account in memory rather than as a
+// wallet file. A nil account is a no-op.
 func (n *Node) RegisterInferenceAccount(acct *token.Account) {
-	if n.inferenceAccts == nil || acct == nil {
+	if n.signingAccts == nil || acct == nil {
 		return
 	}
-	n.inferenceAccts.Add(acct)
+	n.signingAccts.Add(acct)
 }

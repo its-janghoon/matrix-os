@@ -521,12 +521,22 @@ func TestValidatorSetLeaderRotation(t *testing.T) {
 		t.Fatalf("quorum for N=4 = %d, want 3", vs.Quorum())
 	}
 	ids := vs.IDs()
-	// Round r must select ids[r mod N] and wrap around.
-	for r := uint64(0); r < 8; r++ {
-		want := ids[r%uint64(len(ids))]
-		if got := vs.LeaderForRound(r); got != want {
-			t.Fatalf("leader for round %d = %s, want %s", r, got, want)
+	// (height, round) must select ids[(height+round) mod N] and wrap around. The
+	// height is what makes the turn pass on every commit rather than only on a
+	// round timeout.
+	for h := uint64(0); h < 5; h++ {
+		for r := uint64(0); r < 8; r++ {
+			want := ids[(h+r)%uint64(len(ids))]
+			if got := vs.LeaderFor(h, r); got != want {
+				t.Fatalf("leader for height %d round %d = %s, want %s", h, r, got, want)
+			}
 		}
+	}
+	// Two consecutive heights at round 0 must have DIFFERENT leaders. This is the
+	// regression that matters: with leadership keyed on the round alone, round 0
+	// came round again at every commit and one validator proposed forever.
+	if vs.LeaderFor(0, 0) == vs.LeaderFor(1, 0) {
+		t.Fatal("the same validator leads two consecutive heights at round 0; leadership does not rotate")
 	}
 	// Ordering is deterministic regardless of input order.
 	shuffled := []ed25519.PublicKey{pubs[3], pubs[0], pubs[2], pubs[1]}
