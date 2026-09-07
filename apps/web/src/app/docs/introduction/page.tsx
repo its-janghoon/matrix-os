@@ -1,11 +1,29 @@
-'use client';
-
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
+import { MarketFlow } from '@/components/diagrams';
 import Navigation from '@/components/Navigation';
-import { Toaster } from 'sonner';
 import { GITHUB_URL } from '@/lib/releases';
+import Link from 'next/link';
 
+export const metadata = {
+  title: 'Introduction',
+  description:
+    'What Matrix OS is, what it does today, and what it does not do: a peer-to-peer market for compute and LLM inference, settled in one coin on its own BFT chain.',
+};
+
+/**
+ * This page used to advertise "zero-knowledge proofs for privacy-preserving
+ * operations", "secure enclaves for sensitive computations", "native support
+ * for machine learning models, neural networks", and agents that "learn and
+ * adapt from their environment" and "collaborate with other agents". None of
+ * that exists: there is no ZK anything and no enclave anything in the tree, and
+ * the agent runtime exposes exactly four host functions - log, send,
+ * get_memory, set_memory. It also sent readers to the quickstart to "create
+ * your first agent", which is not what the quickstart does.
+ *
+ * An introduction is the page a reader trusts most, so it is the worst place to
+ * put a wish list. What follows is the system as it is.
+ */
 const LIST_PROVIDERS = `import { MatrixClient } from 'matrix-os-sdk';
 
 const matrix = new MatrixClient({ endpoint: 'http://127.0.0.1:9093' });
@@ -14,134 +32,132 @@ for (const p of await matrix.listProviders({ includeRemote: true })) {
   console.log(\`\${p.id}: \${p.available}/\${p.capacity} units at \${p.pricePerUnit} each\`);
 }`;
 
+const REAL = [
+  {
+    title: 'A market for compute',
+    body: 'A node advertises capacity at a price. A buyer reserves units, the work is done, and the buyer pays the provider. Providers found over libp2p appear alongside local ones.',
+  },
+  {
+    title: 'LLM inference on that market',
+    body: 'An inference job is a compute job with a prompt attached. The backend is pluggable: a local HTTP model server, an OpenAI-compatible API, or the GPU-free echo backend a fresh node registers so the path works before you have a model.',
+  },
+  {
+    title: 'One coin, one ledger',
+    body: 'Native MATRIX, 9 decimals, capped at a billion. Both marketplaces settle in it through consensus, so a balance is a fact every node agrees on rather than one node’s opinion.',
+  },
+  {
+    title: 'Its own BFT chain',
+    body: 'An ed25519 validator set, a leader that rotates every commit, two voting phases, and a quorum of more than two thirds. Committed blocks are hash-linked; a node that misses one fetches it with the quorum that committed it.',
+  },
+  {
+    title: 'A wrapped ERC-20 mirror',
+    body: 'Native MATRIX locks into escrow and a threshold of validator attestations authorizes minting wMATRIX; burning it releases the escrow. Against local and test networks only - it is not deployed to public Ethereum.',
+  },
+  {
+    title: 'A WebAssembly agent runtime',
+    body: 'A node embeds wazero and runs a module against four host functions - log, send, get_memory, set_memory - under a fuel and memory budget, so a runaway module cannot take the node with it.',
+  },
+];
+
+const NOT_YET = [
+  'No stake. Validator-set membership is agreement between operators, not capital at risk, so a permissionless validator set is still ahead.',
+  'No zero-knowledge proofs and no secure enclaves. A provider sees the work it runs.',
+  'No agent deployment path over the network, and no agent-to-agent collaboration primitive. The runtime runs a module you hand it.',
+  'The bridge is not on public Ethereum, and the SDK is not on npm.',
+];
+
 export default function MatrixOsIntroduction() {
   return (
     <>
       <Navigation />
-      <Toaster position='top-right' />
       <div className='min-h-screen bg-black'>
         <div className='pt-16'>
           <div className='flex flex-col lg:flex-row'>
             <DocSidebar />
 
-            {/* Main Content */}
             <main className='min-w-0 flex-1 p-4 sm:p-6 lg:ml-64 lg:p-8'>
-              <div className='max-w-4xl mx-auto'>
+              <div className='mx-auto max-w-4xl'>
                 <article className='text-gray-100'>
-                  {/* Hero Section */}
-                  <div className='bg-gradient-to-r from-blue-500/10 via-purple-500/10 to-blue-500/10 rounded-xl p-8 mb-12 border border-blue-500/20'>
-                    <h1 className='text-4xl font-bold text-white mb-4'>Welcome to Matrix OS</h1>
+                  <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
+                    <h1 className='mb-4 text-4xl font-bold text-white'>Introduction</h1>
                     <p className='text-xl text-gray-100'>
-                      Matrix OS is a revolutionary distributed operating system that empowers devices to run autonomous
-                      AI agents in a secure, scalable, and decentralized environment. Built for the future of computing.
+                      Matrix OS is a peer-to-peer marketplace for compute and LLM inference, settled in one coin on
+                      its own fast BFT Layer 1. You run a node, it sells your spare capacity or buys someone
+                      else&apos;s, and payment is a transaction a quorum of validators has committed.
                     </p>
                   </div>
 
-                  <h2 className='text-3xl font-bold text-white mt-8 mb-6'>What is Matrix OS?</h2>
-                  <p className='text-gray-100 text-lg leading-relaxed mb-6'>
-                    Matrix OS reimagines how devices interact and compute in our increasingly connected world. It&apos;s
-                    not just an operating system—it&apos;s a complete platform that enables devices to become
-                    intelligent,
-                    autonomous participants in a decentralized network.
-                  </p>
+                  <MarketFlow />
 
-                  <div className='grid grid-cols-1 md:grid-cols-2 gap-6 my-8'>
-                    <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>AI-First Architecture</h3>
-                      <p className='text-gray-100 leading-relaxed mb-0'>
-                        Built from the ground up to support AI agents, with native support for machine learning models,
-                        neural networks, and advanced decision-making systems.
-                      </p>
-                    </div>
-                    <div className='bg-gray-900 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Decentralized by Design</h3>
-                      <p className='text-gray-100 leading-relaxed mb-0'>
-                        Every device is a sovereign node, capable of independent operation while seamlessly
-                        participating in the larger network.
-                      </p>
-                    </div>
+                  <h2 className='mb-6 mt-12 text-3xl font-bold text-white'>What it does today</h2>
+                  <div className='grid grid-cols-1 gap-6 md:grid-cols-2'>
+                    {REAL.map((item) => (
+                      <div key={item.title} className='rounded-xl border border-gray-800 bg-gray-900/50 p-6'>
+                        <h3 className='mb-2 text-lg font-bold text-white'>{item.title}</h3>
+                        <p className='mb-0 leading-relaxed text-gray-300'>{item.body}</p>
+                      </div>
+                    ))}
                   </div>
 
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Core Features</h2>
-
-                  <div className='space-y-6'>
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Autonomous Agents</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>Create and deploy AI agents that can:</p>
-                      <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                        <li>Learn and adapt from their environment</li>
-                        <li>Make decisions based on complex criteria</li>
-                        <li>Collaborate with other agents in the network</li>
-                        <li>Execute tasks without constant supervision</li>
-                      </ul>
-                    </div>
-
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Secure Communication</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        Enterprise-grade security built into every layer:
-                      </p>
-                      <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                        <li>End-to-end encryption for all communications</li>
-                        <li>Zero-knowledge proofs for privacy-preserving operations</li>
-                        <li>Secure enclaves for sensitive computations</li>
-                        <li>Role-based access control system</li>
-                      </ul>
-                    </div>
-
-                    <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
-                      <h3 className='text-xl font-bold text-white mb-3'>Talking to a node</h3>
-                      <p className='text-gray-100 leading-relaxed mb-4'>
-                        A node serves its marketplace and inference APIs over HTTP, so a browser, a dApp front end
-                        or a script can drive it directly. This is the whole of a first call:
-                      </p>
-                      <CodeSample label='TypeScript' code={LIST_PROVIDERS} />
-                      <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
-                        The SDK lives in{' '}
-                        <code className='text-white'>packages/sdk</code> in the repository and is not on npm yet, so
-                        add it with{' '}
-                        <code className='text-white'>yarn add file:/path/to/matrix-os/packages/sdk</code>. Amounts are{' '}
-                        <code className='text-white'>bigint</code>: MATRIX has 9 decimals and a cap of a billion
-                        coins, so a balance can exceed what a JavaScript number holds exactly.
-                      </p>
-                    </div>
-                  </div>
-
-                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Getting Started</h2>
-                  <p className='text-gray-100 text-lg leading-relaxed mb-4'>
-                    Ready to dive in? Follow these steps to begin your journey with Matrix OS:
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>What it does not do</h2>
+                  <p className='mb-4 text-gray-300'>
+                    Stated because an introduction is the page a reader trusts most, and because these gaps change
+                    what the system is suitable for:
                   </p>
-                  <ol className='text-gray-100 space-y-2 list-decimal pl-6'>
-                    <li className='leading-relaxed'>
-                      Start with our{' '}
-                      <a href='/docs/installation' className='text-blue-400 hover:text-blue-300 underline'>
-                        Installation Guide
-                      </a>{' '}
-                      to set up Matrix OS on your device
-                    </li>
-                    <li className='leading-relaxed'>
-                      Follow the{' '}
-                      <a href='/docs/quickstart' className='text-blue-400 hover:text-blue-300 underline'>
-                        Quick Start Tutorial
-                      </a>{' '}
-                      to create your first agent
-                    </li>
-                  </ol>
+                  <ul className='list-disc space-y-3 pl-6 text-gray-300'>
+                    {NOT_YET.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
 
-                  <div className='bg-blue-500/10 rounded-xl p-6 mt-8 border border-blue-500/20'>
-                    <h3 className='text-xl font-bold text-white mb-3'>Join the Community</h3>
-                    <p className='text-gray-100 leading-relaxed mb-4'>
-                      Matrix OS is backed by a vibrant community of developers, researchers, and enthusiasts. Get
-                      involved:
-                    </p>
-                    <ul className='text-gray-100 space-y-2 list-disc pl-6 mb-0'>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>A first call</h2>
+                  <p className='mb-4 text-gray-300'>
+                    A node serves its marketplace and inference APIs over HTTP as well as gRPC, so a browser, a dApp
+                    front end or a script can drive it directly:
+                  </p>
+                  <CodeSample label='TypeScript' code={LIST_PROVIDERS} />
+                  <p className='mt-4 text-gray-300'>
+                    The SDK lives in <code className='text-white'>packages/sdk</code> in the repository and is not on
+                    npm yet, so add it with{' '}
+                    <code className='text-white'>yarn add file:/path/to/matrix-os/packages/sdk</code>. Amounts are{' '}
+                    <code className='text-white'>bigint</code>: MATRIX has 9 decimals and a cap of a billion coins, so
+                    a balance can exceed what a JavaScript number holds exactly.
+                  </p>
+
+                  <div className='mt-10 rounded-xl border border-primary-400/20 bg-primary-400/10 p-6'>
+                    <h2 className='mb-4 text-2xl font-bold text-white'>Where to go next</h2>
+                    <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
+                      <li>
+                        <Link href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
+                          Quickstart
+                        </Link>{' '}
+                        - a node, a funded wallet and a settled compute job, in about a minute
+                      </li>
+                      <li>
+                        <Link href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
+                          Architecture
+                        </Link>{' '}
+                        - what is inside the process you just started
+                      </li>
+                      <li>
+                        <Link
+                          href='/docs/guides/network-setup'
+                          className='text-accent-200 underline hover:text-accent-100'
+                        >
+                          Network setup
+                        </Link>{' '}
+                        - two nodes agreeing on one ledger
+                      </li>
                       <li>
                         <a
                           href={GITHUB_URL}
-                          className='text-blue-400 hover:text-blue-300 underline'
+                          target='_blank'
+                          rel='noopener noreferrer'
+                          className='text-accent-200 underline hover:text-accent-100'
                         >
-                          Contribute on GitHub
-                        </a>
+                          The repository
+                        </a>{' '}
+                        - the code every claim on this page refers to
                       </li>
                     </ul>
                   </div>

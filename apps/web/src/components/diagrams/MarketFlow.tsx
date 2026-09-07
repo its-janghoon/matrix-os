@@ -33,7 +33,14 @@ export function MarketFlow({ className }: { className?: string }) {
       <Arrow x1={548} y1={109} x2={478} y2={109} tone='primary' />
 
       <Arrow x1={548} y1={217} x2={478} y2={217} tone='primary' />
-      <Arrow x1={282} y1={217} x2={212} y2={217} tone='accent' label='MATRIX paid' labelDy={18} />
+      {/* The payment arrow carries no label of its own: the gap it crosses is 70
+          units wide and "MATRIX paid" is wider than that, so the text ran into
+          the provider box and the group frame beside it. It sits under the
+          middle column instead, where there is room. */}
+      <Arrow x1={282} y1={217} x2={212} y2={217} tone='accent' />
+      <Note x={380} y={268}>
+        MATRIX paid to the provider
+      </Note>
 
       <Note x={380} y={322} tone='accent'>
         one committed block = one agreed balance
