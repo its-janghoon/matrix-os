@@ -146,6 +146,11 @@ var (
 	// twice: an identical re-submission of the same signed transaction stays
 	// idempotent and does not produce this.
 	ErrNonceAlreadyUsed = errors.New("consensus: sender nonce already used")
+
+	// ErrMempoolFull is returned when the mempool is at its cap. It is a
+	// back-pressure signal, not a rejection of the transaction: the same
+	// transfer succeeds once blocks have committed and freed room.
+	ErrMempoolFull = errors.New("consensus: mempool is full")
 )
 
 // Block is an ordered batch of signed transactions proposed for one consensus

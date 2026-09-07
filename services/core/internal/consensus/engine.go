@@ -41,6 +41,21 @@ const (
 	DefaultRoundTimeout = 150 * time.Millisecond
 	// DefaultMaxBlockTxs bounds how many transactions a single block carries.
 	DefaultMaxBlockTxs = 512
+	// DefaultMaxMempoolTxs bounds how many transactions the mempool holds.
+	//
+	// WHY THERE HAS TO BE ONE. Submit checks the signature, the nonce rules and
+	// the reserved-recipient rules. It does NOT check that the sender can afford
+	// the transfer - affordability is decided at apply time, where an
+	// unaffordable transfer is deterministically skipped - and the mempool was a
+	// plain slice that grew with every accepted transaction. So a keypair
+	// holding NOTHING could sign transfers at nonce 0, 1, 2, ... and every one
+	// of them passed, was held in memory, and was gossiped. The cost to the
+	// attacker is a signature; the cost to every node is memory.
+	//
+	// 20000 is roughly 40 blocks' worth at DefaultMaxBlockTxs, so a legitimate
+	// burst has plenty of room while the ceiling stays a few megabytes rather
+	// than unbounded.
+	DefaultMaxMempoolTxs = 20000
 	// DefaultHeadAnnounceInterval is how often a node announces its committed
 	// chain length so peers that are behind can notice and ask for the
 	// difference. It is far longer than a round: this is a slow background
@@ -93,6 +108,9 @@ type Config struct {
 	// is a passive follower: it still receives proposals/votes, commits on quorum,
 	// and applies blocks, but never proposes or votes itself.
 	Self *token.Account
+	// MaxMempoolTxs overrides DefaultMaxMempoolTxs when > 0. It bounds memory
+	// against an attacker who can sign but cannot pay; see DefaultMaxMempoolTxs.
+	MaxMempoolTxs int
 	// ProposeInterval overrides DefaultProposeInterval when > 0.
 	ProposeInterval time.Duration
 	// RoundTimeout overrides DefaultRoundTimeout when > 0.
@@ -229,6 +247,7 @@ type Engine struct {
 	proposeInterval      time.Duration
 	roundTimeout         time.Duration
 	maxBlockTxs          int
+	maxMempoolTxs        int
 	headAnnounceInterval time.Duration
 	onCommit             CommitObserver
 	evidence             *EvidenceStore
@@ -472,6 +491,7 @@ func New(cfg Config) (*Engine, error) {
 		proposeInterval:      orDurationC(cfg.ProposeInterval, DefaultProposeInterval),
 		roundTimeout:         orDurationC(cfg.RoundTimeout, DefaultRoundTimeout),
 		maxBlockTxs:          orIntC(cfg.MaxBlockTxs, DefaultMaxBlockTxs),
+		maxMempoolTxs:        orIntC(cfg.MaxMempoolTxs, DefaultMaxMempoolTxs),
 		headAnnounceInterval: orDurationC(cfg.HeadAnnounceInterval, DefaultHeadAnnounceInterval),
 		onCommit:             cfg.OnCommit,
 		evidence:             cfg.Evidence,
@@ -741,6 +761,15 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	}
 	if _, ok := e.mempoolSet[key]; ok {
 		return nil
+	}
+	// Bounded, because Submit does not and cannot check affordability: a keypair
+	// with no balance could otherwise grow this without limit. The refusal is
+	// explicit rather than a silent drop, so an honest sender hitting a
+	// congested node knows to retry rather than believing its transfer is
+	// pending. Room is freed as blocks commit.
+	if len(e.mempool) >= e.maxMempoolTxs {
+		return fmt.Errorf("%w: the mempool is full (%d transactions); retry once blocks have "+
+			"committed", ErrMempoolFull, e.maxMempoolTxs)
 	}
 	// The exact same signed transaction is idempotent (handled above). A
 	// DIFFERENT transfer at a nonce the sender has already spent, or has pending,
