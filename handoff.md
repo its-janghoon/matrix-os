@@ -1,7 +1,7 @@
 # Handoff
 
 State of `main` as of `cb4db0c`, plus the product-surface work on
-`claude/handoff-md-checklist-s0ptw1` through `935effa`. Everything below was run, not inferred; where
+`claude/handoff-md-checklist-s0ptw1` through `4c7eb0d`. Everything below was run, not inferred; where
 something is unverified it says so.
 
 ## Build and check
@@ -204,6 +204,9 @@ acts:
 - **The HTTP rate limit is armed at 600/minute, burst 120** in a generated
   config (`connect.rate_limit_per_minute` / `rate_limit_burst`). Raise it for an
   endpoint serving many callers; zero turns it off.
+- **`MATRIX_WALLET_PASSPHRASE`** is read before prompting, and a
+  non-interactive caller must set it: the tool refuses to read a passphrase off
+  a pipe, where it would land in a log.
 - **An API key spends from no account until one is set.** `account` under
   `security.api_keys` is what makes a key usable on `/v1/chat/completions`, and
   the node must hold that account's signing key to settle for it. Leaving it
@@ -337,25 +340,81 @@ derived from the signing key. `connect.signed_writes` opens the three AND makes
 that authorization mandatory, from one field, because the two cannot be allowed
 to drift apart.
 
+## Wallets
+
+**A recovery phrase and encryption at rest** (`5c5b1ad`). A wallet was the
+private key in hex at mode 0600, with no derivation of any kind: anyone who
+could read the file owned the account, and losing it lost the account. Now
+BIP-39 + SLIP-0010 at `m/44'/9004'/0'/0'` (the path Solana, Near, Aptos and Sui
+use for ed25519, so a phrase restores in those tools) and a scrypt/AES-256-GCM
+keystore. `wallet create` shows the phrase once, `wallet import` restores it,
+and `wallet show` / `wallet balance` do NOT ask for a passphrase because the id
+is public.
+
+The derivation is pinned to all 12 of SLIP-0010's published ed25519 vectors, and
+that check earned its keep immediately: a value I transcribed was wrong and the
+spec agreed with the code.
+
+Legacy plaintext wallets are still read, with a warning on every command that
+SIGNS with one. There is no migration a tool can do unasked, because it cannot
+invent a passphrase.
+
+**MetaMask can be the wallet** (`484925d`, `4c7eb0d`). Two account kinds now:
+
+| id | signs | verified with |
+| --- | --- | --- |
+| `<64 hex>` | the canonical bytes | ed25519 |
+| `eth:0x<40 hex>` | EIP-712 typed data | ecrecover |
+
+The kinds are told apart by the ACCOUNT ID, not by a field in the signed
+payload. Adding a scheme byte to `Transaction.SigningBytes` would have
+invalidated every ed25519 signature ever produced and re-hashed every committed
+block; a test pins those bytes to the same golden vector the SDK and web app
+use.
+
+`internal/ethsig` owns keccak256, the address type and ecrecover. The bridge
+delegates to it, because it imports `internal/token` and so a second copy of
+ecrecover would otherwise have lived there.
+
+**The thing to know before touching any of this**: only agreeing with a real
+Ethereum library proves a wallet will produce a signature the node accepts.
+Every self-consistency test passes just as happily with a wrong digest. The
+digests are pinned against ethers v6's `TypedDataEncoder`, and one of its real
+signatures is verified end to end - and both times I wrote one of these
+constants from memory it was wrong. A drift here surfaces as "invalid
+signature", which reads as a key problem and sends you to the wrong place
+entirely.
+
+Also: a bytes32 is exactly 32 bytes or empty, never padded. Ethereum tooling
+right-pads a short bytes32 while every integer is left-padded, so a 4-byte value
+would encode one way in our code and the other way in the wallet.
+
 ## Still pending
 
-**A USDC on-ramp.** The `/chat` page hands over a `matrix fund` command because
-there is nothing else to offer: buying MATRIX with USDC means a DEX purchase and
-a `WrappedMatrix.burn`, and the contracts are built and undeployed. Until then a
-browser account is funded from outside the browser, which is fine for a node you
-run and not a product.
+**A USDC on-ramp.** This is now the only thing between a MetaMask user and using
+the network with money they already hold. The path exists in full - a DEX
+purchase of wMATRIX, `WrappedMatrix.burn`, and the burn watcher in
+`node/bridge_watch.go` releasing native from escrow - and every piece is built.
+What is missing is a mainnet contract deploy, an audit, and DEX liquidity, none
+of which is code. Note also what that watcher's own comment says: the unlock is
+a per-node relayer and is NOT consensus-ordered, which is correct for a solo
+operator and not for a validator set.
 
-**A genuine two-machine libp2p join** is still unverified (as it was before).
+**A genuine two-machine libp2p join** is still unverified (as it has been).
 
-**Three copies of two byte layouts.** The node is the source of truth,
-`packages/sdk` has a TypeScript copy, and `apps/web` has another because there
-is no workspace linkage. All three are pinned to the same golden vectors, so a
-drift fails a test rather than surfacing as "invalid signature" at runtime. A
-workspace (or publishing the SDK) would remove the third copy.
+**Copies of byte layouts.** The node owns four canonical payloads now (the
+ed25519 transfer, the ed25519 run authorization, and the two EIP-712 digests).
+`packages/sdk` and `apps/web` each carry TypeScript copies of what they need,
+because there is no workspace linkage. Every copy is pinned to a shared golden
+vector, so a drift fails a test - but a workspace, or publishing the SDK, would
+remove a copy rather than guard it.
 
-**Client-streaming** is refused by `connectapi` by design: the client would have
-to frame its own request stream, which a request-body-then-response shape cannot
-express. Nothing needs it yet.
+**Client-streaming** is refused by `connectapi` by design; nothing needs it.
+
+**No multisig, and no vesting contract.** Unchanged from the proposal, and worth
+restating next to the wallet work: `MatrixToken.mint` is still `onlyOwner` with
+a single address, and that key can issue to the cap. Moving it to a Safe belongs
+before any mainnet deploy.
 
 ## Product decisions made this session
 
