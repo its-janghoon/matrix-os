@@ -27,6 +27,12 @@ enum InferenceJobStatus {
     // the settlement applies. Reported so a client never reads COMPLETED for a
     // payment still pending in the mempool.
     INFERENCE_JOB_STATUS_SETTLING = 5;
+    // The backend ran and the charge is known, but the buyer has not signed for
+    // it yet. This is the state the CLIENT-SIGNED path parks in: the price of an
+    // inference is not knowable until the work is done, so a buyer cannot
+    // pre-sign a transfer for it. The completion is WITHHELD until the payment
+    // is signed; the reservation is released if it never is.
+    INFERENCE_JOB_STATUS_AWAITING_PAYMENT = 6;
 }
 
 // ChatRole enumerates the standard chat message roles for chat-style inference.
@@ -130,6 +136,95 @@ message FulfillInferenceJobResponse {
     InferenceJob job = 1;
 }
 
+// PaymentRequest is the exact transfer a buyer must sign to settle a job. Every
+// field is covered by the transaction signature, so signing it authorises this
+// recipient and this amount and nothing else: the node cannot raise the charge
+// or redirect it afterwards.
+message PaymentRequest {
+    // The inference job this payment settles.
+    string job_id = 1;
+    // The buyer's account ID, which must be the signer.
+    string from = 2;
+    // The provider being paid.
+    string to = 3;
+    // The charge in native MATRIX base units.
+    uint64 amount = 4;
+    // Nonce, timestamp and prev_hash complete the signable transfer. The node
+    // chooses them because they carry no economic meaning for the buyer; the
+    // fields a buyer cares about are `to` and `amount`.
+    uint64 nonce = 5;
+    int64 timestamp = 6;
+    bytes prev_hash = 7;
+    // What the buyer is being billed for, so a wallet can show a reason
+    // alongside the number.
+    TokenUsage usage = 8;
+    string model = 9;
+    // When an unsigned request stops being settleable and its reservation is
+    // released.
+    google.protobuf.Timestamp expires_at = 10;
+}
+
+// RunInferenceJobRequest runs an inference and returns the payment to sign,
+// WITHOUT the completion. It is the client-signed entry point: the node needs no
+// signing key for the buyer, because the buyer signs the resulting transfer
+// themselves and gets the completion from SettleInferenceJob.
+message RunInferenceJobRequest {
+    // Buyer account ID. It must be the account that signs the payment.
+    string buyer = 1;
+    // Target inference-capable provider ID.
+    string provider = 2;
+    // Model identifier to run.
+    string model = 3;
+    // Single user prompt. Used when messages is empty.
+    string prompt = 4;
+    // Full chat transcript. Takes precedence over prompt.
+    repeated ChatMessage messages = 5;
+    // Optional maximum completion length in tokens. Zero means backend default.
+    uint32 max_tokens = 6;
+    // Optional sampling temperature. Zero means backend default.
+    double temperature = 7;
+    // Upfront estimate of the compute units to reserve. Zero defaults to one.
+    uint64 units_estimate = 8;
+}
+
+// RunInferenceJobResponse returns the payment to sign and the job in
+// AWAITING_PAYMENT. The job's completion is empty by design.
+message RunInferenceJobResponse {
+    // The transfer to sign.
+    PaymentRequest payment = 1;
+    // The job, in AWAITING_PAYMENT with usage and billed units populated and the
+    // completion withheld.
+    InferenceJob job = 2;
+}
+
+// SettleInferenceJobRequest submits the buyer's signed transfer for a job that is
+// awaiting payment. Every signable field must match the PaymentRequest the job
+// is waiting for, or the settlement is refused: a signature that verifies is not
+// enough on its own, since a buyer could sign a perfectly valid transfer of one
+// base unit to an account they control.
+message SettleInferenceJobRequest {
+    // The job being settled.
+    string id = 1;
+    // The buyer's ed25519 public key (32 bytes), which must derive the buyer
+    // account ID the job was submitted for.
+    bytes from_public_key = 2;
+    // The signed transfer's fields, which must equal the payment request's.
+    string to = 3;
+    uint64 amount = 4;
+    uint64 nonce = 5;
+    int64 timestamp = 6;
+    bytes prev_hash = 7;
+    // The buyer's ed25519 signature over the canonical transfer bytes.
+    bytes signature = 8;
+}
+
+// SettleInferenceJobResponse returns the settled job, with its completion.
+message SettleInferenceJobResponse {
+    // The job in COMPLETED state, carrying the completion the buyer has now paid
+    // for.
+    InferenceJob job = 1;
+}
+
 // GetInferenceJobRequest looks up a single inference job by ID.
 message GetInferenceJobRequest {
     // Inference job ID to fetch.
@@ -164,4 +259,25 @@ service InferenceService {
     // GetInferenceJob fetches a single inference job and its result by ID. Input:
     // job ID. Output: the job. No side effects.
     rpc GetInferenceJob(GetInferenceJobRequest) returns (GetInferenceJobResponse) {}
+
+    // RunInferenceJob is the CLIENT-SIGNED path. It reserves capacity, runs the
+    // inference, and returns the exact transfer to sign - not the completion.
+    // Input: buyer, provider, model, prompt or messages. Output: a
+    // PaymentRequest and the job in AWAITING_PAYMENT. Side effects: reserves
+    // capacity, performs the affordability check, and runs the model. No token
+    // moves, and the node needs no signing key for the buyer.
+    //
+    // Use this instead of SubmitInferenceJob + FulfillInferenceJob wherever the
+    // node should not hold the buyer's key: a public endpoint, where signing on
+    // a caller's behalf makes the operator a custodian, and a dApp, where it
+    // would make wallet login decorative.
+    rpc RunInferenceJob(RunInferenceJobRequest) returns (RunInferenceJobResponse) {}
+
+    // SettleInferenceJob submits the buyer's signed transfer for a job awaiting
+    // payment and returns the completion. Input: the job ID and the signed
+    // transfer. Output: the COMPLETED job with its completion. Side effects:
+    // submits the transfer to consensus and waits for it to commit AND apply,
+    // then releases the reservation. A transfer that does not match the payment
+    // request exactly is refused.
+    rpc SettleInferenceJob(SettleInferenceJobRequest) returns (SettleInferenceJobResponse) {}
 }

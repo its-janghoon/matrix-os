@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ecirlabs/matrix-core/internal/inference"
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // statusToProto maps an inference job status to its proto enum.
@@ -24,6 +25,8 @@ func statusToProto(s inference.InferenceJobStatus) inferencev1.InferenceJobStatu
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_COMPLETED
 	case inference.InferenceJobFailed:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_FAILED
+	case inference.InferenceJobAwaitingPayment:
+		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_AWAITING_PAYMENT
 	default:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_UNSPECIFIED
 	}
@@ -113,6 +116,105 @@ func (s *Service) FulfillInferenceJob(ctx context.Context, req *inferencev1.Fulf
 		return nil, mapInferenceError(err)
 	}
 	return &inferencev1.FulfillInferenceJobResponse{Job: jobToProto(job)}, nil
+}
+
+// RunInferenceJob is the client-signed path: it runs the inference and returns
+// the transfer to sign, without the completion.
+func (s *Service) RunInferenceJob(ctx context.Context, req *inferencev1.RunInferenceJobRequest) (*inferencev1.RunInferenceJobResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	payment, err := s.inf.RunUnsettled(ctx, req.GetBuyer(), req.GetProvider(),
+		runRequestToInternal(req), req.GetUnitsEstimate())
+	if err != nil {
+		return nil, mapInferenceError(err)
+	}
+	job, ok := s.inf.GetJob(payment.JobID)
+	if !ok {
+		return nil, status.Errorf(codes.Internal, "inference job %q vanished after running", payment.JobID)
+	}
+	// The completion is withheld until the payment is signed: it is the whole
+	// enforcement, so it is stripped here rather than relied on being absent.
+	withheld := *job
+	withheld.Completion = ""
+	return &inferencev1.RunInferenceJobResponse{
+		Payment: paymentToProto(payment),
+		Job:     jobToProto(&withheld),
+	}, nil
+}
+
+// SettleInferenceJob submits the buyer's signed transfer and returns the
+// completion they have now paid for.
+func (s *Service) SettleInferenceJob(ctx context.Context, req *inferencev1.SettleInferenceJobRequest) (*inferencev1.SettleInferenceJobResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	pub, err := token.ParsePublicKey(req.GetFromPublicKey())
+	if err != nil {
+		return nil, mapInferenceError(err)
+	}
+	tx := &token.Transaction{
+		From:      pub,
+		To:        req.GetTo(),
+		Amount:    req.GetAmount(),
+		Nonce:     req.GetNonce(),
+		Timestamp: req.GetTimestamp(),
+		PrevHash:  req.GetPrevHash(),
+		Signature: req.GetSignature(),
+	}
+	job, err := s.inf.SettleSigned(ctx, req.GetId(), tx)
+	if err != nil {
+		return nil, mapInferenceError(err)
+	}
+	return &inferencev1.SettleInferenceJobResponse{Job: jobToProto(job)}, nil
+}
+
+// runRequestToInternal builds an internal InferenceRequest from the
+// client-signed run request. It duplicates requestFromProto rather than sharing
+// it because the two proto messages are distinct types with no common interface.
+func runRequestToInternal(req *inferencev1.RunInferenceJobRequest) inference.InferenceRequest {
+	msgs := make([]inference.Message, 0, len(req.GetMessages()))
+	for _, m := range req.GetMessages() {
+		msgs = append(msgs, inference.Message{
+			Role:    roleToInternal(m.GetRole()),
+			Content: m.GetContent(),
+		})
+	}
+	return inference.InferenceRequest{
+		Model:       req.GetModel(),
+		Prompt:      req.GetPrompt(),
+		Messages:    msgs,
+		MaxTokens:   int(req.GetMaxTokens()),
+		Temperature: req.GetTemperature(),
+	}
+}
+
+// paymentToProto converts a payment request to its proto representation.
+func paymentToProto(p *inference.PaymentRequest) *inferencev1.PaymentRequest {
+	if p == nil {
+		return nil
+	}
+	out := &inferencev1.PaymentRequest{
+		JobId:     p.JobID,
+		From:      p.From,
+		To:        p.To,
+		Amount:    p.Amount,
+		Nonce:     p.Nonce,
+		Timestamp: p.Timestamp,
+		PrevHash:  p.PrevHash,
+		Model:     p.Model,
+	}
+	if p.Usage != (inference.Usage{}) {
+		out.Usage = &inferencev1.TokenUsage{
+			PromptTokens:     uint32(p.Usage.PromptTokens),
+			CompletionTokens: uint32(p.Usage.CompletionTokens),
+			TotalTokens:      uint32(p.Usage.TotalTokens),
+		}
+	}
+	if !p.ExpiresAt.IsZero() {
+		out.ExpiresAt = timestamppb.New(p.ExpiresAt)
+	}
+	return out
 }
 
 // GetInferenceJob fetches a single inference job by ID.

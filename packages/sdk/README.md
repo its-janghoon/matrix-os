@@ -53,6 +53,43 @@ that model with capacity to spare. Streaming is not supported yet and a
 Use this SDK when you need the marketplace itself - registering providers,
 submitting and inspecting jobs, balances, signed transfers, agents.
 
+### If the node must not hold your key
+
+The route above and `submitInferenceJob` / `fulfillInferenceJob` both settle with
+a key the node holds for you. That is right for a node you run and wrong for a
+public endpoint, where it makes the operator a custodian of your balance, or a
+dApp, where it makes wallet login decorative.
+
+`runInferenceJob` / `settleInferenceJob` need no key on the node. Pre-signing the
+transfer cannot work - a transaction signs over an exact amount, and the price of
+an inference is not known until the work is done - so the node runs the model,
+hands back the exact transfer to sign, and withholds the completion until you
+have signed it:
+
+```ts
+const { payment } = await client.runInferenceJob({
+  buyer: myAccountId,
+  provider: 'gpu-1',
+  model: 'llama-3.3-70b',
+  messages: [{ role: 'CHAT_ROLE_USER', content: 'hello' }],
+});
+
+// payment.amount and payment.to are what you are authorising. Show them.
+const signature = await sign(paymentSigningBytes(payment, publicKey));
+
+const job = await client.settleInferenceJob({ payment, fromPublicKey: publicKey, signature });
+job.completion; // handed over only now
+```
+
+`paymentSigningBytes` produces the canonical bytes and nothing else - signing is
+left to your wallet, passkey-derived key, WebCrypto Ed25519 or hardware signer,
+because pinning one of them would make this package care about key custody. The
+bytes are pinned against the node's own encoding by a golden vector in the tests;
+a one-byte drift would make every signature fail and look like a bad key.
+
+Every signable field must match the invoice. A transfer of one base unit to an
+account you control verifies perfectly and is refused.
+
 ## Use
 
 ```ts

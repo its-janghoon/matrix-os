@@ -28,6 +28,10 @@ func (d directSettler) SubmitAccountTransfer(from *token.Account, recipient stri
 	return &token.Transaction{To: recipient, Amount: amount, Nonce: nonce}, nil
 }
 
+func (d directSettler) Submit(tx *token.Transaction) error {
+	return d.ledger.Transfer(tx.SenderID(), tx.To, tx.Amount)
+}
+
 func (d directSettler) WaitForSettlement(context.Context, *token.Transaction) (bool, bool, error) {
 	return true, true, nil
 }

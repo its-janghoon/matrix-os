@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import manifest from './rpc-manifest.json';
-import { DEFAULT_ENDPOINT, MatrixClient, MatrixError, toBase64 } from './index';
+import {
+  DEFAULT_ENDPOINT,
+  MatrixClient,
+  MatrixError,
+  fromBase64,
+  paymentSigningBytes,
+  toBase64,
+} from './index';
 
 /** A fetch stub that records calls and replays canned responses. */
 function stubFetch(responses: Array<{ status?: number; body: unknown }>) {
@@ -286,7 +293,13 @@ describe('coverage against the served surface', () => {
       'FundAccount',
       'GetBridgeReconciliation',
     ],
-    'matrix.inference.v1.InferenceService': ['SubmitInferenceJob', 'FulfillInferenceJob', 'GetInferenceJob'],
+    'matrix.inference.v1.InferenceService': [
+      'SubmitInferenceJob',
+      'FulfillInferenceJob',
+      'GetInferenceJob',
+      'RunInferenceJob',
+      'SettleInferenceJob',
+    ],
     'matrix.agent.v1.AgentService': ['DeployAgent', 'ListAgents', 'GetAgent'],
   };
 
@@ -305,5 +318,122 @@ describe('coverage against the served surface', () => {
       const extra = methods.filter((m) => !served!.methods.includes(m));
       expect(extra, `${service} wraps methods the node does not serve`).toEqual([]);
     }
+  });
+});
+
+describe('payment signing bytes', () => {
+  // The golden vector is the output of token.Transaction.SigningBytes on the Go
+  // side for the same input. If these ever disagree by one byte, every signature
+  // a client produces is rejected by the node, and the failure looks like "bad
+  // key" rather than "bad encoding" - which is exactly why this is pinned.
+  const GOLDEN =
+    'AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAACnByb3ZpZGVyLTEAAAAAB1vNFQAAAAAAAAAHGNL8IrtyxRUAAAAE3q2+7w==';
+
+  it('matches the node byte for byte', () => {
+    const fromPublicKey = new Uint8Array(32);
+    for (let i = 0; i < 32; i++) fromPublicKey[i] = i;
+
+    const bytes = paymentSigningBytes(
+      {
+        to: 'provider-1',
+        amount: 123456789n,
+        nonce: 7n,
+        timestamp: 1788769228123456789n,
+        prevHash: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      },
+      fromPublicKey,
+    );
+
+    expect(toBase64(bytes)).toBe(GOLDEN);
+  });
+
+  it('separates fields so no two distinct payments share a payload', () => {
+    const key = new Uint8Array(32);
+    const base = { amount: 1n, nonce: 0n, timestamp: 0n, prevHash: new Uint8Array() };
+
+    // Without the length prefixes, "ab" + "c" and "a" + "bc" would collide, and
+    // one signature would authorise paying either recipient.
+    const a = toBase64(paymentSigningBytes({ ...base, to: 'ab' }, key));
+    const b = toBase64(paymentSigningBytes({ ...base, to: 'a' }, key));
+    expect(a).not.toBe(b);
+
+    // And the amount is covered, which is the field a buyer most cares about.
+    const dear = toBase64(paymentSigningBytes({ ...base, to: 'p', amount: 999n }, key));
+    const cheap = toBase64(paymentSigningBytes({ ...base, to: 'p', amount: 1n }, key));
+    expect(dear).not.toBe(cheap);
+  });
+
+  it('round-trips prevHash through base64', () => {
+    const bytes = new Uint8Array([0x00, 0xff, 0x10, 0x7f, 0x80]);
+    expect(Array.from(fromBase64(toBase64(bytes)))).toEqual(Array.from(bytes));
+  });
+
+  it('decodes a payment request from proto JSON', async () => {
+    const { client: c } = client([
+      {
+        body: {
+          payment: {
+            jobId: 'job-1',
+            from: 'buyer',
+            to: 'gpu-1',
+            amount: '36',
+            nonce: '4',
+            timestamp: '1788769228123456789',
+            prevHash: toBase64(new Uint8Array([0xde, 0xad])),
+            usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
+            model: 'llama-3.3-70b',
+            expiresAt: '2026-01-01T00:02:00Z',
+          },
+          job: { id: 'job-1', status: 'INFERENCE_JOB_STATUS_AWAITING_PAYMENT', completion: '' },
+        },
+      },
+    ]);
+
+    const { payment, job } = await c.runInferenceJob({
+      buyer: 'buyer',
+      provider: 'gpu-1',
+      model: 'llama-3.3-70b',
+      prompt: 'hi',
+    });
+
+    expect(payment.amount).toBe(36n);
+    expect(payment.timestamp).toBe(1788769228123456789n);
+    expect(Array.from(payment.prevHash)).toEqual([0xde, 0xad]);
+    expect(payment.usage.totalTokens).toBe(12);
+    // The completion is withheld at this point by design.
+    expect(job.completion).toBe('');
+    expect(job.status).toBe('INFERENCE_JOB_STATUS_AWAITING_PAYMENT');
+  });
+
+  it('sends the payment fields back verbatim when settling', async () => {
+    const { client: c, calls } = client([{ body: { job: { id: 'job-1', completion: 'done' } } }]);
+
+    const payment = {
+      jobId: 'job-1',
+      from: 'buyer',
+      to: 'gpu-1',
+      amount: 36n,
+      nonce: 4n,
+      timestamp: 1788769228123456789n,
+      prevHash: new Uint8Array([0xde, 0xad]),
+      usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
+      model: 'llama-3.3-70b',
+      expiresAt: '2026-01-01T00:02:00Z',
+    };
+
+    await c.settleInferenceJob({
+      payment,
+      fromPublicKey: new Uint8Array(32),
+      signature: new Uint8Array(64),
+    });
+
+    // Any drift here is refused by the node as a payment mismatch, so the body
+    // has to carry the invoice's own numbers unchanged.
+    const body = JSON.parse(String(calls[0]!.init.body));
+    expect(body.id).toBe('job-1');
+    expect(body.amount).toBe('36');
+    expect(body.nonce).toBe('4');
+    expect(body.timestamp).toBe('1788769228123456789');
+    expect(body.to).toBe('gpu-1');
   });
 });

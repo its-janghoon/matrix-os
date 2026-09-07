@@ -108,6 +108,39 @@ export interface Provider {
   models: string[];
 }
 
+/**
+ * The exact transfer a buyer must sign to settle an inference job.
+ *
+ * The price of an inference is not knowable until the work is done - it comes
+ * from the tokens the backend reported - so a buyer cannot pre-sign for it the
+ * way `submitSignedTransfer` allows. `runInferenceJob` runs the model and hands
+ * back this invoice instead; signing it authorises this recipient and this
+ * amount and nothing else. The completion is withheld until you settle.
+ */
+export interface PaymentRequest {
+  jobId: string;
+  /** The buyer's account, which must be the signer. */
+  from: string;
+  /** The provider being paid. */
+  to: string;
+  /** The charge in native MATRIX base units. */
+  amount: bigint;
+  nonce: bigint;
+  timestamp: bigint;
+  prevHash: Uint8Array;
+  /** What the charge is for, so a wallet can show a reason with the number. */
+  usage: TokenUsage;
+  model: string;
+  /** When an unsigned request stops being settleable (RFC 3339). */
+  expiresAt: string;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 export interface Job {
   id: string;
   buyer: string;
@@ -292,6 +325,30 @@ function decodeTransaction(raw: Record<string, unknown>): Transaction {
   };
 }
 
+function decodeUsage(raw: unknown): TokenUsage {
+  const u = record(raw);
+  return {
+    promptTokens: Number(u.promptTokens ?? 0),
+    completionTokens: Number(u.completionTokens ?? 0),
+    totalTokens: Number(u.totalTokens ?? 0),
+  };
+}
+
+function decodePaymentRequest(raw: Record<string, unknown>): PaymentRequest {
+  return {
+    jobId: str(raw.jobId),
+    from: str(raw.from),
+    to: str(raw.to),
+    amount: big(raw.amount),
+    nonce: big(raw.nonce),
+    timestamp: big(raw.timestamp),
+    prevHash: fromBase64(str(raw.prevHash)),
+    usage: decodeUsage(raw.usage),
+    model: str(raw.model),
+    expiresAt: str(raw.expiresAt),
+  };
+}
+
 function decodeInferenceJob(raw: Record<string, unknown>): InferenceJob {
   return {
     id: str(raw.id),
@@ -330,6 +387,103 @@ const BASE64_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz012
  * SDK care where it is running. This works the same in a browser, in Node, and
  * in a worker, with no dependency and no @types/node.
  */
+/**
+ * The exact bytes a buyer signs to authorise a payment.
+ *
+ * This is `token.Transaction.SigningBytes` on the node side: a length-prefixed,
+ * big-endian layout so no two distinct field combinations can collide into the
+ * same signed payload.
+ *
+ *     uint32(len(from)) | from | uint32(len(to)) | to |
+ *     uint64(amount) | uint64(nonce) | int64(timestamp) |
+ *     uint32(len(prevHash)) | prevHash
+ *
+ * Signing is deliberately left to the caller rather than done here. A wallet,
+ * a passkey-derived key, WebCrypto's Ed25519 and a hardware signer all hold the
+ * key differently, and pinning one of them would make this package care about
+ * key custody. It only produces the message.
+ *
+ * ```ts
+ * const bytes = paymentSigningBytes(payment, publicKey);
+ * const signature = await crypto.subtle.sign('Ed25519', key, bytes);
+ * const job = await client.settleInferenceJob({
+ *   payment, fromPublicKey: publicKey, signature: new Uint8Array(signature),
+ * });
+ * ```
+ */
+export function paymentSigningBytes(
+  payment: Pick<PaymentRequest, 'to' | 'amount' | 'nonce' | 'timestamp' | 'prevHash'>,
+  fromPublicKey: Uint8Array,
+): Uint8Array {
+  const to = utf8(payment.to);
+  const out = new Uint8Array(4 + fromPublicKey.length + 4 + to.length + 8 + 8 + 8 + 4 + payment.prevHash.length);
+  const view = new DataView(out.buffer);
+  let o = 0;
+
+  view.setUint32(o, fromPublicKey.length, false);
+  o += 4;
+  out.set(fromPublicKey, o);
+  o += fromPublicKey.length;
+
+  view.setUint32(o, to.length, false);
+  o += 4;
+  out.set(to, o);
+  o += to.length;
+
+  view.setBigUint64(o, BigInt(payment.amount), false);
+  o += 8;
+  view.setBigUint64(o, BigInt(payment.nonce), false);
+  o += 8;
+  // int64: setBigInt64 so a negative timestamp encodes the same two's
+  // complement Go writes.
+  view.setBigInt64(o, BigInt(payment.timestamp), false);
+  o += 8;
+
+  view.setUint32(o, payment.prevHash.length, false);
+  o += 4;
+  out.set(payment.prevHash, o);
+
+  return out;
+}
+
+function utf8(value: string): Uint8Array {
+  if (typeof TextEncoder !== 'undefined') return new TextEncoder().encode(value);
+  // A minimal fallback so this stays dependency-free on a runtime with no
+  // TextEncoder. Account ids and provider ids are ASCII in practice.
+  const out: number[] = [];
+  for (const ch of value) {
+    const cp = ch.codePointAt(0) as number;
+    if (cp < 0x80) out.push(cp);
+    else if (cp < 0x800) out.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f));
+    else if (cp < 0x10000) out.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f));
+    else
+      out.push(
+        0xf0 | (cp >> 18),
+        0x80 | ((cp >> 12) & 0x3f),
+        0x80 | ((cp >> 6) & 0x3f),
+        0x80 | (cp & 0x3f),
+      );
+  }
+  return new Uint8Array(out);
+}
+
+/** Decodes standard base64 (what proto JSON uses for a `bytes` field). */
+export function fromBase64(value: string): Uint8Array {
+  const clean = value.replace(/[^A-Za-z0-9+/]/g, '');
+  const out = new Uint8Array(Math.floor((clean.length * 3) / 4));
+  let o = 0;
+  for (let i = 0; i < clean.length; i += 4) {
+    const c0 = BASE64_ALPHABET.indexOf(clean[i] as string);
+    const c1 = BASE64_ALPHABET.indexOf(clean[i + 1] as string);
+    const c2 = clean[i + 2] === undefined ? -1 : BASE64_ALPHABET.indexOf(clean[i + 2] as string);
+    const c3 = clean[i + 3] === undefined ? -1 : BASE64_ALPHABET.indexOf(clean[i + 3] as string);
+    out[o++] = (c0 << 2) | (c1 >> 4);
+    if (c2 >= 0) out[o++] = ((c1 & 0x0f) << 4) | (c2 >> 2);
+    if (c3 >= 0) out[o++] = ((c2 & 0x03) << 6) | c3;
+  }
+  return out.subarray(0, o);
+}
+
 export function toBase64(bytes: Uint8Array): string {
   let out = '';
   for (let i = 0; i < bytes.length; i += 3) {
@@ -581,6 +735,71 @@ export class MatrixClient {
       maxTokens: input.maxTokens ?? 0,
       temperature: input.temperature ?? 0,
       unitsEstimate: String(input.unitsEstimate ?? 0),
+    });
+    return decodeInferenceJob(record(out.job));
+  }
+
+  /**
+   * Runs an inference and returns the payment to sign, WITHOUT the completion.
+   *
+   * This is the client-signed path, and it is the one to use when the node
+   * should not hold your key: a public endpoint, where signing on your behalf
+   * makes its operator a custodian of your balance, or a dApp, where it would
+   * make wallet login decorative. Sign the returned payment with
+   * `paymentSigningBytes` and pass the signature to `settleInferenceJob` to get
+   * the completion.
+   *
+   * The job holds a reservation while it waits, released at the payment's
+   * `expiresAt` if you never sign.
+   */
+  async runInferenceJob(input: {
+    buyer: string;
+    provider: string;
+    model: string;
+    prompt?: string;
+    messages?: ChatMessage[];
+    maxTokens?: number;
+    temperature?: number;
+    unitsEstimate?: bigint | number;
+  }): Promise<{ payment: PaymentRequest; job: InferenceJob }> {
+    const out = await this.call(INFERENCE, 'RunInferenceJob', {
+      buyer: input.buyer,
+      provider: input.provider,
+      model: input.model,
+      prompt: input.prompt ?? '',
+      messages: input.messages ?? [],
+      maxTokens: input.maxTokens ?? 0,
+      temperature: input.temperature ?? 0,
+      unitsEstimate: String(input.unitsEstimate ?? 0),
+    });
+    return {
+      payment: decodePaymentRequest(record(out.payment)),
+      job: decodeInferenceJob(record(out.job)),
+    };
+  }
+
+  /**
+   * Submits the buyer's signed payment for a job awaiting one, and returns the
+   * completion.
+   *
+   * Every signable field must match the payment request exactly. A valid
+   * signature is not enough on its own: a transfer of one base unit to an
+   * account you control would verify perfectly, and is refused.
+   */
+  async settleInferenceJob(input: {
+    payment: PaymentRequest;
+    fromPublicKey: Uint8Array;
+    signature: Uint8Array;
+  }): Promise<InferenceJob> {
+    const out = await this.call(INFERENCE, 'SettleInferenceJob', {
+      id: input.payment.jobId,
+      fromPublicKey: toBase64(input.fromPublicKey),
+      to: input.payment.to,
+      amount: String(input.payment.amount),
+      nonce: String(input.payment.nonce),
+      timestamp: String(input.payment.timestamp),
+      prevHash: toBase64(input.payment.prevHash),
+      signature: toBase64(input.signature),
     });
     return decodeInferenceJob(record(out.job));
   }

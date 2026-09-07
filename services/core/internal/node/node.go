@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
@@ -1244,6 +1245,12 @@ func (n *Node) Start() error {
 		return err
 	}
 
+	// A job on the client-signed path holds a reservation while it waits for the
+	// buyer's signature. A buyer who never signs would otherwise hold a
+	// provider's capacity until this process restarts, which is a free way to
+	// take a competitor off the market, so sweep expired ones.
+	go n.expireUnpaidInferenceJobs()
+
 	var inferenceAuth *admin.Authenticator
 	if n.config.Security.EnableACLs {
 		inferenceAuth = n.adminServer.GetAuthenticator()
@@ -1711,6 +1718,31 @@ func (n *Node) GetBridge() *bridge.Bridge {
 // not a consensus-ordered operation; see bridge_watch.go for that boundary.
 func (n *Node) GetBridgeWatcher() *bridge.Watcher {
 	return n.bridgeWatcher
+}
+
+// unpaidInferenceSweepInterval is how often expired payment requests are swept.
+// It is a fraction of inference.DefaultUnpaidJobTTL so a released reservation is
+// back on the market promptly after it expires, without a tight loop.
+const unpaidInferenceSweepInterval = 30 * time.Second
+
+// expireUnpaidInferenceJobs releases the reservations of jobs whose buyer never
+// signed. It runs until the node's context is cancelled.
+func (n *Node) expireUnpaidInferenceJobs() {
+	ticker := time.NewTicker(unpaidInferenceSweepInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-n.ctx.Done():
+			return
+		case <-ticker.C:
+			if n.inferenceSvc == nil {
+				continue
+			}
+			if released := n.inferenceSvc.ExpireUnpaid(time.Now().UTC()); released > 0 {
+				fmt.Printf("Inference: released %d reservation(s) whose payment was never signed.\n", released)
+			}
+		}
+	}
 }
 
 // registerConfiguredInferenceBackends installs every backend declared under

@@ -20,6 +20,7 @@ type fakeSettler struct {
 
 	lastAmount uint64
 	lastNonce  uint64
+	lastSigned *token.Transaction
 	submitted  int
 
 	// outcome controls what WaitForSettlement reports.
@@ -41,6 +42,27 @@ func (f *fakeSettler) SubmitAccountTransfer(from *token.Account, recipient strin
 	// Return a minimally-valid transaction; the fake never inspects it beyond
 	// identity, and WaitForSettlement below is keyed on the fake's own outcome.
 	return &token.Transaction{To: recipient, Amount: amount, Nonce: nonce}, nil
+}
+
+// Submit records an already-signed transfer, which is how the client-signed
+// path settles: the node holds no key for the payer.
+func (f *fakeSettler) Submit(tx *token.Transaction) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.submitErr != nil {
+		return f.submitErr
+	}
+	f.lastAmount = tx.Amount
+	f.lastNonce = tx.Nonce
+	f.submitted++
+	f.lastSigned = tx
+	return nil
+}
+
+func (f *fakeSettler) signed() *token.Transaction {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastSigned
 }
 
 func (f *fakeSettler) WaitForSettlement(_ context.Context, _ *token.Transaction) (bool, bool, error) {

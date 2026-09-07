@@ -158,6 +158,54 @@ r = client.chat.completions.create(
                     </p>
                   </div>
 
+                  {/* Client-signed */}
+                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>
+                    Paying with your own key
+                  </h2>
+                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      There are two ways an inference job gets paid for, and which one you want depends on who holds
+                      the key.
+                    </p>
+                    <ul className='text-gray-100 space-y-2 list-disc pl-6 mb-4'>
+                      <li>
+                        <strong>Hosted</strong> - <code>SubmitInferenceJob</code> then{' '}
+                        <code>FulfillInferenceJob</code>. The node signs the payment on the buyer&apos;s behalf with a
+                        key it already holds. Right for a node you run yourself; it makes the operator a custodian of
+                        every caller&apos;s balance on a node other people use.
+                      </li>
+                      <li>
+                        <strong>Client-signed</strong> - <code>RunInferenceJob</code> then{' '}
+                        <code>SettleInferenceJob</code>. The node needs no key for you at all.
+                      </li>
+                    </ul>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      The obvious approach, pre-signing the transfer the way a wallet transfer does, cannot work here,
+                      and the reason shapes the design: a transaction signs over an <em>exact</em> amount, and the
+                      price of an inference is not knowable until the work is done, because it comes from the tokens
+                      the backend reported. Nobody can sign for a number that does not exist yet.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      So the flow is sign-the-invoice. <code>RunInferenceJob</code> reserves capacity, runs the model,
+                      and returns the exact transfer to sign - <strong>without the completion</strong>. You sign it and
+                      call <code>SettleInferenceJob</code>, which verifies the signature, checks every signable field
+                      against the invoice, submits it to consensus, waits for it to commit and apply, and then hands
+                      over the completion.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      Withholding the completion is the enforcement, because the provider has already done the work.
+                      Their exposure is the compute for one job per defecting buyer, bounded further by the
+                      affordability check that ran when capacity was reserved - the same exposure any metered API
+                      carries, and the price of not holding the buyer&apos;s key. A job whose buyer never signs has its
+                      reservation released, so nobody can park a provider&apos;s capacity for free.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-0'>
+                      A valid signature is not sufficient on its own. A transfer of one base unit to an account you
+                      control verifies perfectly, so every field of the signed transfer must equal the invoice&apos;s or
+                      the settlement is refused.
+                    </p>
+                  </div>
+
                   {/* Console */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Matrix Console</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>

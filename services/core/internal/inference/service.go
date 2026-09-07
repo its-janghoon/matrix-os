@@ -33,6 +33,11 @@ var (
 // call to succeed; it reads settled balances back from the market ledger.
 type Settler interface {
 	SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error)
+	// Submit submits an ALREADY-SIGNED transfer, for the client-signed path where
+	// the node holds no key for the payer. *consensus.Engine has satisfied this
+	// all along; it is named in the interface so the Service can settle without
+	// custody.
+	Submit(tx *token.Transaction) error
 	// WaitForSettlement blocks until the submitted transfer is committed to a
 	// block and its apply outcome is known, or ctx is done. It reports whether the
 	// transfer committed and whether it actually moved credits (applied). The
@@ -64,6 +69,13 @@ const (
 	InferenceJobSettling  InferenceJobStatus = "settling"
 	InferenceJobCompleted InferenceJobStatus = "completed"
 	InferenceJobFailed    InferenceJobStatus = "failed"
+	// InferenceJobAwaitingPayment means the backend ran and the charge is known,
+	// but the buyer has not signed for it yet. It is the state the CLIENT-SIGNED
+	// path parks in, and it exists because the price of an inference is not
+	// knowable until the work is done: a buyer cannot pre-sign a transfer for an
+	// amount nobody can compute yet. The completion is withheld in this state -
+	// see RunUnsettled.
+	InferenceJobAwaitingPayment InferenceJobStatus = "awaiting_payment"
 )
 
 // InferenceJob is the record of an inference job submitted to the marketplace.
@@ -98,6 +110,12 @@ type InferenceJob struct {
 	// CreatedAt / UpdatedAt track timing.
 	CreatedAt time.Time
 	UpdatedAt time.Time
+
+	// payment is the transfer this job is waiting for a buyer signature on, set
+	// only in the AWAITING_PAYMENT state. Unexported: it is the node's record of
+	// what it asked for, and SettleSigned compares an incoming transfer against
+	// it, so a caller must not be able to edit it through a returned job copy.
+	payment *PaymentRequest
 }
 
 // Service wires inference into the compute marketplace. A provider advertises an
@@ -122,9 +140,25 @@ type Service struct {
 	// the Service is given an Accounts resolver rather than assuming key custody.
 	accounts Accounts
 
+	// unpaidJobTTL bounds how long a job may sit awaiting a buyer's signature
+	// before its reservation is released. Zero means DefaultUnpaidJobTTL.
+	unpaidJobTTL time.Duration
+
 	mu    sync.Mutex
 	jobs  map[string]*InferenceJob
 	nonce map[string]uint64
+}
+
+// snapshot returns a copy of the job safe to hand to a caller. It drops the
+// payment record: SettleSigned compares an incoming transfer against that record
+// to decide whether the buyer paid the invoice, and a shallow copy shares the
+// pointer, so an in-process caller holding a returned job could lower the
+// invoice it is about to be checked against. A caller that needs the payment
+// gets it returned explicitly from RunUnsettled or PrepareSettlement.
+func (j *InferenceJob) snapshot() InferenceJob {
+	cp := *j
+	cp.payment = nil
+	return cp
 }
 
 // Accounts resolves an account ID to its signing token.Account. A provider node
@@ -214,7 +248,7 @@ func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequ
 	s.jobs[job.ID] = job
 	s.mu.Unlock()
 
-	cp := *job
+	cp := job.snapshot()
 	return &cp, nil
 }
 
@@ -339,7 +373,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 		// caller polling GetJob will observe COMPLETED only once it truly applies.
 		// We deliberately do NOT release capacity or claim completion here.
 		s.mu.Lock()
-		cp := *job
+		cp := job.snapshot()
 		s.mu.Unlock()
 		return &cp, nil
 	}
@@ -350,7 +384,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 		// payment never landed.
 		s.failJob(jobID)
 		s.mu.Lock()
-		cp := *job
+		cp := job.snapshot()
 		s.mu.Unlock()
 		return &cp, fmt.Errorf("inference: settlement for job %q did not apply (payment skipped as unaffordable)", jobID)
 	}
@@ -369,7 +403,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	s.mu.Lock()
 	job.Status = InferenceJobCompleted
 	job.UpdatedAt = time.Now().UTC()
-	cp := *job
+	cp := job.snapshot()
 	s.mu.Unlock()
 
 	return &cp, nil
@@ -401,6 +435,6 @@ func (s *Service) GetJob(jobID string) (*InferenceJob, bool) {
 	if !ok {
 		return nil, false
 	}
-	cp := *job
+	cp := job.snapshot()
 	return &cp, true
 }
