@@ -153,6 +153,57 @@ func UnitsFor(u Usage) uint64 {
 	return uint64(total)
 }
 
+// bytesPerTokenFloor is the divisor used to turn a request's byte size into a
+// LOWER BOUND on the tokens it will cost.
+//
+// It is deliberately generous. A BPE token is usually 3-4 bytes of English, so
+// bytes/4 would be a close estimate - but this must never over-refuse honest
+// work, and a single token can encode many more bytes in some vocabularies and
+// scripts. 32 is the safe direction: it under-counts tokens, so the bound only
+// ever fires on a request that is unambiguously larger than what was reserved.
+const bytesPerTokenFloor = 32
+
+// MinUnitsFor returns a lower bound on the units a request will cost, from what
+// is knowable BEFORE running it: the size of the prompt, and the completion
+// length if the caller capped one.
+//
+// WHY A LOWER BOUND IS THE USEFUL QUANTITY. `unitsEstimate` is chosen by the
+// client and is what the affordability check runs against; the real cost is only
+// known after the work is done, and FulfillJob then clamps the billable units
+// DOWN to the reservation so the buyer is never overcharged. Nothing guarded the
+// mirror side: a buyer could reserve ONE unit, send a prompt worth thousands,
+// and the provider would do all of that work and be paid for one. Confirmed by
+// test - a 90,000-byte prompt against a 1-unit reservation.
+//
+// Comparing this floor against the reservation refuses exactly that case and
+// leaves honest estimates alone, because it is a relationship between the
+// request and the reservation rather than a fixed size limit: the same prompt
+// goes through once enough is reserved for it.
+func MinUnitsFor(r InferenceRequest) uint64 {
+	msgs, err := r.EffectiveMessages()
+	if err != nil {
+		// An empty request is rejected elsewhere; it costs at least the one unit
+		// every job costs.
+		return 1
+	}
+	var bytes int
+	for _, m := range msgs {
+		// The role is part of what a backend sends, so it is part of the cost.
+		bytes += len(m.Role) + len(m.Content)
+	}
+	units := uint64(bytes / bytesPerTokenFloor)
+	if r.MaxTokens > 0 {
+		// The completion is work too, and MaxTokens is the only part of it
+		// knowable in advance. A buyer asking for 4000 completion tokens against
+		// a 10-unit reservation is the same attack wearing a different hat.
+		units += uint64(r.MaxTokens)
+	}
+	if units == 0 {
+		return 1
+	}
+	return units
+}
+
 // promptText joins the effective messages into a single string for backends
 // (like the echo/local stub) that reason over the flattened prompt text.
 func promptText(msgs []Message) string {

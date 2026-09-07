@@ -723,6 +723,13 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	if tx.To == "" {
 		return fmt.Errorf("%w: recipient must not be empty", ErrInvalidMessage)
 	}
+	// Refuse what no block could ever contain, so it cannot sit in the mempool.
+	// Block building skips it too, which is what stops the halt; this stops the
+	// mempool filling with transactions nobody will ever propose, and tells the
+	// sender rather than silently swallowing their transfer.
+	if err := isPermanentlyInvalidReserved(tx); err != nil {
+		return err
+	}
 	key := mempoolKey(tx)
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -971,23 +978,21 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		if _, done := e.committedTxs[mempoolKey(&e.mempool[i])]; done {
 			continue
 		}
-		// A set change that is no longer valid - a duplicate of one already in
-		// force, or one from an account that has since left the set - would make
-		// the whole block invalid. Leave it behind rather than poison a proposal
-		// with it; pruneStaleSetChangesLocked clears it from the mempool.
-		if IsSetChangeRecipient(e.mempool[i].To) {
-			if err := e.verifySetChangeLocked(&e.mempool[i], e.height); err != nil {
-				continue
-			}
-		}
+		// Never propose a reserved-recipient transaction this node would itself
+		// refuse: it would make the whole block invalid, every honest validator
+		// would reject it, and the round would time out.
+		//
+		// This is the SAME check block validation runs, not a second list. It
+		// used to be a set-change `if` and a stake `if`, which is precisely how
+		// a value-carrying provider-change transfer halted the chain: nothing
+		// here skipped it, so every proposal carried it and every proposal was
+		// refused.
+		//
 		// A withdrawal whose unbonding period has not elapsed is not invalid
-		// forever, only not yet: leaving it in the mempool is what makes it land
-		// by itself once the delay passes, and proposing it now would make the
-		// block invalid.
-		if IsStakeRecipient(e.mempool[i].To) {
-			if err := e.verifyStakeTxLocked(&e.mempool[i], e.height); err != nil {
-				continue
-			}
+		// forever, only not yet. Skipping it here and leaving it in the mempool
+		// is what makes it land by itself once the delay passes.
+		if err := e.verifyReservedRecipientLocked(&e.mempool[i], e.height); err != nil {
+			continue
 		}
 		txs = append(txs, e.mempool[i])
 	}
@@ -1272,28 +1277,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		if b.Txs[i].To == "" {
 			return fmt.Errorf("%w: tx %d empty recipient", ErrInvalidMessage, i)
 		}
-		if IsSetChangeRecipient(b.Txs[i].To) {
-			if err := e.verifySetChangeLocked(&b.Txs[i], b.Height); err != nil {
-				// Both sentinels are wrapped: callers match ErrInvalidMessage to
-				// reject the block and ErrNotValidator (or the parse error) to say
-				// why, so the reason is not flattened into a string.
-				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
-			}
-		}
-		if IsStakeRecipient(b.Txs[i].To) {
-			if err := e.verifyStakeTxLocked(&b.Txs[i], b.Height); err != nil {
-				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
-			}
-		}
-		if IsProviderChangeRecipient(b.Txs[i].To) {
-			if err := e.verifyProviderChangeLocked(&b.Txs[i]); err != nil {
-				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
-			}
-		}
-		if IsBurnUnlockRecipient(b.Txs[i].To) {
-			if err := e.verifyBurnUnlockLocked(&b.Txs[i]); err != nil {
-				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
-			}
+		// Both sentinels are wrapped: callers match ErrInvalidMessage to reject
+		// the block and ErrNotValidator (or the parse error) to say why, so the
+		// reason is not flattened into a string.
+		if err := e.verifyReservedRecipientLocked(&b.Txs[i], b.Height); err != nil {
+			return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
 		}
 		key := mempoolKey(&b.Txs[i])
 		// Reject a block that replays an already-committed transaction: an honest
@@ -1487,6 +1475,89 @@ func (e *Engine) verifyProviderChangeLocked(tx *token.Transaction) error {
 	// and a stale offer cannot sit in mempools being proposed forever.
 	if (change.Kind == ProviderChangeAdd) == registered {
 		return fmt.Errorf("%w: %s", ErrNotRegisteredProvider, change)
+	}
+	return nil
+}
+
+// verifyReservedRecipientLocked validates a transaction whose recipient names a
+// consensus operation rather than an account, and reports nil for an ordinary
+// transfer.
+//
+// IT IS THE ONE LIST. This check is needed in three places that must agree, and
+// keeping a per-namespace `if` at each site is what produced a permanent
+// chain halt: block validation rejected value sent to a provider-registry
+// recipient, and the leader's block building only knew to skip set changes and
+// stake operations. So an unprivileged account could sign ONE transfer of value
+// to `market/provider/add/anything`, get it into every mempool, and from then on
+// every leader proposed a block every validator refused - forever, because the
+// mempool only drops what commits. Confirmed by test before this existed.
+//
+// Callers must hold e.mu. height is the height the transaction would land at,
+// which some of these checks depend on.
+func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uint64) error {
+	switch {
+	case IsSetChangeRecipient(tx.To):
+		return e.verifySetChangeLocked(tx, height)
+	case IsStakeRecipient(tx.To):
+		return e.verifyStakeTxLocked(tx, height)
+	case IsProviderChangeRecipient(tx.To):
+		return e.verifyProviderChangeLocked(tx)
+	case IsBurnUnlockRecipient(tx.To):
+		return e.verifyBurnUnlockLocked(tx)
+	}
+	return nil
+}
+
+// isPermanentlyInvalidReserved reports whether a reserved-recipient transaction
+// can never be valid at any height, in any state.
+//
+// It is deliberately narrower than verifyReservedRecipientLocked. A withdrawal
+// whose unbonding period has not elapsed is not invalid forever, only not yet,
+// and leaving it in the mempool is what makes it land by itself once the delay
+// passes. These two are different: a reserved recipient that cannot be parsed
+// never becomes parseable, and value sent to one is never allowed. Submit
+// refuses exactly these, so poison cannot enter a mempool at all.
+func isPermanentlyInvalidReserved(tx *token.Transaction) error {
+	if !IsReservedRecipient(tx.To) {
+		return nil
+	}
+
+	// Whether value is allowed depends on the operation, and exactly one of them
+	// allows it. A BOND is a real transfer of the sender's own coins into its own
+	// reserved bond account - the bond IS that balance - so it carries an amount
+	// by design. Everything else names protocol state, not an account, and value
+	// sent to it would be stranded at an id nobody holds a key for.
+	//
+	// This distinction is not cosmetic: an earlier version of this function
+	// refused value to every reserved recipient and broke bonding outright,
+	// caught by six stake tests.
+	valueAllowed := false
+
+	switch {
+	case IsSetChangeRecipient(tx.To):
+		// height only affects the record it produces, not whether it parses.
+		if _, err := ParseSetChange(tx.To, 0); err != nil {
+			return err
+		}
+	case IsStakeRecipient(tx.To):
+		req, err := ParseStakeRecipient(tx.To)
+		if err != nil {
+			return err
+		}
+		valueAllowed = req.Op == StakeOpBond
+	case IsProviderChangeRecipient(tx.To):
+		if _, err := ParseProviderChange(tx.To); err != nil {
+			return err
+		}
+	case IsBurnUnlockRecipient(tx.To):
+		if _, err := ParseBurnUnlock(tx.To); err != nil {
+			return err
+		}
+	}
+
+	if tx.Amount != 0 && !valueAllowed {
+		return fmt.Errorf("%w: %q names a consensus operation, not an account, so it cannot "+
+			"receive value (got %d)", ErrInvalidMessage, tx.To, tx.Amount)
 	}
 	return nil
 }

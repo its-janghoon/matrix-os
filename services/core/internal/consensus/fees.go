@@ -105,7 +105,12 @@ func paysFee(to string) bool {
 	if to == "" {
 		return false
 	}
-	if IsStakeRecipient(to) || IsSetChangeRecipient(to) {
+	// IsReservedRecipient, not a hand-kept list. This was the fourth divergent
+	// copy of the same list: it named stake and set changes and not provider
+	// registry changes or burn unlocks. Harmless today only because those carry
+	// no value and a fee on zero is zero - but a list that is right by accident
+	// is one edit away from being wrong.
+	if IsReservedRecipient(to) {
 		return false
 	}
 	if strings.HasPrefix(to, feeNamespace) {

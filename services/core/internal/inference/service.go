@@ -18,6 +18,11 @@ var (
 	// ErrNoBackend is returned when a provider has no registered inference
 	// backend, so it cannot fulfill inference jobs.
 	ErrNoBackend = errors.New("inference: provider has no inference backend")
+	// ErrUnderReserved is returned when a request is already known, before
+	// running it, to cost more units than the caller reserved. The charge is
+	// capped at the reservation, so without this the provider would do the
+	// remainder of the work unpaid.
+	ErrUnderReserved = errors.New("inference: the request costs more than was reserved")
 )
 
 // Settler is the consensus-backed settlement dependency the inference Service
@@ -231,6 +236,16 @@ func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequ
 	}
 	if unitsEstimate == 0 {
 		unitsEstimate = 1
+	}
+	// Refuse work that is already, before running, known to cost more than was
+	// reserved. FulfillJob clamps the charge DOWN to the reservation, so without
+	// this a buyer reserves one unit, sends a prompt worth thousands, and the
+	// provider does all of it for one unit's pay. See MinUnitsFor.
+	if minUnits := MinUnitsFor(req); minUnits > unitsEstimate {
+		return nil, fmt.Errorf("%w: this request needs at least %d units but only %d were reserved; "+
+			"reserve at least that many, because the charge is capped at the reservation and the "+
+			"provider would otherwise do the rest of the work unpaid",
+			ErrUnderReserved, minUnits, unitsEstimate)
 	}
 
 	mjob, err := s.market.SubmitJob(buyer, providerID, unitsEstimate)
