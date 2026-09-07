@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"github.com/spf13/cobra"
+
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // defaultInferenceAddr is the node's default inference gRPC endpoint
@@ -52,12 +55,14 @@ The inference API listens on its own address (default 127.0.0.1:9092), set with
 
 func newInferenceSubmitCommand(opts *globalOptions, inferenceAddr *string) *cobra.Command {
 	var (
-		buyer    string
-		provider string
-		prompt   string
-		model    string
-		units    uint64
-		fulfill  bool
+		buyer        string
+		provider     string
+		prompt       string
+		model        string
+		units        uint64
+		fulfill      bool
+		clientSigned bool
+		walletPath   string
 	)
 	cmd := &cobra.Command{
 		Use:   "submit",
@@ -67,7 +72,14 @@ default, immediately fulfills it so the completion and settled units are
 returned in one command (reserve -> fulfill -> settle -> completed).
 
 Pass --fulfill=false to only reserve the job (leaving it PENDING) and fulfill it
-later via a separate call.`,
+later via a separate call.
+
+By default the NODE signs the payment, with a key it already holds for the buyer.
+Pass --client-signed to pay with the local wallet's key instead: the node runs
+the model, returns the exact transfer to sign and withholds the completion, this
+command signs it, and the node settles and hands the completion over. That is
+the path a public endpoint or a dApp uses, where the node holding your key would
+make its operator a custodian of your balance.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if buyer == "" {
@@ -86,6 +98,17 @@ later via a separate call.`,
 			defer ic.Close()
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
+
+			if clientSigned {
+				job, err := runClientSigned(ctx, ic, *inferenceAddr, clientSignedInput{
+					buyer: buyer, provider: provider, model: model, prompt: prompt,
+					units: units, walletPath: walletPath,
+				})
+				if err != nil {
+					return err
+				}
+				return printInferenceJob(cmd.OutOrStdout(), opts.JSON, job)
+			}
 
 			subResp, err := ic.inference.SubmitInferenceJob(ctx, &inferencev1.SubmitInferenceJobRequest{
 				Buyer:         buyer,
@@ -117,7 +140,87 @@ later via a separate call.`,
 	cmd.Flags().StringVar(&model, "model", "", "optional model identifier")
 	cmd.Flags().Uint64Var(&units, "units", 0, "upfront compute units to reserve (0 defaults to 1)")
 	cmd.Flags().BoolVar(&fulfill, "fulfill", true, "run and settle the job immediately after reserving it")
+	cmd.Flags().BoolVar(&clientSigned, "client-signed", false,
+		"pay with the local wallet's key instead of letting the node sign for you")
+	cmd.Flags().StringVar(&walletPath, "wallet", "",
+		"wallet file to sign with when --client-signed is set (default ~/.matrix/wallet.json)")
 	return cmd
+}
+
+// clientSignedInput is what the client-signed run needs, gathered so the flow
+// below reads as the three steps it is.
+type clientSignedInput struct {
+	buyer, provider, model, prompt string
+	units                          uint64
+	walletPath                     string
+}
+
+// runClientSigned drives the path where the node holds no key: run, sign the
+// invoice with the local wallet, settle.
+//
+// The wallet must be the buyer's own. Signing with a different key would produce
+// a transfer that verifies and still be refused, because the node checks the
+// signer against the buyer the job was submitted for - so this checks it here
+// and says so plainly rather than letting the node answer with a mismatch.
+func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in clientSignedInput) (*inferencev1.InferenceJob, error) {
+	path, err := resolveWalletPath(in.walletPath)
+	if err != nil {
+		return nil, err
+	}
+	acct, err := loadWallet(path)
+	if err != nil {
+		return nil, err
+	}
+	if acct.AccountID() != in.buyer {
+		return nil, fmt.Errorf("the wallet at %s is account %s, but --buyer is %s: "+
+			"--client-signed pays with the wallet's own key, so they must match",
+			path, acct.AccountID(), in.buyer)
+	}
+
+	runResp, err := ic.inference.RunInferenceJob(ctx, &inferencev1.RunInferenceJobRequest{
+		Buyer:         in.buyer,
+		Provider:      in.provider,
+		Model:         in.model,
+		Prompt:        in.prompt,
+		UnitsEstimate: in.units,
+	})
+	if err != nil {
+		return nil, mapErr(addr, err)
+	}
+	pay := runResp.GetPayment()
+	if pay == nil {
+		return nil, fmt.Errorf("the node ran the job but returned no payment request")
+	}
+
+	// Sign exactly what was invoiced. Any drift in these fields is refused by the
+	// node as a payment mismatch, which is the check that stops a buyer from
+	// paying one base unit to an account they control.
+	tx := &token.Transaction{
+		From:      acct.PublicKey,
+		To:        pay.GetTo(),
+		Amount:    pay.GetAmount(),
+		Nonce:     pay.GetNonce(),
+		Timestamp: pay.GetTimestamp(),
+		PrevHash:  pay.GetPrevHash(),
+	}
+	if err := tx.Sign(acct.PrivateKey); err != nil {
+		return nil, fmt.Errorf("sign the payment for job %s: %w", pay.GetJobId(), err)
+	}
+
+	settled, err := ic.inference.SettleInferenceJob(ctx, &inferencev1.SettleInferenceJobRequest{
+		Id:            pay.GetJobId(),
+		FromPublicKey: acct.PublicKey,
+		To:            tx.To,
+		Amount:        tx.Amount,
+		Nonce:         tx.Nonce,
+		Timestamp:     tx.Timestamp,
+		PrevHash:      tx.PrevHash,
+		Signature:     tx.Signature,
+	})
+	if err != nil {
+		return nil, mapErr(addr, err)
+	}
+	return settled.GetJob(), nil
 }
 
 func newInferenceGetCommand(opts *globalOptions, inferenceAddr *string) *cobra.Command {

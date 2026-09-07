@@ -65,7 +65,14 @@ const INFERENCE = `matrix inference submit \\
 
 matrix inference get --id <job-id>
 # --fulfill defaults to true: the job is reserved, run and settled in one call.
-# --fulfill=false reserves only.`;
+# --fulfill=false reserves only.
+
+matrix inference submit --client-signed \\
+  --buyer <your wallet's account-id> \\
+  --provider gpu-2 --model llama-3.3-70b --prompt "hello"
+# The node runs the model, returns the exact transfer to sign and withholds the
+# completion; this signs it with the local wallet and the node settles. Use it
+# where the node should not hold your key.`;
 
 const INFERENCE_OUT = `id:         13ac1c62-5013-4c31-8cbd-c5f3b7848d23
 buyer:      c5b097824f2e2222a278af3dbe4b519fa653a96e44ff08891668b3a2a708d5d9

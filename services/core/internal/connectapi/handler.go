@@ -83,6 +83,16 @@ type Config struct {
 	// authentication, because the policy that fits a protocol-shaped route is
 	// not always the blanket "a valid key on every method" this handler applies.
 	ExtraRoutes map[string]http.Handler
+	// PublicReads opens the read methods (Get*, List*) to callers with no API
+	// key. Writes still require one.
+	//
+	// It is off by default and has to stay that way: turning it on by default
+	// would widen what an unauthenticated caller can see on every node that
+	// already exists. An operator running a PUBLIC endpoint turns it on, because
+	// a browser cannot hold a secret and the alternatives - shipping a key to
+	// everyone who loads the page, or not reading the chain at all - are both
+	// worse than an open read of public chain data.
+	PublicReads bool
 	// RateLimit bounds how fast one caller can drive this endpoint. The zero
 	// value disables limiting, which is right for a loopback daemon and wrong for
 	// anything reachable.
@@ -129,6 +139,7 @@ func NewHandler(cfg Config) (http.Handler, error) {
 				impl:       impl,
 				fullMethod: fullMethod,
 				auth:       cfg.Auth,
+				public:     cfg.PublicReads && isReadMethod(method.MethodName),
 			})
 		}
 	}
@@ -165,6 +176,10 @@ type rpcHandler struct {
 	impl       any
 	fullMethod string
 	auth       Authenticator
+	// public means this method is served without a credential. It is resolved
+	// once at construction rather than per request, so the classification is
+	// fixed by the route and cannot vary with what a caller sends.
+	public bool
 }
 
 func (h *rpcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -193,7 +208,7 @@ func (h *rpcHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Carry the HTTP headers into the context as gRPC incoming metadata, so the
 	// same authenticator the gRPC servers use sees the same credentials.
 	ctx := metadata.NewIncomingContext(r.Context(), metadataFromHeader(r.Header))
-	if h.auth != nil {
+	if h.auth != nil && !h.public {
 		if _, err := h.auth.Authenticate(ctx); err != nil {
 			writeError(w, status.Error(codes.Unauthenticated, "authentication required"))
 			return

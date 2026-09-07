@@ -51,6 +51,7 @@ inference:
 
 connect:
   addr: 0.0.0.0:9093                     # HTTP/JSON + /v1/chat/completions; "off" disables
+  public_reads: false                    # open Get*/List* to keyless callers
   rate_limit_per_minute: 600             # per caller; 0 disables
   rate_limit_burst: 120
   allowed_origins:                       # browser origins; empty = no browser may call
@@ -184,6 +185,11 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'addr',
         def: '0.0.0.0:9093',
         note: 'Serves the market and inference services as JSON. Set to "off" to disable it entirely.',
+      },
+      {
+        name: 'public_reads',
+        def: 'false',
+        note: 'Opens the read methods (Get*, List*) to callers with no API key. Writes still require one, so this cannot move money or reserve capacity. Off by default and it stays that way: chain data is public information, but turning this on by default would widen what an unauthenticated caller can see on every node that already exists. Turn it on for a PUBLIC endpoint, because a browser cannot hold a secret and the alternatives - shipping a key to everyone who loads the page, or not reading the chain from a page at all - are both worse.',
       },
       {
         name: 'rate_limit_per_minute',

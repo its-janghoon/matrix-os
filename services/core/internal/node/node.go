@@ -107,6 +107,18 @@ type Config struct {
 		// the narrow thing that actually needs to work. "*" allows any origin and
 		// belongs in development only.
 		AllowedOrigins []string `yaml:"allowed_origins"`
+		// PublicReads opens the read methods (Get*, List*) on the HTTP endpoint to
+		// callers with no API key. Writes still require one, so this cannot move
+		// money or reserve capacity.
+		//
+		// Off by default and it stays that way: a node's chain data is public
+		// information, but turning this on by default would widen what an
+		// unauthenticated caller can see on every node that already exists. An
+		// operator running a PUBLIC endpoint turns it on, because a browser cannot
+		// hold a secret and the alternatives - shipping a key to everyone who
+		// loads the page, or not reading the chain from a page at all - are both
+		// worse than an open read.
+		PublicReads bool `yaml:"public_reads"`
 		// RateLimitPerMinute bounds how many requests one caller may make per
 		// minute, counted per credential where one is presented and per remote
 		// address otherwise.
@@ -1356,6 +1368,7 @@ func (n *Node) Start() error {
 			},
 			ExtraRoutes:    openAI.Routes(),
 			Auth:           connectAuth(marketAuth),
+			PublicReads:    n.config.Connect.PublicReads,
 			AllowedOrigins: n.config.Connect.AllowedOrigins,
 			RateLimit: connectapi.RateLimit{
 				RequestsPerMinute: n.config.Connect.RateLimitPerMinute,
