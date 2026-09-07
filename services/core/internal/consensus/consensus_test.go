@@ -22,6 +22,9 @@ type testNode struct {
 	ledger *market.Ledger
 	chain  *BlockChain
 	store  *kv.Store
+	// evidence is this node's equivocation record, so a test can assert what it
+	// knows about misbehaviour.
+	evidence *EvidenceStore
 	// peerID is this node's identity on the in-memory bus, which a test needs to
 	// address it in a delivery filter.
 	peerID peer.ID
@@ -62,6 +65,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		}
 		ledger := market.NewLedger(store)
 		chain := NewBlockChain(store)
+		evidence := NewEvidenceStore(store)
 		cfg := Config{
 			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
@@ -70,6 +74,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			Self:            accts[i],
 			ProposeInterval: 5 * time.Millisecond,
 			RoundTimeout:    60 * time.Millisecond,
+			Evidence:        evidence,
 		}
 		if opts != nil {
 			opts(&cfg)
@@ -82,13 +87,14 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			t.Fatalf("start engine: %v", err)
 		}
 		nodes[i] = &testNode{
-			acct:   accts[i],
-			engine: eng,
-			ledger: ledger,
-			chain:  chain,
-			store:  store,
-			peerID: peerID,
-			bus:    bus,
+			acct:     accts[i],
+			engine:   eng,
+			ledger:   ledger,
+			chain:    chain,
+			store:    store,
+			peerID:   peerID,
+			bus:      bus,
+			evidence: evidence,
 		}
 	}
 

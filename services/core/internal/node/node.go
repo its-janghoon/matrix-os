@@ -217,6 +217,7 @@ type Node struct {
 	exchange         *marketexchange.Exchange
 	consensus        *consensus.Engine
 	consensusAccount *token.Account
+	evidence         *consensus.EvidenceStore
 	metrics          *metrics.Collector
 	adminServer      *admin.Server
 	marketServer     *marketapi.Server
@@ -509,12 +510,24 @@ func (n *Node) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to build validator set: %w", err)
 	}
+	// Equivocation evidence: a validator that votes two ways in one round is the
+	// one Byzantine act this protocol can prove, and until this store existed the
+	// proof was discarded. The engine records and gossips it; acting on it is an
+	// operator decision, because the validator set is fixed at startup and a node
+	// that ejected a validator on its own would simply fork away from the others.
+	n.evidence = consensus.NewEvidenceStore(n.kvStore)
 	consensusEngine, err := consensus.New(consensus.Config{
 		Transport:  n.transport,
 		Validators: validatorSet,
 		Chain:      consensus.NewBlockChain(n.kvStore),
 		Ledger:     n.market.Ledger(),
 		Self:       consensusAccount,
+		Evidence:   n.evidence,
+		OnEquivocation: func(eq *consensus.Equivocation) {
+			fmt.Printf("consensus: validator %s equivocated at height %d round %d; "+
+				"evidence stored. Remove it from consensus.validators on every node and restart them.\n",
+				eq.VoterID, eq.Height, eq.Round)
+		},
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize consensus engine: %w", err)
@@ -958,6 +971,15 @@ func (n *Node) GetTreasury() *token.Treasury {
 // settlements received from the network into the local ledger.
 func (n *Node) GetExchange() *marketexchange.Exchange {
 	return n.exchange
+}
+
+// Equivocations returns the misbehaviour this node has proof of, oldest first.
+// An operator uses it to decide who to remove from the validator set.
+func (n *Node) Equivocations() ([]consensus.Equivocation, error) {
+	if n.evidence == nil {
+		return nil, nil
+	}
+	return n.evidence.All()
 }
 
 // GetConsensus returns the global consensus engine: the fast leader-based BFT

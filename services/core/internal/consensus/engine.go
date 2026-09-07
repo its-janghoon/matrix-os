@@ -97,6 +97,13 @@ type Config struct {
 	HeadAnnounceInterval time.Duration
 	// OnCommit, when non-nil, is invoked after each block commits+applies.
 	OnCommit CommitObserver
+	// Evidence, when non-nil, persists proof of equivocation. Without it the
+	// engine still detects and gossips an offence but forgets it on restart.
+	Evidence *EvidenceStore
+	// OnEquivocation, when non-nil, is called once per newly-discovered offence.
+	// It is how an operator finds out; the engine itself takes no action, because
+	// removing a validator is not yet something the protocol can do.
+	OnEquivocation func(eq *Equivocation)
 }
 
 // Engine is a fast, leader-based BFT consensus engine over a fixed validator
@@ -119,6 +126,8 @@ type Engine struct {
 	maxBlockTxs          int
 	headAnnounceInterval time.Duration
 	onCommit             CommitObserver
+	evidence             *EvidenceStore
+	onEquivocation       func(eq *Equivocation)
 
 	mu sync.Mutex
 	// mempool holds submitted-but-not-yet-committed transactions in submission
@@ -206,6 +215,9 @@ type Engine struct {
 	lastSyncRequest time.Time
 	// lastHeadAnnounce is when this node last announced its committed height.
 	lastHeadAnnounce time.Time
+	// seenEquivocations dedups reports when no evidence store is configured, so a
+	// gossiped offence is not re-announced on every echo.
+	seenEquivocations map[string]struct{}
 	// peerHeight is the greatest committed height any peer has announced. Above
 	// our own height it is direct evidence that we are behind, which the other
 	// signals only reveal while the network is busy.
@@ -240,6 +252,8 @@ func New(cfg Config) (*Engine, error) {
 		maxBlockTxs:          orIntC(cfg.MaxBlockTxs, DefaultMaxBlockTxs),
 		headAnnounceInterval: orDurationC(cfg.HeadAnnounceInterval, DefaultHeadAnnounceInterval),
 		onCommit:             cfg.OnCommit,
+		evidence:             cfg.Evidence,
+		onEquivocation:       cfg.OnEquivocation,
 		mempoolSet:           make(map[string]struct{}),
 		committedTxs:         make(map[string]struct{}),
 		appliedTxs:           make(map[string]bool),
@@ -329,13 +343,18 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("consensus: subscribe head: %w", err)
 	}
+	evidenceCh, err := e.transport.Subscribe(ctx, TopicEvidence)
+	if err != nil {
+		return fmt.Errorf("consensus: subscribe evidence: %w", err)
+	}
 
-	e.wg.Add(6)
+	e.wg.Add(7)
 	go e.runLoop(ctx, proposalCh, e.handleProposal)
 	go e.runLoop(ctx, voteCh, e.handleVote)
 	go e.runLoop(ctx, syncReqCh, e.handleSyncRequest)
 	go e.runLoop(ctx, syncRespCh, e.handleSyncResponse)
 	go e.runLoop(ctx, headCh, e.handleHeadAnnounce)
+	go e.runLoop(ctx, evidenceCh, e.handleEvidence)
 	go e.driver(ctx)
 	return nil
 }
@@ -957,14 +976,25 @@ func (e *Engine) selfVoteAtLocked(typ VoteType, round uint64) (string, bool) {
 // belongs to, so it can later back a certificate. Callers must hold e.mu. Votes
 // for other heights are ignored.
 func (e *Engine) recordVoteLocked(v *Vote) {
+	e.recordVoteDetectingConflictLocked(v)
+}
+
+// recordVoteDetectingConflictLocked files a vote and reports a vote by the SAME
+// validator, in the SAME phase of the SAME round, for a DIFFERENT block.
+//
+// That pair is equivocation, and this is the only place it can be noticed: an
+// honest validator prevotes once and precommits once per round, so the engine
+// used to file the second vote under a different block hash and count on
+// without comment. Callers must hold e.mu.
+func (e *Engine) recordVoteDetectingConflictLocked(v *Vote) *Vote {
 	if v.Height != e.height {
-		return
+		return nil
 	}
 	byRound := e.prevotes
 	if v.Type == VoteTypePrecommit {
 		byRound = e.precommits
 	} else if v.Type != VoteTypePrevote {
-		return
+		return nil
 	}
 	byHash := byRound[v.Round]
 	if byHash == nil {
@@ -972,6 +1002,19 @@ func (e *Engine) recordVoteLocked(v *Vote) {
 		byRound[v.Round] = byHash
 	}
 	hkey := fmt.Sprintf("%x", v.BlockHash)
+
+	var conflict *Vote
+	for otherHash, byVoter := range byHash {
+		if otherHash == hkey {
+			continue
+		}
+		if prior, ok := byVoter[v.VoterID]; ok {
+			cp := prior
+			conflict = &cp
+			break
+		}
+	}
+
 	set := byHash[hkey]
 	if set == nil {
 		set = make(map[string]Vote)
@@ -980,6 +1023,7 @@ func (e *Engine) recordVoteLocked(v *Vote) {
 	if _, ok := set[v.VoterID]; !ok {
 		set[v.VoterID] = *v
 	}
+	return conflict
 }
 
 // castPrevote casts and broadcasts this node's prevote for a block hash (or the
@@ -1152,10 +1196,21 @@ func (e *Engine) handleVote(ctx context.Context, msg transport.Message) {
 // have passed are dropped. Callers need not hold the lock; tallyVote takes it.
 func (e *Engine) tallyVote(v *Vote) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	var pending *Equivocation
+	defer func() {
+		e.mu.Unlock()
+		if pending != nil {
+			// Outside the lock: recording touches the store and gossiping touches
+			// the transport.
+			e.reportEquivocation(context.Background(), pending, true)
+		}
+	}()
 	switch {
 	case v.Height == e.height:
-		e.recordVoteLocked(v)
+		if conflict := e.recordVoteDetectingConflictLocked(v); conflict != nil {
+			eq := NewEquivocation(*conflict, *v)
+			pending = &eq
+		}
 	case v.Height > e.height && v.Height <= e.height+maxFutureStash:
 		// We are lagging: buffer the vote so it counts the moment we reach that
 		// height, so a node that fell behind still collects the quorum that let the
@@ -1364,6 +1419,84 @@ func (e *Engine) maybeAnnounceHead(ctx context.Context) {
 	if data, err := json.Marshal(&ann); err == nil {
 		_ = e.transport.Publish(ctx, TopicHead, data)
 	}
+}
+
+// reportEquivocation verifies, records and (when it is new to us) gossips proof
+// that a validator voted two ways.
+//
+// The engine deliberately does NOT punish. Removing a validator is not
+// something this protocol can do yet - the set is fixed at startup - so the
+// honest thing is to make the offence known and let an operator act, rather
+// than to invent an enforcement path that only some nodes would apply and
+// thereby split the network.
+func (e *Engine) reportEquivocation(ctx context.Context, eq *Equivocation, gossip bool) {
+	if err := eq.Verify(e.validators); err != nil {
+		// Either not really equivocation, or not from a validator. Either way it
+		// is not evidence.
+		return
+	}
+
+	isNew := true
+	if e.evidence != nil {
+		recorded, err := e.evidence.Record(eq)
+		if err != nil {
+			fmt.Printf("consensus: could not store equivocation evidence against %s: %v\n", eq.VoterID, err)
+		} else {
+			isNew = recorded
+		}
+	} else {
+		// With no store we cannot tell a repeat from a first sighting, so the
+		// in-memory guard is the best available: one report per offence per run.
+		e.mu.Lock()
+		if e.seenEquivocations == nil {
+			e.seenEquivocations = make(map[string]struct{})
+		}
+		if _, seen := e.seenEquivocations[eq.Key()]; seen {
+			isNew = false
+		} else {
+			e.seenEquivocations[eq.Key()] = struct{}{}
+		}
+		e.mu.Unlock()
+	}
+	if !isNew {
+		return
+	}
+
+	fmt.Printf("consensus: EQUIVOCATION by validator %s at height %d round %d (%s): "+
+		"two signed votes for different blocks\n", eq.VoterID, eq.Height, eq.Round, eq.Type)
+
+	if e.onEquivocation != nil {
+		e.onEquivocation(eq)
+	}
+	if gossip {
+		if data, err := json.Marshal(eq); err == nil {
+			_ = e.transport.Publish(ctx, TopicEvidence, data)
+		}
+	}
+}
+
+// handleEvidence ingests equivocation proof from a peer.
+//
+// A stranger's report is actionable here only because it is self-proving: the
+// record carries both signed votes, so this node checks them itself and never
+// takes the sender's word. Evidence that does not verify is dropped in silence,
+// exactly like any other malformed gossip.
+func (e *Engine) handleEvidence(ctx context.Context, msg transport.Message) {
+	var eq Equivocation
+	if err := json.Unmarshal(msg.Payload, &eq); err != nil {
+		return
+	}
+	// Re-gossip only what is new to us, which stops a permanent echo.
+	e.reportEquivocation(ctx, &eq, true)
+}
+
+// Equivocations returns the offences this node has on record, oldest height
+// first. It is how an operator or an API surfaces them.
+func (e *Engine) Equivocations() ([]Equivocation, error) {
+	if e.evidence == nil {
+		return nil, nil
+	}
+	return e.evidence.All()
 }
 
 // handleHeadAnnounce records a peer's committed height and, when it is ahead of

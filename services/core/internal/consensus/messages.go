@@ -91,6 +91,11 @@ const (
 	TopicSyncResponse = "matrix.consensus.v2/sync-response"
 	// TopicHead carries HeadAnnounce messages (a node's committed chain length).
 	TopicHead = "matrix.consensus.v2/head"
+	// TopicEvidence carries Equivocation messages: proof that a validator voted
+	// two ways in one phase of one round. It is gossiped so an offence seen by
+	// one node becomes known to all of them, rather than sitting in the log of
+	// whichever node happened to receive both votes.
+	TopicEvidence = "matrix.consensus.v2/evidence"
 )
 
 // Block-sync bounds. A response is capped both by block count and by encoded
