@@ -892,12 +892,59 @@ message, and the hook stays optional.
   ordinary vote gossip, so a synced block commits under the same quorum rule as
   a proposed one.
 
+### Peer scoring, configured
+
+The guard decides one message; the score decides the PEER. Without scoring, a
+peer sending nothing but garbage is refused a million times and stays a full
+mesh member, so the work never ends.
+
+Measured on two real hosts with real gossipsub: **60 messages published, only 6
+reached validation, worst score -1800** against a graylist threshold of -1500.
+That is the whole point - the node did six units of work instead of sixty, and
+the peer was then ignored.
+
+The measurement corrected the design. The first version put the graylist at
+-2500, computed from P4's squared counter. A live run showed the validator being
+called only **6 times for 60 published messages**: once a score crosses a
+threshold gossipsub stops delivering that peer's messages for validation, so the
+counter stops climbing and the score plateaus and decays back up. -2500 was
+therefore unreachable by P4 - decoration. It is -1500, crossed by the sixth
+rejection.
+
+What is deliberately OFF, and why: **P3 (mesh message deliveries)**. P3
+penalizes a peer for delivering too FEW messages, which is how a busy network
+detects a freeloader. This network is not busy: a validator set of two or four
+on an idle chain delivers almost nothing for long stretches, so every honest
+peer would accumulate the deficit-squared penalty and be graylisted - and a
+graylisted validator's votes stop being processed. That is a self-inflicted
+partition, worse than the freeloading it would catch. Enabling it needs a
+measured per-topic message rate from a live network first, and until that number
+exists zero is the honest setting. A test fails if someone turns it on.
+
+**P5 (application-specific)** is zero for a different reason: it could give known
+validators a positive baseline, but a peer id is a libp2p identity and a
+validator is an ed25519 account, and this node holds no mapping between them.
+Deriving one from the connection would mean trusting the thing being scored.
+
+**IP colocation** has a threshold of 4, not 1. Legitimate deployments share an
+address - two nodes behind one NAT is a topology this project verified working
+earlier - and a strict threshold would have penalized exactly that. Four allows a
+small cluster and still charges a sybil farm, whose penalty is the square of the
+excess: twenty peers on one address scores -12800.
+
+Per-topic parameters are attached at JOIN time (`Topic.SetScoreParams`) rather
+than listed in `PeerScoreParams.Topics`. A topic list would be a second place to
+keep in sync, and a topic missing from it is scored by nothing at all - silently,
+because an unscored topic still works, it just stops charging anyone.
+
+Several of the tests assert that an HONEST peer is never punished, because that
+is the direction a misconfiguration breaks: a fresh peer starts at exactly zero,
+so every negative threshold has to be strictly below it or a new peer is
+graylisted on arrival.
+
 ### Still not covered
 
-Timing side channels. Peer scoring is left at gossipsub's defaults rather than
-tuned - rejection feeds it, which is the part that matters, but a deliberate
-score configuration (topic weights, IP colocation limits, behaviour penalties)
-is its own piece of work.
+Timing side channels.
 
 ## Non-blocking notes
 

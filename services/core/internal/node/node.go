@@ -881,9 +881,15 @@ func (n *Node) Start() error {
 	// the signature verify) happens after the damage. See
 	// consensus.GossipGuard: a 1 MiB message decoded to 204 MiB of heap and
 	// decoded without error.
+	// Peer scoring turns the guard's refusals into a consequence for the SENDER.
+	// A validator decides one message; without scoring a peer that sends nothing
+	// but garbage is refused a million times and stays a full mesh member, so the
+	// work never ends. See transport.PeerScoreParams for what each parameter is
+	// worth here and which ones are deliberately disabled.
 	trans, err := transport.New(n.ctx, transport.Config{
 		Host:      p2pHost.GetHost(),
 		Validator: consensus.NewGossipGuard(),
+		PeerScore: true,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize transport: %w", err)

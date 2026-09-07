@@ -18,6 +18,7 @@ type Transport struct {
 	subs      map[string]*pubsub.Subscription
 	topicMu   sync.RWMutex
 	validator Validator
+	peerScore bool
 }
 
 // Message represents a transport message
@@ -48,12 +49,30 @@ type Config struct {
 	// subscribes to. Nil means accept everything, which is the old behaviour and
 	// is only safe on a trusted network.
 	Validator Validator
+	// PeerScore enables gossipsub peer scoring: every topic this Transport joins
+	// is scored, and a peer that misbehaves is eventually ignored.
+	//
+	// It pairs with Validator rather than standing alone: the validator decides
+	// one message, and the score decides the PEER. Rejecting a message a million
+	// times without ever charging the sender is work with no end, and scoring
+	// without a validator has almost nothing to score, because P4 (invalid
+	// message deliveries) is fed by ValidationReject. See PeerScoreParams.
+	PeerScore bool
 }
 
 // New creates a new Transport instance
 func New(ctx context.Context, cfg Config) (*Transport, error) {
 	// Create pubsub service
-	ps, err := pubsub.NewGossipSub(ctx, cfg.Host)
+	opts := []pubsub.Option{}
+	if cfg.PeerScore {
+		// WithPeerScore validates the parameters and fails construction on a bad
+		// set, which is the behaviour to want: a scoring misconfiguration that
+		// started successfully would graylist honest peers in production, and a
+		// graylisted validator's votes stop being counted.
+		params, thresholds := PeerScoreParams()
+		opts = append(opts, pubsub.WithPeerScore(params, thresholds))
+	}
+	ps, err := pubsub.NewGossipSub(ctx, cfg.Host, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create pubsub: %w", err)
 	}
@@ -64,6 +83,7 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 		topics:    make(map[string]*pubsub.Topic),
 		subs:      make(map[string]*pubsub.Subscription),
 		validator: cfg.Validator,
+		peerScore: cfg.PeerScore,
 	}, nil
 }
 
@@ -99,6 +119,16 @@ func (t *Transport) Subscribe(ctx context.Context, topic string) (<-chan Message
 		tp, err = t.pubsub.Join(topic)
 		if err != nil {
 			return nil, fmt.Errorf("failed to join topic %s: %w", topic, err)
+		}
+		if t.peerScore {
+			// Scored at JOIN, so a topic cannot be subscribed to without being
+			// scored. The alternative - a list of topics handed to
+			// WithPeerScore - is a second place to keep in sync, and a topic
+			// missing from it is scored by nothing at all: silently, because an
+			// unscored topic still works, it just stops charging anyone.
+			if err := tp.SetScoreParams(TopicScoreParams()); err != nil {
+				return nil, fmt.Errorf("failed to set score params for topic %s: %w", topic, err)
+			}
 		}
 		t.topics[topic] = tp
 	}
