@@ -31,6 +31,6 @@ sources.
   memory: past the end, wrapping u32, and over the per-call cap. Every one is
   refused, which is the sandbox boundary this ABI shape depends on.
 
-Both are `#![no_std]`, so the only imports in the module are the four host
-functions - which is the property the runtime relies on: a guest cannot open a
+All of them are `#![no_std]`, so the only imports in each module are the four
+host functions - which is the property the runtime relies on: a guest cannot open a
 socket or read a file because nothing else is in its import table.

@@ -750,10 +750,74 @@ exactly one canonical encoding.
   becoming world-callable. A change here was started and reverted: the design is
   already defended, and reporting it as a finding would have been wrong.
 
-### Not covered by this pass
+## Adversarial pass: the WASM sandbox and agent resource accounting
 
-Timing side channels, the WASM agent sandbox, the p2p layer's own DoS surface
-(libp2p defaults), and gas/resource accounting for agent execution.
+Four more findings, all fixed, each MEASURED with a purpose-built guest module
+rather than argued from the code. The fixtures are committed
+(`internal/agent/testdata/{flood,spam,escape}.rs`) with their numbers in the
+README.
+
+**1. The log budget counted lines, not bytes.** `maxLogLines` capped how many
+lines a guest may write and its comment claimed that stopped "a guest in a loop
+[filling] the node's disk". A line may be up to `maxHostCallBytes`, so the real
+ceiling was lines x bytes-per-line, nearly 10 GiB. Measured: **586 MiB from one
+run** with the line cap working the whole time. Now bounded in bytes too, with
+the notice emitted once so it cannot itself become the flood.
+
+**2. The secure default was a node OOM.** Every `send()` attempt was retained in
+`sendLog`, refused ones included - a good reason to record something, not a
+reason to record everything. Measured with NO send policy, the default where
+every send is refused: **1172 MiB held, nothing delivered anywhere**. The
+attempt is now always counted (`SendsDropped`) and only the retained copy is
+dropped, so a bounded log can still say how many there were.
+
+**3. A deployer chose its own resource ceiling.** `MaxMemoryPages` and
+`MaxRunTimeMS` arrive in the deployer's request; `normalizeLimits` filled in a
+default when a field was zero and never bounded one from above. `Validate`
+allows 65536 pages (4 GiB) and no ceiling on run time at all. The metering
+charge did not compensate - it is a FLAT price per run, so one payment bought a
+trivial call or the whole ceiling the caller picked. Pricing by consumption
+would need an instruction meter wazero does not have, so the fix is a ceiling on
+what one payment buys: `MaxAllowedMemoryPages` 1024 and `MaxAllowedRunTime` 30s,
+clamped rather than refused. Clamped in `Deployment.Limits` as well, since that
+is the path every run after the first takes.
+
+**4. An inbox grew without bound and outlived the run.** Worse than the sender's
+own log, because the bytes stay in the Manager until the recipient deployment is
+removed. Bounding it exposed that `Inbox` only PEEKS, so a full inbox would have
+been full for good - an unbounded-memory bug traded for a permanent-refusal one.
+`DrainInbox` is the consumer's half.
+
+Also: `Stop` closed the module and returned early on error, **skipping the
+runtime close**. The module is exactly what fails to close after a guest was
+interrupted for exceeding its deadline, so a module that reliably times out
+leaked one wazero runtime per run - and `Manager.run` defers `Stop` discarding
+the error, so nothing upstream would notice.
+
+### The sandbox boundary itself holds
+
+`escape.rs` asks all four host functions for ranges outside its own linear
+memory - past the end, wrapping u32, over the per-call cap - and every one is
+refused, the guest keeps running (the ABI has no way to hand it an error), the
+host buffer stays untouched, and each refusal is reported. The import table
+holds only the four host functions, so there is no file or socket to reach for.
+The run-time deadline is real (`WithCloseOnContextDone`, proven by `spin.rs`),
+and `MaxFuel` was already replaced by it - a counter nothing could spend.
+
+### Identified, not fixed: no cap on deployments per account
+
+Nothing limits how many agents one account deploys, and each stores its module
+(up to 32 MiB) persistently. `DeployAgent` needs an API key, so today the
+deployer is operator-authenticated and this is an operator's own disk. It stops
+being that the moment keys are issued to paying deployers, which is what the
+metering exists for. The fix is a per-account deployment cap, and the number is
+a business-model decision rather than a security default, so it is left for the
+CTO rather than guessed.
+
+### Still not covered
+
+Timing side channels, and the p2p layer's own DoS surface (libp2p defaults:
+connection limits, stream limits, gossip amplification).
 
 ## Non-blocking notes
 
