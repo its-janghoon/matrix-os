@@ -1,7 +1,7 @@
 # Handoff
 
 State of `main` as of `cb4db0c`, plus the product-surface work on
-`claude/handoff-md-checklist-s0ptw1` through `f3511c9`. Everything below was run, not inferred; where
+`claude/handoff-md-checklist-s0ptw1` through `935effa`. Everything below was run, not inferred; where
 something is unverified it says so.
 
 ## Build and check
@@ -208,6 +208,8 @@ acts:
   `security.api_keys` is what makes a key usable on `/v1/chat/completions`, and
   the node must hold that account's signing key to settle for it. Leaving it
   empty is the safe default and means that key cannot buy inference.
+- **`connect.public_reads` and `connect.signed_writes` are both off.** A node
+  serving a browser needs both; a node its own operator drives needs neither.
 - **Permissioned vs. open launch is a config switch** - currently permissioned,
   stake off. Turning on stake means choosing `min_bond` / `unbonding_period`.
 
@@ -276,29 +278,84 @@ comment: `matrixd -init` writes two localhost dev origins, and an empty list
 means no browser may call at all. The origin policy was already deny-by-default;
 only the missing rate limit was real.
 
-## Still pending on the product surface
+## The rest of the product surface: what landed
 
-**A `matrix inference` flag for the client-signed path.** The CLI still drives
-`SubmitInferenceJob` + `FulfillInferenceJob`, which is fine there - it holds the
-wallet key locally, so the hosted path is the honest one for it. A
-`--client-signed` flag would mostly exercise the new path by hand.
+The four items this file listed as still pending are done too.
 
-**Streaming.** `connectapi` rejects streaming methods by design and the protos
-declare none, so token-by-token output is its own piece of work: a server-stream
-RPC plus Connect streaming framing, and on the OpenAI route the SSE `data:`
-frames a client expects. Right now `"stream": true` is refused.
+**e. Opt-in public reads** (`8b9bbd7`). `connect.public_reads` opens Get*/List*
+to callers with no key; writes are untouched. Reads are Get* and List* by the
+convention every service here already follows, and
+`TestReadClassificationIsPinned` enumerates the served surface so a mutating
+`GetSomething` breaks the build rather than quietly becoming world-callable. Off
+by default, because turning it on by default would widen what an
+unauthenticated caller can see on every node that already exists.
 
-**A browser wallet and a top-up relayer.** `token.Account` is a single ed25519
-keypair, so generating one in the browser and sealing it with a passkey is
-natural, and (c) means the node no longer needs that key. Nothing does it yet. A
-top-up flow also needs a relayer turning USDC into native MATRIX (DEX buy, then
-`WrappedMatrix.burn`) so the word "wMATRIX" never reaches a user.
+**f. `matrix inference submit --client-signed`** (`8b9bbd7`). Run, sign the
+invoice with the local wallet, settle. It checks the wallet is the buyer's own
+account up front rather than letting the node answer with a payment mismatch
+after the provider has already worked.
 
-**Open reads on the public endpoint.** `connectapi` still requires a valid key on
-every method, reads included. A browser cannot hold a secret, so a public RPC
-wants reads open and writes signature-authorised. Deliberately not changed here:
-opening reads by default would widen what an unauthenticated caller can see on
-every existing node, so it should arrive as config an operator turns on.
+**g. Streaming** (`fa81716`). Four layers: an optional `StreamingBackend` (a
+backend that cannot stream is wrapped into one chunk, and says so via
+`StreamedOneShot`); real upstream streaming in `OpenAIBackend`; the
+`StreamInferenceJob` server-stream RPC; and SSE on `/v1/chat/completions`.
+`connectapi` now serves server-streaming methods with the Connect framing - it
+used to refuse to build if a bound service declared one, so this had to land
+with the RPC. `FulfillJob`'s settlement half is extracted as `settleRun` so both
+paths share it, and a test pins that streaming and fulfilling settle the same
+amount.
+
+Streaming is the hosted path only, by construction. On the client-signed path
+the completion is withheld until the buyer signs, and withholding is the only
+enforcement because the provider has already worked.
+
+Two things worth carrying forward from this one. First, usage: a streamed
+chat-completions response carries none unless the vendor honours
+`stream_options.include_usage`, so when it never arrives it is derived locally
+from the prompt and the assembled completion - deterministic, and the same basis
+a buyer can recompute, which is what keeps an inflated bill detectable. Second,
+the flush: the first version of the framing test passed with the flush REMOVED,
+because the handler finished before the client read. It now blocks mid-stream,
+so it times out without it. Any future test of a stream has to hold the handler
+open or it proves nothing.
+
+**h. A browser wallet and `/chat`** (`935effa`). An ed25519 keypair generated
+with `extractable: false`, kept as a CryptoKey in IndexedDB: script on the
+origin can ask it to sign and cannot read the key. Verified in Chromium -
+`exportKey` throws. Passkeys are deliberately NOT used, and the note in the
+earlier version of this file suggesting them was wrong: a passkey signs
+WebAuthn's own challenge structure with its own key, so it cannot produce the
+ed25519 signature the chain verifies.
+
+Building it surfaced a real hole and closed it. A page cannot hold an API key,
+so the three write methods it needs had to be openable. Two were already
+self-authorising; `RunInferenceJob` was not - `buyer` was just a string, so
+opening it would have let anyone name someone else's funded account, have a
+provider work, and never sign. `inference.RunAuthorization` fixes that: a buyer
+signature bound to one provider, one prompt and one moment, with the account
+derived from the signing key. `connect.signed_writes` opens the three AND makes
+that authorization mandatory, from one field, because the two cannot be allowed
+to drift apart.
+
+## Still pending
+
+**A USDC on-ramp.** The `/chat` page hands over a `matrix fund` command because
+there is nothing else to offer: buying MATRIX with USDC means a DEX purchase and
+a `WrappedMatrix.burn`, and the contracts are built and undeployed. Until then a
+browser account is funded from outside the browser, which is fine for a node you
+run and not a product.
+
+**A genuine two-machine libp2p join** is still unverified (as it was before).
+
+**Three copies of two byte layouts.** The node is the source of truth,
+`packages/sdk` has a TypeScript copy, and `apps/web` has another because there
+is no workspace linkage. All three are pinned to the same golden vectors, so a
+drift fails a test rather than surfacing as "invalid signature" at runtime. A
+workspace (or publishing the SDK) would remove the third copy.
+
+**Client-streaming** is refused by `connectapi` by design: the client would have
+to frame its own request stream, which a request-body-then-response shape cannot
+express. Nothing needs it yet.
 
 ## Product decisions made this session
 
