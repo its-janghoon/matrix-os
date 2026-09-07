@@ -1,0 +1,38 @@
+{
+  "name": "matrix-os-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client for a Matrix OS node: the compute marketplace and LLM inference APIs over HTTP.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "matrix-os",
+    "compute",
+    "llm",
+    "inference",
+    "p2p"
+  ],
+  "devDependencies": {
+    "@types/node": "^26.4.1",
+    "typescript": "^5.9.2",
+    "vite": "^8",
+    "vitest": "^5.0.0"
+  }
+}

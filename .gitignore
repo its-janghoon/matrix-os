@@ -66,3 +66,6 @@ Thumbs.db
 # Task handoffs, transcripts and review notes. Working artifacts of whoever ran
 # the task, not part of the project, so they stay local.
 .agents/
+
+# ---- TypeScript SDK (packages/sdk) ----
+packages/sdk/dist/

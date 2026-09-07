@@ -22,6 +22,8 @@
 // rather than pretending.
 package connectapi
 
+//go:generate sh -c "go run ../../cmd/rpcmanifest > ../../../../packages/sdk/src/rpc-manifest.json"
+
 import (
 	"context"
 	"encoding/json"
