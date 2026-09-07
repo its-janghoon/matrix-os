@@ -41,7 +41,7 @@ export default function ConsensusPage() {
                 <h3 className='text-xl font-semibold'>Two phases, deliberately</h3>
               </div>
               <ul className='mt-6 space-y-3'>
-                <CheckItem>Fixed ed25519 validator set, round-robin leader, no mining</CheckItem>
+                <CheckItem>ed25519 validator set, round-robin leader, no mining</CheckItem>
                 <CheckItem>A quorum of prevotes for one block is a polka; a quorum of precommits commits it</CheckItem>
                 <CheckItem>
                   A validator locks on its precommit, not on its own single vote, so leader rotation can never orphan a

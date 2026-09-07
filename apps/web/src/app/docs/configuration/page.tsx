@@ -48,7 +48,10 @@ connect:
     - http://localhost:5173
 
 consensus:
-  validators: []                         # hex account ids; empty = this node alone
+  validators: []                         # GENESIS set: hex account ids; empty = this node alone
+  epoch_length: 100                      # blocks between set changes taking effect; must match everywhere
+  approved_changes: []                   # set changes this operator votes for and offers
+  eject_equivocators: true               # remove a validator proven to have double-voted
 
 genesis:
   allocations: []                        # [{account, amount}] credited once, at first start
@@ -75,7 +78,11 @@ const VALIDATORS = `consensus:
   validators:
     - 3f9a...   # every node in the set lists the SAME ids
     - 7c21...
-    - b0e4...`;
+    - b0e4...
+  epoch_length: 100
+  approved_changes:
+    - add:9f2c1e4b...    # a new validator's consensus identity (its public key, hex)
+    - remove:7c21...     # an account id to eject`;
 
 type Field = { name: string; def: string; note: string };
 
@@ -157,12 +164,28 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
   },
   {
     title: 'consensus',
-    blurb: 'The validator set. Every node in a network must list the same ids, or they derive different leader schedules.',
+    blurb:
+      'The validator set. Every node in a network must start from the same ids and agree on epoch_length, or they derive different leader schedules. The set itself is chain state: once it has changed, each node resumes the set the chain arrived at and this file no longer decides it.',
     fields: [
       {
         name: 'validators',
         def: '[]',
-        note: 'Hex account ids. This node’s own consensus identity is always added, so an empty list is a working single-validator node.',
+        note: 'The GENESIS set, as hex account ids. It seeds a fresh store and is ignored once the chain has changed the set. This node’s own consensus identity is always added, so an empty list is a working single-validator node.',
+      },
+      {
+        name: 'epoch_length',
+        def: '100',
+        note: 'How many committed blocks make an epoch. A set change carried by a committed block takes effect at the next height that is a multiple of this, so every node switches at the SAME height - nodes that disagree about it would switch at different heights, which is a fork. Zero means 100.',
+      },
+      {
+        name: 'approved_changes',
+        def: '[]',
+        note: 'Set changes this operator votes for, written as add:<64-hex public key> or remove:<64-hex account id> - the same text the node prints in its log. A node offers the changes listed here and re-offers them until they commit, and prevotes nil on a block carrying anything else, so a change needs a quorum of operators to have listed it. Empty means this node approves no membership change, which is the safe default. A typo fails startup rather than silently approving nothing.',
+      },
+      {
+        name: 'eject_equivocators',
+        def: 'true',
+        note: 'Vote to remove a validator this node holds proof equivocated - two votes for different blocks at one height, round and phase, both signed by that validator’s key - with no entry in approved_changes. The evidence proves itself and every node checks it rather than trusting a peer, so there is no operator judgement to make. False keeps detection, recording and gossip and leaves the removal to you.',
       },
     ],
   },

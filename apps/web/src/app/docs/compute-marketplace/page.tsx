@@ -66,7 +66,7 @@ export default function ComputeMarketplaceDocs() {
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
                     <ConsensusRound className='mx-auto max-w-xl' />
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                      <li>Fixed ed25519 validator set, round-robin leader, no proof-of-work</li>
+                      <li>ed25519 validator set, round-robin leader, no proof-of-work</li>
                       <li>A quorum is more than two thirds of the set, in both voting phases</li>
                       <li>
                         Round timeouts rotate the leader, and the next leader must re-propose the block that last

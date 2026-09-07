@@ -1,11 +1,12 @@
 import { CodeSample } from '@/components/CodeSample';
+import { ValidatorSetChange } from '@/components/diagrams';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
 
 export const metadata = {
   title: 'Network setup',
   description:
-    'Running more than one Matrix OS node: the two things that must match, how to find a node peer id and validator id, and what a set change costs today.',
+    'Running more than one Matrix OS node: the two things that must match, how to find a node peer id and validator id, and how the validator set changes while the network is running.',
 };
 
 /**
@@ -36,7 +37,24 @@ const VALIDATORS = `# in BOTH a.yaml and b.yaml, identically:
 consensus:
   validators:
     - 689cf718481d3c13cf4e370526d5228d758e0c2c9b6f5eb3bbc0540c20eede31   # A
-    - 4b1d0c9a...                                                        # B`;
+    - 4b1d0c9a...                                                        # B
+  epoch_length: 100`;
+
+const SET_CHANGE = `# on node A, and on enough other nodes to make a quorum:
+consensus:
+  approved_changes:
+    - add:9f2c1e4b...        # C's consensus identity, from its own startup log
+
+# and to eject one:
+consensus:
+  approved_changes:
+    - remove:4b1d0c9a...`;
+
+const SET_CHANGE_LOG = `consensus: committed set change at height 41: add:9f2c1e4b... (takes effect at the next epoch)
+consensus: validator set change in force at height 100: add:9f2c1e4b...
+consensus: validator set is now 3 members, quorum 3`;
+
+const VETO_LOG = `consensus: refusing to vote for a block that would add:9f2c1e4b... (not in consensus.approved_changes)`;
 
 const PORTS = `9000  libp2p        peers. Must be reachable by other nodes.
 9090  gRPC admin    deploy, health, logs.
@@ -99,14 +117,63 @@ export default function NetworkSetupPage() {
                     tolerate one; the useful sizes start at four.
                   </p>
 
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>epoch_length</code> must match too. It is how many blocks pass
+                    between validator-set changes taking effect, and nodes that disagree about it would switch sets
+                    at different heights - see below.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>4. Changing the set later</h2>
+                  <p className='mb-4 text-gray-300'>
+                    The list above is the <em>genesis</em> set. Once the chain has changed the set, each node resumes
+                    the set the chain arrived at and ignores this field, so a config that still says the set is empty
+                    is not a problem. Adding or removing a validator does not need a coordinated restart:
+                  </p>
+
+                  <ValidatorSetChange />
+
+                  <p className='mb-4 text-gray-300'>
+                    An operator lists a change in their own config. There is no CLI step - the node offers the
+                    changes its operator has approved and keeps re-offering them until they commit, so operators can
+                    edit their configs one at a time:
+                  </p>
+                  <CodeSample label='config.yaml' code={SET_CHANGE} />
+                  <p className='mb-4 mt-4 text-gray-300'>
+                    On a node that has approved it, the change commits and then waits:
+                  </p>
+                  <CodeSample label='node log' code={SET_CHANGE_LOG} />
+                  <p className='mt-4 text-gray-300'>
+                    Two properties are worth being explicit about. First, the approval list is a{' '}
+                    <strong className='text-white'>veto</strong>: a node prevotes nil on a block carrying a change it
+                    has not approved, so a change needs a quorum of <em>operators</em> to have approved it. One
+                    validator cannot propose the removal of all the others and have it wave through.
+                  </p>
+                  <CodeSample label='node log' code={VETO_LOG} />
+                  <p className='mt-4 text-gray-300'>
+                    Second, a committed change takes effect at an <strong className='text-white'>epoch boundary</strong>,
+                    a height that is a multiple of <code className='text-white'>epoch_length</code>, not at the
+                    moment it commits. That is what keeps every node&apos;s leader schedule identical: applying a
+                    change as each node happened to reach the block would have nodes disagreeing about who may
+                    propose, which is a fork. It also means a change is not instant - with the default{' '}
+                    <code className='text-white'>epoch_length: 100</code> it lands within 100 blocks.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
+                    A validator caught <strong className='text-white'>equivocating</strong> - two votes for different
+                    blocks at one height, round and phase, both signed by its own key - is removed the same way, but
+                    without any config entry. The evidence proves itself, so every node verifies it rather than
+                    trusting the peer that relayed it, and there is no operator judgement left to make. Set{' '}
+                    <code className='text-white'>consensus.eject_equivocators: false</code> if you would rather
+                    investigate an offence yourself; detection, recording and gossip carry on either way.
+                  </p>
+
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
-                    <h3 className='mb-2 text-lg font-bold text-white'>The set is static today</h3>
+                    <h3 className='mb-2 text-lg font-bold text-white'>There is still no stake</h3>
                     <p className='mb-0 text-gray-100'>
-                      Changing it means editing every node&apos;s config and restarting them. There is no on-chain
-                      validator set, no staking and no eviction, so adding a validator is an operational task
-                      coordinated out of band, and a compromised validator is removed by an operator rather than by
-                      the protocol. That is the next substantial piece of work on the consensus layer; until it
-                      lands, treat the validator set as a deployment decision rather than a runtime one.
+                      Membership is decided by agreement between operators, not by capital at risk. An ejected
+                      validator loses its place and nothing else, and admission is a decision a quorum of operators
+                      makes rather than one anyone can buy into. That makes this suitable for a network whose
+                      operators know each other; a permissionless validator set needs bonded stake and a penalty,
+                      which is the next substantial piece of work on the consensus layer.
                     </p>
                   </div>
 

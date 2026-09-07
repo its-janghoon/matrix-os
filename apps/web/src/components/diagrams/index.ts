@@ -4,3 +4,4 @@ export { JobLifecycle } from './JobLifecycle';
 export { MarketFlow } from './MarketFlow';
 export { NodeStack } from './NodeStack';
 export { TokenBridge } from './TokenBridge';
+export { ValidatorSetChange } from './ValidatorSetChange';

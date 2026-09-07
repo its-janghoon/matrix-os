@@ -48,7 +48,7 @@ const subsystems = [
   },
   {
     name: 'Consensus engine',
-    body: 'A fixed ed25519 validator set, a round-robin leader, and two voting phases per height. Committed blocks are hash-linked, and a node that misses one fetches it from a peer with the precommit quorum that committed it.',
+    body: 'An ed25519 validator set, a round-robin leader, and two voting phases per height. The set is chain state: a change rides in a committed block and takes effect at an epoch boundary, so every node switches at the same height. Committed blocks are hash-linked, and a node that misses one fetches it from a peer with the precommit quorum that committed it.',
   },
   {
     name: 'Inference backends',
