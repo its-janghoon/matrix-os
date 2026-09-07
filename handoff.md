@@ -942,9 +942,99 @@ is the direction a misconfiguration breaks: a fresh peer starts at exactly zero,
 so every negative threshold has to be strictly below it or a new peer is
 graylisted on arrival.
 
+## Timing side channels, verified
+
+Measured, then fixed one real defect and corrected two comments.
+
+**The defect: a constant-time compare that could not fail.** `admin/auth.go`
+looked up a credential as `a.keys[apiKey]` - the raw secret as the map key -
+then ran `subtle.ConstantTimeCompare(apiKey, key.Key)` under a comment saying it
+prevented timing attacks. `AddKey` had stored the record under `key.Key`, so a
+map hit already proved the two strings equal; the compare returned 1 every time
+it ran, for the life of the process. A no-op with a reassuring comment is worse
+than no defense, because it stops anyone looking.
+
+**Probed before changing anything.** 60000 samples per class, 1001 keys loaded,
+credentials sharing 0, 32, 63 and 64 bytes of prefix with the real one. Medians:
+264, 274, 267, 313 ns - no ordering by prefix length. So the old code was not
+exploitable, but not for the reason it gave: Go seeds each map's string hash from
+process-random state, which destroys the byte-by-byte oracle a naive compare
+would expose. The safety rested on a runtime implementation detail nobody had
+written down.
+
+**The fix keys the map by `sha256(credential)`.** The secret now never reaches a
+comparison at all - what the map compares is a digest, so a perfect oracle on the
+lookup yields digest bits and turning those into the credential is the preimage
+problem. That is a property of SHA-256 rather than of Go's map internals:
+statable, and true whatever the runtime does next. No constant-time compare was
+added back, because comparing the presented digest against the stored digest is
+the same no-op one indirection later. Re-probed after the change: 447, 446, 434,
+454 ns, still no prefix ordering, ~180 ns dearer.
+
+The stored record also **drops the plaintext**. Nothing downstream read
+`APIKey.Key` - it existed only to feed the no-op compare - and
+`AuthenticateKey` hands the record to callers its own doc invites to log the
+key's name. A struct that travels toward logs must not carry a working
+credential. Six tests pin it, and they fail against the old plaintext-keyed map.
+
+One imprecision of my own, corrected in the comment: a digest takes the
+credential's length out of the LOOKUP, but hashing still costs in proportion to
+the input, so a 16-byte credential resolves faster than a 64-byte one (363 vs
+447 ns). That is the length of what the caller presented, which the caller
+already knows.
+
+**A WASM guest cannot read a clock, and that is now pinned.** Every other
+sandbox limit bounds what a guest can DO. A clock bounds what it can MEASURE: a
+guest runs in the node's own process, alongside the validator's signing key and
+the ledger, so a nanosecond timer would let it time its own host calls and turn
+any data-dependent branch in the host into a side channel without breaking a
+single other limit. The runtime denies it by omission - no WASI module is
+instantiated, and all four host functions (`log`, `send`, `get_memory`,
+`set_memory`) return nothing, so there is no reply channel to build a timer
+from.
+
+Omission is fragile, so `testdata/clock.rs` asks for
+`wasi_snapshot_preview1.clock_time_get` and must be refused at instantiation.
+**Measured that the guard is needed**: adding the ordinary one-liner
+`wasi.MustInstantiate(ctx, r)` leaves every pre-existing test in the package
+passing and fails only the new one. A second test reads `guest.wasm`'s import
+table and asserts all four host functions return nothing - authoritative rather
+than a second copy, because wazero refuses to instantiate a module whose
+declared signatures disagree with the host's.
+
+**Checked and found clean, no change:**
+
+- **ed25519 signing and SLIP-10 derivation.** `ed25519.Sign` is constant-time in
+  Go, and `accountFromSeed` walks the path unconditionally with HMAC-SHA512 - no
+  secret-dependent branch or retry loop.
+- **Keystore unlock.** scrypt with the file's own parameters, then AES-GCM,
+  whose tag comparison is constant-time in the standard library. The `subtle`
+  compare that survives there is a real one: it checks the decrypted public key
+  against the advertised one, two independently derived values.
+- **No secp256k1 private key exists in the node.** `ethsig.SignDigest` is called
+  only from tests, so there is no signing side channel on that curve.
+- **No MAC is verified against user input anywhere.** Authentication is by
+  signature, a public-key operation on public data, so the classic
+  forgery-oracle compare has no site here. Every `bytes.Equal` on a digest
+  compares block hashes, which are broadcast.
+- **The rate limiter's FNV-1a fingerprint of a credential.** Its comment is
+  accurate: collisions would share a bucket, but targeting one needs the
+  victim's token, and colliding with any of a handful of active tokens is ~2^57
+  work. Left alone.
+- **One credential surface only** (`Authorization`), read in two places. No
+  credential is ever accepted in a query parameter.
+
+Second comment corrected: `isHighS` says it compares bytewise so it is "constant
+in shape", which sits close enough to "constant-time" to mislead. It returns
+early on the first differing byte, and does not need to be constant-time: both
+operands are public - `s` arrives inside a submitted signature and the constant is in the
+Solidity source.
+
 ### Still not covered
 
-Timing side channels.
+Nothing on the list. Remote existence oracles (whether a response reveals that
+an account or provider exists) were treated as out of scope here: they are
+answered by the response itself, not by its timing.
 
 ## Non-blocking notes
 

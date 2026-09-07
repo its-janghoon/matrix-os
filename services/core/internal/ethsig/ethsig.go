@@ -178,8 +178,13 @@ var secp256k1HalfOrder = [32]byte{
 }
 
 // isHighS reports whether a 32-byte big-endian s is above (n-1)/2. Compared
-// bytewise rather than via big.Int so it is constant in shape and allocates
-// nothing.
+// bytewise rather than via big.Int so it allocates nothing and needs no
+// import.
+//
+// The loop returns as soon as the bytes differ, which is not constant-time and
+// does not need to be: both operands are public. s arrives inside a submitted
+// signature, and the constant is in the Solidity source. There is no secret
+// here whose bytes the exit point could reveal.
 func isHighS(s []byte) bool {
 	if len(s) != 32 {
 		return true // a malformed s is not canonical
