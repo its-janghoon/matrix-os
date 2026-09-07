@@ -20,6 +20,7 @@ export const DEFAULT_ENDPOINT = 'http://127.0.0.1:9093';
 
 const MARKET = 'matrix.market.v1.MarketService';
 const INFERENCE = 'matrix.inference.v1.InferenceService';
+const AGENT = 'matrix.agent.v1.AgentService';
 
 /** Connect error codes, as the endpoint reports them. */
 export type MatrixErrorCode =
@@ -81,6 +82,12 @@ export type InferenceJobStatus =
   | 'INFERENCE_JOB_STATUS_SETTLING';
 
 export type ChatRole = 'CHAT_ROLE_UNSPECIFIED' | 'CHAT_ROLE_SYSTEM' | 'CHAT_ROLE_USER' | 'CHAT_ROLE_ASSISTANT';
+
+export type AgentStatus =
+  | 'AGENT_STATUS_UNSPECIFIED'
+  | 'AGENT_STATUS_DEPLOYED'
+  | 'AGENT_STATUS_RUNNING'
+  | 'AGENT_STATUS_FAILED';
 
 export interface Provider {
   id: string;
@@ -163,6 +170,32 @@ export interface InferenceJob {
   updatedAt: string;
 }
 
+/** A deployed WebAssembly agent and the outcome of its most recent run. */
+export interface Agent {
+  id: string;
+  status: AgentStatus;
+  /** Hex-encoded sha256 of the deployed module bytes. */
+  moduleHash: string;
+  /** Size of the deployed module in bytes. */
+  moduleSize: bigint;
+  /** Anything the module wrote to stdout during its most recent run. */
+  lastOutput: string;
+  /** The error from the most recent run, empty when the last run succeeded. */
+  lastError: string;
+  /** Credits charged for the most recent run through consensus (0 when unmetered). */
+  lastCharge: bigint;
+  createdAt: string;
+  lastRunAt: string;
+}
+
+/** The result of deploying an agent: the persisted record, whether it ran, and the metered charge. */
+export interface AgentDeployment {
+  agent: Agent;
+  ran: boolean;
+  /** Credits settled through consensus for this run (0 when unmetered). */
+  charged: bigint;
+}
+
 export interface ClientOptions {
   /** Base URL of the node's HTTP endpoint. Defaults to DEFAULT_ENDPOINT. */
   endpoint?: string;
@@ -233,6 +266,20 @@ function decodeInferenceJob(raw: Record<string, unknown>): InferenceJob {
     units: big(raw.units),
     createdAt: str(raw.createdAt),
     updatedAt: str(raw.updatedAt),
+  };
+}
+
+function decodeAgent(raw: Record<string, unknown>): Agent {
+  return {
+    id: str(raw.id),
+    status: (str(raw.status) || 'AGENT_STATUS_UNSPECIFIED') as AgentStatus,
+    moduleHash: str(raw.moduleHash),
+    moduleSize: big(raw.moduleSize),
+    lastOutput: str(raw.lastOutput),
+    lastError: str(raw.lastError),
+    lastCharge: big(raw.lastCharge),
+    createdAt: str(raw.createdAt),
+    lastRunAt: str(raw.lastRunAt),
   };
 }
 
@@ -469,6 +516,51 @@ export class MatrixClient {
   async getInferenceJob(id: string): Promise<InferenceJob> {
     const out = await this.call(INFERENCE, 'GetInferenceJob', { id });
     return decodeInferenceJob(record(out.job));
+  }
+
+  // --- AgentService ----------------------------------------------------------
+
+  /**
+   * Deploy a WebAssembly module to the node: it is persisted (surviving a
+   * restart), instantiated, and run once. When the node meters agent runs,
+   * `deployer` names the paying account; an unaffordable or keyless metered
+   * deploy is refused rather than run for free.
+   */
+  async deployAgent(input: {
+    id: string;
+    wasmModule: Uint8Array;
+    limits?: { maxMemoryPages?: number; maxRunTimeMs?: bigint | number };
+    deployer?: string;
+  }): Promise<AgentDeployment> {
+    const request: Record<string, unknown> = {
+      id: input.id,
+      wasmModule: toBase64(input.wasmModule),
+      deployer: input.deployer ?? '',
+    };
+    if (input.limits) {
+      request.limits = {
+        maxMemoryPages: input.limits.maxMemoryPages ?? 0,
+        maxRunTimeMs: String(input.limits.maxRunTimeMs ?? 0),
+      };
+    }
+    const out = await this.call(AGENT, 'DeployAgent', request);
+    return {
+      agent: decodeAgent(record(out.agent)),
+      ran: out.ran === true,
+      charged: big(out.charged),
+    };
+  }
+
+  /** List the node's deployed agents and their status. */
+  async listAgents(): Promise<Agent[]> {
+    const out = await this.call(AGENT, 'ListAgents', {});
+    return list(out.agents).map(decodeAgent);
+  }
+
+  /** Fetch a single deployed agent by ID. */
+  async getAgent(id: string): Promise<Agent> {
+    const out = await this.call(AGENT, 'GetAgent', { id });
+    return decodeAgent(record(out.agent));
   }
 
   /**

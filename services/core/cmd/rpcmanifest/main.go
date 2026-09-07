@@ -13,6 +13,7 @@ import (
 	"os"
 
 	"github.com/ecirlabs/matrix-core/internal/connectapi/manifest"
+	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 )
@@ -21,6 +22,7 @@ func main() {
 	out, err := manifest.JSON(manifest.Build(
 		&marketv1.MarketService_ServiceDesc,
 		&inferencev1.InferenceService_ServiceDesc,
+		&agentv1.AgentService_ServiceDesc,
 	))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "rpcmanifest: %v\n", err)

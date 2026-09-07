@@ -251,6 +251,7 @@ describe('coverage against the served surface', () => {
       'FundAccount',
     ],
     'matrix.inference.v1.InferenceService': ['SubmitInferenceJob', 'FulfillInferenceJob', 'GetInferenceJob'],
+    'matrix.agent.v1.AgentService': ['DeployAgent', 'ListAgents', 'GetAgent'],
   };
 
   it('wraps every method the node serves', () => {

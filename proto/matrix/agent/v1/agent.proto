@@ -1,0 +1,144 @@
+syntax = "proto3";
+
+package matrix.agent.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1;agent";
+
+// AgentStatus mirrors the deployment lifecycle of a WebAssembly agent. Values
+// track a submitted module from the moment it is accepted through the outcome
+// of its most recent run.
+enum AgentStatus {
+    // Unset/unknown status.
+    AGENT_STATUS_UNSPECIFIED = 0;
+    // The module was accepted and persisted but has not run yet.
+    AGENT_STATUS_DEPLOYED = 1;
+    // The module's most recent run completed without error.
+    AGENT_STATUS_RUNNING = 2;
+    // The module's most recent run failed (a trap, a compile error, or a run
+    // that exceeded its deadline). last_error carries the reason.
+    AGENT_STATUS_FAILED = 3;
+}
+
+// ResourceLimits bounds one agent's memory footprint and per-call run time. It
+// maps to agent.ResourceLimits in the runtime. All fields are optional in a
+// request; unset fields fall back to the runtime's DefaultMemoryLimits.
+message ResourceLimits {
+    // Number of 64KB WebAssembly memory pages the module may use. Zero means the
+    // runtime default (256 pages == 16MB). Must not exceed 65536.
+    uint32 max_memory_pages = 1;
+    // How long one call into the guest may run before the runtime tears it down,
+    // in milliseconds. Zero means the runtime default. A guest that never
+    // returns is interrupted at this deadline so one bad module cannot take the
+    // node with it.
+    uint64 max_run_time_ms = 2;
+}
+
+// Agent describes a deployed WebAssembly agent and the outcome of its most
+// recent run. It is the persisted record ListAgents/GetAgent return; the module
+// bytes themselves are not echoed back, only their content hash and size.
+message Agent {
+    // Stable agent identifier chosen by the deployer.
+    string id = 1;
+    // Current lifecycle status.
+    AgentStatus status = 2;
+    // Hex-encoded sha256 of the deployed module bytes, so a caller can confirm
+    // which module a persisted deployment holds without downloading it.
+    string module_hash = 3;
+    // Size of the deployed module in bytes.
+    uint64 module_size = 4;
+    // The resource limits the module runs under.
+    ResourceLimits limits = 5;
+    // Anything the module wrote to stdout during its most recent run.
+    string last_output = 6;
+    // The error from the most recent run, empty when the last run succeeded.
+    string last_error = 7;
+    // Credits charged for the most recent run through consensus (0 when
+    // metering is unconfigured/disabled).
+    uint64 last_charge = 8;
+    // When the agent was first deployed.
+    google.protobuf.Timestamp created_at = 9;
+    // When the agent was last run.
+    google.protobuf.Timestamp last_run_at = 10;
+}
+
+// DeployAgentRequest submits a WebAssembly module to be persisted, instantiated,
+// and run. The module runs once at deploy time; its startup output and any
+// error are returned in the response and recorded on the persisted deployment.
+message DeployAgentRequest {
+    // Desired agent ID. Must be non-empty. Re-deploying an existing ID replaces
+    // the stored module.
+    string id = 1;
+    // The raw WebAssembly module bytes to deploy. Must be non-empty and within
+    // the server's configured module-size limit.
+    bytes wasm_module = 2;
+    // Optional resource limits. When omitted, the runtime's DefaultMemoryLimits
+    // apply.
+    ResourceLimits limits = 3;
+    // Optional account ID that pays for the run when metering is enabled. When
+    // empty the server's configured default deployer account is used. Charging
+    // requires a resolvable signing key for this account; a deploy that would be
+    // metered but cannot be paid for is refused rather than run for free.
+    string deployer = 4;
+}
+
+// DeployAgentResponse returns the persisted deployment and its startup run
+// outcome.
+message DeployAgentResponse {
+    // The persisted agent record after the deploy-time run.
+    Agent agent = 1;
+    // Whether the module's startup run succeeded.
+    bool ran = 2;
+    // The metered charge settled through consensus for this run, in credits
+    // (0 when metering is disabled).
+    uint64 charged = 3;
+}
+
+// ListAgentsRequest enumerates persisted deployments.
+message ListAgentsRequest {}
+
+// ListAgentsResponse returns persisted deployments and their status.
+message ListAgentsResponse {
+    // Deployments ordered by ID.
+    repeated Agent agents = 1;
+}
+
+// GetAgentRequest looks up a single deployment by ID.
+message GetAgentRequest {
+    // Agent ID to fetch.
+    string id = 1;
+}
+
+// GetAgentResponse returns the requested deployment.
+message GetAgentResponse {
+    // The requested agent.
+    Agent agent = 1;
+}
+
+// AgentService is the external gRPC surface for deploying and running
+// WebAssembly agents on a Matrix OS node from outside the process. It persists
+// deployments in the node's key-value store so they survive a restart, and
+// meters each run against the marketplace ledger by settling a configurable
+// per-run charge through consensus (default 0 == unmetered).
+service AgentService {
+    // DeployAgent persists a submitted WebAssembly module under the given ID,
+    // instantiates it, and runs it once. Input: the ID, the module bytes,
+    // optional resource limits, and an optional paying account. Output: the
+    // persisted deployment with its run outcome plus the metered charge. Side
+    // effects: stores the module and its record in the agent/* keyspace and,
+    // when metering is enabled, settles the per-run charge from the deployer to
+    // the configured recipient through consensus. Rejects an empty ID, an empty
+    // or oversized module, invalid resource limits, and a metered deploy the
+    // payer cannot afford or has no signing key for.
+    rpc DeployAgent(DeployAgentRequest) returns (DeployAgentResponse) {}
+
+    // ListAgents enumerates persisted deployments and their status. Input: none.
+    // Output: the deployments, ordered by ID. No side effects. Reflects
+    // deployments reloaded from the store after a restart.
+    rpc ListAgents(ListAgentsRequest) returns (ListAgentsResponse) {}
+
+    // GetAgent fetches a single deployment by ID. Input: the agent ID. Output:
+    // the deployment. No side effects.
+    rpc GetAgent(GetAgentRequest) returns (GetAgentResponse) {}
+}

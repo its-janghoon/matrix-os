@@ -2,6 +2,14 @@
   "note": "Generated from the gRPC service descriptors by services/core/internal/connectapi/manifest. Every entry is served at POST /{service}/{method} by a node's HTTP endpoint. Do not edit by hand; run `go generate ./internal/connectapi/...`.",
   "services": [
     {
+      "name": "matrix.agent.v1.AgentService",
+      "methods": [
+        "DeployAgent",
+        "GetAgent",
+        "ListAgents"
+      ]
+    },
+    {
       "name": "matrix.inference.v1.InferenceService",
       "methods": [
         "FulfillInferenceJob",

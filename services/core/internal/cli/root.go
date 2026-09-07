@@ -79,6 +79,7 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		newFundCommand(opts),
 		newQuickstartCommand(opts),
 		newInferenceCommand(opts),
+		newAgentCommand(opts),
 		newTxCommand(opts),
 		newWalletCommand(opts),
 	)

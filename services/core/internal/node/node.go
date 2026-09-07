@@ -13,6 +13,7 @@ import (
 
 	"github.com/ecirlabs/matrix-core/internal/admin"
 	"github.com/ecirlabs/matrix-core/internal/agent"
+	"github.com/ecirlabs/matrix-core/internal/agentapi"
 	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/connectapi"
 	"github.com/ecirlabs/matrix-core/internal/consensus"
@@ -28,6 +29,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/soul"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/transport"
+	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"gopkg.in/yaml.v3"
@@ -78,6 +80,13 @@ type Config struct {
 		// must be registered out of band via GetInference().Registry().
 		EchoProvider string `yaml:"echo_provider"`
 	} `yaml:"inference"`
+	// Agent configures the external agent-deployment gRPC API
+	// (matrix.agent.v1.AgentService): it lets a client submit a WebAssembly
+	// module, has the node run it, persists the deployment so it survives a
+	// restart, and meters each run against the ledger. It runs as a fourth
+	// parallel gRPC server, gated by the same EnableACLs auth as the market and
+	// inference APIs.
+	Agent AgentConfig `yaml:"agent"`
 	// Bridge configures the opt-in lock-and-mint bridge to wrapped MATRIX on
 	// Ethereum, including the always-on burn->unlock watcher. With no contract
 	// configured the subsystem stays off and the node behaves exactly as a node
@@ -309,6 +318,38 @@ type APIKeyConfig struct {
 	Name string `yaml:"name"`
 }
 
+// AgentConfig configures the external agent-deployment gRPC API and its
+// per-run metering. Metering is OFF by default: RunPrice defaults to 0, which
+// means an agent run costs nothing and no charge is settled. The per-run price
+// is monetary policy - a decision about what running an agent should cost on
+// this network - and is not baked in as a nonzero default here; an operator who
+// wants a metered runtime sets agent.run_price and agent.run_price_recipient
+// explicitly, exactly as they set the protocol fee or provider emission.
+type AgentConfig struct {
+	// Addr is the TCP listen address for the agent gRPC API
+	// (matrix.agent.v1.AgentService). Default 0.0.0.0:9094, distinct from the
+	// admin (9090), market (9091), inference (9092) and connect (9093) ports.
+	Addr string `yaml:"addr"`
+	// MaxModuleBytes caps the size of a submitted wasm module. Zero means the
+	// agentapi default (32 MiB). A module larger than this is rejected before it
+	// is stored or run.
+	MaxModuleBytes int `yaml:"max_module_bytes"`
+	// RunPrice is the credits charged per agent run, settled from the deploying
+	// account to RunPriceRecipient THROUGH CONSENSUS (a quorum orders and applies
+	// it), not by a per-node ledger write. Zero (the default) disables metering
+	// entirely: nothing is charged and no signing key is required. When set, a
+	// deploy whose payer cannot afford the charge or has no signing key is
+	// refused rather than run for free.
+	RunPrice uint64 `yaml:"run_price"`
+	// RunPriceRecipient is the account the per-run charge is paid to (the
+	// operator/provider account). Required when RunPrice > 0.
+	RunPriceRecipient string `yaml:"run_price_recipient"`
+	// DefaultDeployer is the account charged when a DeployAgent request names no
+	// deployer. Optional; when empty a metered deploy must name a deployer whose
+	// signing key the node can resolve.
+	DefaultDeployer string `yaml:"default_deployer"`
+}
+
 // GenesisAllocationConfig is a single named genesis allocation: Amount native
 // base units credited to Account.
 type GenesisAllocationConfig struct {
@@ -387,6 +428,7 @@ type Node struct {
 	marketServer     *marketapi.Server
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
+	agentServer      *agentapi.Server
 	connectServer    *connectapi.Server
 	signingAccts     *walletAccounts
 	bridge           *bridge.Bridge
@@ -436,6 +478,11 @@ func Initialize(configPath string) error {
 	config.Market.Addr = "0.0.0.0:9091"
 	config.Inference.Addr = "0.0.0.0:9092"
 	config.Connect.Addr = "0.0.0.0:9093"
+	config.Agent.Addr = "0.0.0.0:9094"
+	// Agent-run metering OFF in a generated config: RunPrice stays 0, so running
+	// an agent costs nothing. The per-run price is monetary policy the operator
+	// decides, not a number this tool bakes in; an operator opts in by setting
+	// agent.run_price and agent.run_price_recipient.
 	// The Console's Vite dev server, which is the browser origin that actually
 	// needs this on a fresh node. Anything else is opted into explicitly.
 	config.Connect.AllowedOrigins = []string{"http://127.0.0.1:5173", "http://localhost:5173"}
@@ -561,6 +608,9 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	}
 	if config.Connect.Addr == "" {
 		config.Connect.Addr = "0.0.0.0:9093"
+	}
+	if config.Agent.Addr == "" {
+		config.Agent.Addr = "0.0.0.0:9094"
 	}
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
@@ -1041,6 +1091,60 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to start inference API server: %w", err)
 	}
 
+	// Initialize and start the agent-deployment gRPC API (matrix.agent.v1). It
+	// is the fourth parallel gRPC server, on its own configurable address
+	// (default 9094), gated by the same EnableACLs auth. It lets an external
+	// client submit a WebAssembly module, has the node instantiate and run it,
+	// persists the deployment in the shared KV store under the agent/* keyspace
+	// so it survives a restart, and (when the operator opts in) meters each run.
+	//
+	// METERING (honest, off by default): an agent run is charged from the
+	// deploying account to a configured recipient by settling a signed transfer
+	// through the SAME consensus engine the compute/inference marketplaces use
+	// (n.consensus satisfies agentapi.Settler via SubmitAccountTransfer +
+	// WaitForSettlement), so the charge is agreed by a quorum and applied to the
+	// one authoritative ledger rather than written per-node. The per-run price is
+	// monetary policy: it defaults to 0 (unmetered) and is set only via
+	// agent.run_price / agent.run_price_recipient. The deployer's signing key is
+	// resolved through the SAME wallet resolver the settlement coordinators use
+	// (n.signingAccts), so custody is one decision for the whole node; a metered
+	// deploy the payer cannot afford or has no key for is refused, never run for
+	// free.
+	var agentAuth *admin.Authenticator
+	if n.config.Security.EnableACLs {
+		agentAuth = n.adminServer.GetAuthenticator()
+	}
+	agentManager, err := agentapi.NewManager(agentapi.ManagerConfig{
+		Store:          n.kvStore,
+		MaxModuleBytes: n.config.Agent.MaxModuleBytes,
+		Meter: agentapi.MeterConfig{
+			Price:           n.config.Agent.RunPrice,
+			Recipient:       n.config.Agent.RunPriceRecipient,
+			DefaultDeployer: n.config.Agent.DefaultDeployer,
+		},
+		Settler:  n.consensus,
+		Accounts: n.signingAccts,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create agent manager: %w", err)
+	}
+	agentServer, err := agentapi.NewServer(agentapi.Config{
+		Addr:    n.config.Agent.Addr,
+		Auth:    agentAuth,
+		Manager: agentManager,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create agent API server: %w", err)
+	}
+	n.agentServer = agentServer
+	if err := n.agentServer.Start(n.ctx); err != nil {
+		return fmt.Errorf("failed to start agent API server: %w", err)
+	}
+	if n.config.Agent.RunPrice > 0 {
+		fmt.Printf("Agent API: metering enabled, %d credits/run paid to %s through consensus.\n",
+			n.config.Agent.RunPrice, n.config.Agent.RunPriceRecipient)
+	}
+
 	// Serve the SAME market and inference implementations over plain HTTP, so a
 	// browser can reach them. It is the same objects, not a copy: one code path
 	// serves both surfaces, so they cannot drift, and the same authenticator
@@ -1050,6 +1154,7 @@ func (n *Node) Start() error {
 			Bindings: []connectapi.Binding{
 				{Desc: &marketv1.MarketService_ServiceDesc, Impl: n.marketServer.Service()},
 				{Desc: &inferencev1.InferenceService_ServiceDesc, Impl: n.inferenceServer.Service()},
+				{Desc: &agentv1.AgentService_ServiceDesc, Impl: n.agentServer.Service()},
 			},
 			Auth:           connectAuth(marketAuth),
 			AllowedOrigins: n.config.Connect.AllowedOrigins,
@@ -1175,6 +1280,12 @@ func (n *Node) Stop() error {
 	if n.connectServer != nil {
 		if err := n.connectServer.Stop(n.ctx); err != nil {
 			fmt.Printf("Warning: failed to stop connect endpoint: %v\n", err)
+		}
+	}
+
+	if n.agentServer != nil {
+		if err := n.agentServer.Stop(n.ctx); err != nil {
+			errs = append(errs, fmt.Errorf("failed to stop agent API server: %w", err))
 		}
 	}
 
@@ -1382,6 +1493,15 @@ func (n *Node) GetInference() *inference.Service {
 // (matrix.inference.v1.InferenceService), served on the node's Inference.Addr.
 func (n *Node) GetInferenceAPI() *inferenceapi.Server {
 	return n.inferenceServer
+}
+
+// GetAgentAPI returns the external agent-deployment gRPC server
+// (matrix.agent.v1.AgentService), served on the node's Agent.Addr. It deploys
+// and runs submitted WebAssembly modules, persists them in the node's KV store
+// so they survive a restart, and meters each run through consensus when the
+// operator configures a per-run price (default 0, unmetered).
+func (n *Node) GetAgentAPI() *agentapi.Server {
+	return n.agentServer
 }
 
 // GetBridge returns the node's lock-and-mint bridge, or nil when no bridge is

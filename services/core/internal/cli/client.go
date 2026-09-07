@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"google.golang.org/grpc"
@@ -100,6 +101,37 @@ func dialInference(addr string, apiKey string) (*inferenceConn, error) {
 	return &inferenceConn{
 		conn:      conn,
 		inference: inferencev1.NewInferenceServiceClient(conn),
+	}, nil
+}
+
+// agentConn is the gRPC client the `matrix agent` commands use against a node's
+// agent gRPC API (matrix.agent.v1.AgentService), which the node serves on its
+// own address (default 127.0.0.1:9094), distinct from the market API. It carries
+// the same API-key auth as the market client.
+type agentConn struct {
+	conn  *grpc.ClientConn
+	agent agentv1.AgentServiceClient
+}
+
+// Close closes the underlying gRPC connection.
+func (c *agentConn) Close() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Close()
+}
+
+// dialAgent establishes a gRPC connection to the agent endpoint. It uses the
+// agent-specific address so the agent commands reach the node's agent server
+// rather than its market server.
+func dialAgent(addr string, apiKey string) (*agentConn, error) {
+	conn, err := grpc.NewClient(addr, dialOptions(apiKey)...)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to %s: %w", addr, err)
+	}
+	return &agentConn{
+		conn:  conn,
+		agent: agentv1.NewAgentServiceClient(conn),
 	}, nil
 }
 
