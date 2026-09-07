@@ -872,9 +872,18 @@ func (n *Node) Start() error {
 	}
 	n.p2pHost = p2pHost
 
-	// Initialize transport
+	// Initialize transport.
+	//
+	// The gossip guard is what makes an open network survivable. Without a topic
+	// validator, gossipsub accepts any message on a subscribed topic from any
+	// connected peer and relays it to the mesh BEFORE this node's handlers look
+	// at it - so every check the engine makes (is the proposer a validator, does
+	// the signature verify) happens after the damage. See
+	// consensus.GossipGuard: a 1 MiB message decoded to 204 MiB of heap and
+	// decoded without error.
 	trans, err := transport.New(n.ctx, transport.Config{
-		Host: p2pHost.GetHost(),
+		Host:      p2pHost.GetHost(),
+		Validator: consensus.NewGossipGuard(),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize transport: %w", err)

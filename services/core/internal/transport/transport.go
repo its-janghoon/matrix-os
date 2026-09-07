@@ -12,11 +12,12 @@ import (
 
 // Transport handles message routing and pub/sub
 type Transport struct {
-	host    host.Host
-	pubsub  *pubsub.PubSub
-	topics  map[string]*pubsub.Topic
-	subs    map[string]*pubsub.Subscription
-	topicMu sync.RWMutex
+	host      host.Host
+	pubsub    *pubsub.PubSub
+	topics    map[string]*pubsub.Topic
+	subs      map[string]*pubsub.Subscription
+	topicMu   sync.RWMutex
+	validator Validator
 }
 
 // Message represents a transport message
@@ -26,9 +27,27 @@ type Message struct {
 	Payload []byte
 }
 
+// Validator decides whether a gossip message may be accepted, BEFORE pubsub
+// relays it. Returning an error rejects the message: it is not delivered to this
+// node's handler, it is NOT forwarded to this node's mesh peers, and gossipsub
+// lowers the sending peer's score.
+//
+// WHY THIS HOOK EXISTS. Without a validator, gossipsub accepts any message
+// published to a subscribed topic by any connected peer and relays it to the
+// mesh before the application ever looks at it. So an unauthenticated peer that
+// can dial one node had every node in the mesh spend bandwidth on its bytes,
+// and had every node decode them - see consensus.GossipGuard for what that
+// decode cost. Validation has to happen here, not in the handler, because by
+// the time the handler runs the relay has already happened.
+type Validator func(topic string, from peer.ID, payload []byte) error
+
 // Config represents transport configuration
 type Config struct {
 	Host host.Host
+	// Validator, when set, gates every message on every topic this Transport
+	// subscribes to. Nil means accept everything, which is the old behaviour and
+	// is only safe on a trusted network.
+	Validator Validator
 }
 
 // New creates a new Transport instance
@@ -40,10 +59,11 @@ func New(ctx context.Context, cfg Config) (*Transport, error) {
 	}
 
 	return &Transport{
-		host:   cfg.Host,
-		pubsub: ps,
-		topics: make(map[string]*pubsub.Topic),
-		subs:   make(map[string]*pubsub.Subscription),
+		host:      cfg.Host,
+		pubsub:    ps,
+		topics:    make(map[string]*pubsub.Topic),
+		subs:      make(map[string]*pubsub.Subscription),
+		validator: cfg.Validator,
 	}, nil
 }
 
@@ -55,6 +75,26 @@ func (t *Transport) Subscribe(ctx context.Context, topic string) (<-chan Message
 	// Join topic if not already joined
 	tp, exists := t.topics[topic]
 	if !exists {
+		// The validator is registered BEFORE joining, so no message can arrive
+		// on this topic unvalidated. Registering after Join leaves a window in
+		// which gossipsub would relay whatever showed up first.
+		if t.validator != nil {
+			validate := t.validator
+			err := t.pubsub.RegisterTopicValidator(topic,
+				func(_ context.Context, from peer.ID, msg *pubsub.Message) pubsub.ValidationResult {
+					if err := validate(topic, from, msg.Data); err != nil {
+						// Reject, not Ignore: Ignore drops the message for this
+						// node and says nothing about the sender, while Reject
+						// also penalizes its score, which is what eventually
+						// prunes a peer that keeps sending garbage.
+						return pubsub.ValidationReject
+					}
+					return pubsub.ValidationAccept
+				})
+			if err != nil {
+				return nil, fmt.Errorf("failed to register validator for topic %s: %w", topic, err)
+			}
+		}
 		var err error
 		tp, err = t.pubsub.Join(topic)
 		if err != nil {

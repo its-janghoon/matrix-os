@@ -430,6 +430,21 @@ type Engine struct {
 	// rate-limits the ask to one per round timeout so a stalled node is
 	// persistent without flooding the topic.
 	lastSyncRequest time.Time
+	// lastSyncServe is when this node last ANSWERED a sync request, which is a
+	// separate rate limit from lastSyncRequest and for a different reason.
+	//
+	// A BlockSyncRequest is about 60 bytes and a response is up to
+	// MaxSyncResponseBytes (1 MiB), broadcast to the whole topic. So one tiny
+	// request had every node holding the chain read from disk, marshal a
+	// megabyte, and publish it - which gossipsub then fans out to each node's
+	// mesh peers. At ten nodes that is roughly 60 MiB of mesh traffic from 60
+	// bytes, repeatable at line rate, by a peer with no key and no place in the
+	// validator set. Rate-limiting the SEND side did nothing about it.
+	//
+	// Answering at most once per interval costs nothing in correctness because
+	// responses are broadcast rather than addressed: one response serves every
+	// lagging peer at that height, whether one asked or a thousand did.
+	lastSyncServe time.Time
 	// lastHeadAnnounce is when this node last announced its committed height.
 	lastHeadAnnounce time.Time
 	// lastSetChangeSubmit rate-limits re-offering the set changes this operator
@@ -2436,6 +2451,21 @@ func (e *Engine) handleSyncRequest(ctx context.Context, msg transport.Message) {
 	if req.RequesterID != "" && req.RequesterID == e.selfID {
 		return
 	}
+
+	// Rate-limit ANSWERING, not just asking. See lastSyncServe: without this a
+	// 60-byte request turned into a megabyte published by every node in the
+	// mesh. The interval is half the round timeout, so it is always shorter than
+	// the request side's own limit and an honest lagging peer is never held up
+	// by it - the only traffic this drops is a flood.
+	e.mu.Lock()
+	serveInterval := e.roundTimeout / 2
+	if !e.lastSyncServe.IsZero() && time.Since(e.lastSyncServe) < serveInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastSyncServe = time.Now()
+	e.mu.Unlock()
+
 	length, err := e.chain.Len()
 	if err != nil || req.Height >= length {
 		return

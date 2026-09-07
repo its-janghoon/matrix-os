@@ -814,10 +814,90 @@ metering exists for. The fix is a per-account deployment cap, and the number is
 a business-model decision rather than a security default, so it is left for the
 CTO rather than guessed.
 
+## Adversarial pass: the p2p layer
+
+Two amplification findings, both fixed, both measured.
+
+**1. gossipsub relayed anything, and decoding it was 204x amplification.**
+Critical.
+
+`pubsub.NewGossipSub` was called with **no topic validator**, so gossipsub
+accepted any message on a subscribed topic from any connected peer and forwarded
+it to the mesh BEFORE the application looked at it. Every check the engine makes
+- is the proposer a validator, does the signature verify, is the height current
+- runs in a handler that executes after the relay.
+
+The decode was worse than the bandwidth. Measured: a **1 MiB** message of
+`{"block":{"txs":[{},{},...]}}` declares **349,503** transactions (`maxBlockTxs`
+is 512) and allocates **204 MiB of heap** - and it decodes with **no error**, so
+nothing rejected it early. From a peer with no key, no stake and no place in the
+validator set, repeatable at line rate.
+
+Fixed with `consensus.NewGossipGuard`, registered through a new
+`transport.Config.Validator` hook. It bounds payload size, JSON token count and
+nesting depth with a token walk that costs **3 KB** where the decode costs
+204 MiB - five orders of magnitude - and it bounds STRUCTURE rather than any
+particular field, so it covers every message type and any future one. Rejection
+(not Ignore) is what also lowers the sender's gossipsub score, which is what
+eventually prunes a peer that keeps sending garbage.
+
+The guard deliberately does **not** verify signatures: it runs on every message
+from every peer before any is known to be worth anything, and a signature check
+there is work an attacker chooses for the node. The handlers keep that job. That
+choice is pinned by a test so it is not "fixed" later by accident.
+
+Its own tests found two gaps in the first version: `{"block":` was accepted
+(a truncated value leaves depth above zero, and `Token()` reports plain `EOF`
+for it), and 5,000 nested arrays was accepted (10,002 tokens, under the token
+bound - depth is a separate axis). `dec.More()` also could not catch two
+top-level values, because the loop consumes to EOF first; the count is now kept
+during the walk.
+
+**2. A 38-byte sync request made every node broadcast a megabyte.** High.
+
+`lastSyncRequest` rate-limited how often a node ASKS for blocks. Nothing limited
+how often it ANSWERS, and a response is up to `MaxSyncResponseBytes` (1 MiB)
+**broadcast to the whole topic**. So one 38-byte `BlockSyncRequest{Height:0}`
+had every node holding the chain read from disk, marshal a megabyte, and publish
+it, which gossipsub then fanned out to each node's mesh peers. At ten nodes that
+is roughly 60 MiB of mesh traffic from 38 bytes, and the responses are
+themselves 1 MiB gossip messages every node then decodes.
+
+Answering is now rate-limited too, at half the round timeout - deliberately
+shorter than the request side's own limit, so an honest lagging peer asking at
+its natural cadence is never held up and the only traffic dropped is a flood.
+This costs nothing in correctness because responses are broadcast rather than
+addressed: one response serves every peer at that height, whether one asked or a
+thousand did. Verified: 500 requests in a tight loop were answered 500 times
+before the fix, at most twice after.
+
+### `internal/transport` had no tests at all
+
+Which mattered the moment it gained a security-relevant hook: a validator that
+is registered but never consulted is indistinguishable in behaviour from one
+that accepts everything. There are now three, over real libp2p hosts and real
+gossipsub: a rejected message is not delivered, the validator sees every
+message, and the hook stays optional.
+
+### Checked and found sound
+
+- **The sync responder's size bounds.** `MaxSyncBatch` (8 blocks) and
+  `MaxSyncResponseBytes` (1 MiB) were already there; the missing piece was the
+  rate, not the size.
+- **libp2p's own limits.** v0.41 installs a default resource manager and
+  connection manager, so per-peer connection and stream counts are bounded
+  without configuration here.
+- **Synced blocks are not trusted.** A `BlockSyncResponse` carries the commit
+  votes and the receiver verifies each independently through the same tally as
+  ordinary vote gossip, so a synced block commits under the same quorum rule as
+  a proposed one.
+
 ### Still not covered
 
-Timing side channels, and the p2p layer's own DoS surface (libp2p defaults:
-connection limits, stream limits, gossip amplification).
+Timing side channels. Peer scoring is left at gossipsub's defaults rather than
+tuned - rejection feeds it, which is the part that matters, but a deliberate
+score configuration (topic weights, IP colocation limits, behaviour penalties)
+is its own piece of work.
 
 ## Non-blocking notes
 
