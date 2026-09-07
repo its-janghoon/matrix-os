@@ -41,6 +41,21 @@ type Agent struct {
 	maxRun   time.Duration
 	sendLog  []Message
 	logLines int
+	// logBytes is what the guest has written through the host logger so far,
+	// which is the quantity that fills a disk. See maxLogBytes.
+	logBytes int
+	// runtimeClosed records that Stop closed the wazero runtime, so Stop is
+	// idempotent and a caller can tell the runtime was released.
+	runtimeClosed bool
+	moduleClosed  bool
+	// budgetAnnounced keeps the "budget reached" notice to one line, so the
+	// notice cannot itself become the flood.
+	budgetAnnounced bool
+	// sendBytes is the payload bytes sendLog currently retains, and sendDropped
+	// counts the attempts it stopped retaining, so the count is never lost even
+	// when the contents are.
+	sendBytes   int
+	sendDropped int
 }
 
 // Message is one send() call a guest made.
@@ -257,9 +272,23 @@ func (a *Agent) Memory() []byte {
 	return append([]byte(nil), a.memory...)
 }
 
+// SendsDropped returns how many send() attempts were counted but not retained
+// because Sent()'s budget was spent. It is what keeps a bounded log honest: a
+// caller can tell "this module sent three messages" from "this module sent
+// three and then a hundred thousand more".
+func (a *Agent) SendsDropped() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.sendDropped
+}
+
 // Sent returns the send() calls the guest made, in order, whether or not the
 // SendFunc accepted them. It is how a caller sees what a module tried to do
 // when sends are refused.
+//
+// It is BOUNDED (see maxSendLog): a guest looping on send() has its later
+// attempts counted by SendsDropped rather than retained, because retaining them
+// was over a gigabyte of host memory in the default posture.
 func (a *Agent) Sent() []Message {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -270,13 +299,45 @@ func (a *Agent) Sent() []Message {
 	return out
 }
 
-// Stop gracefully shuts down the agent
+// Stop shuts down the agent, closing BOTH the module and the runtime.
+//
+// It used to close the module and return early on error, which skipped closing
+// the runtime. That is not a cosmetic ordering issue: a wazero runtime holds the
+// compiled module's memory, and the module is exactly what fails to close after
+// a guest was interrupted for exceeding its deadline - wazero has already closed
+// it. So a module that reliably times out leaked one runtime per run, and
+// Manager.run does `defer a.Stop(ctx)` discarding the error, so nothing
+// upstream would ever notice.
+//
+// The runtime is now closed regardless, both errors are reported, and Stop is
+// idempotent: Manager.run defers it and a caller told to treat a deadline error
+// as terminal calls it too.
 func (a *Agent) Stop(ctx context.Context) error {
-	if err := a.module.Close(ctx); err != nil {
-		return fmt.Errorf("failed to close module: %w", err)
+	a.mu.Lock()
+	moduleDone, runtimeDone := a.moduleClosed, a.runtimeClosed
+	a.mu.Unlock()
+
+	var moduleErr, runtimeErr error
+	if !moduleDone {
+		moduleErr = a.module.Close(ctx)
+		a.mu.Lock()
+		a.moduleClosed = true
+		a.mu.Unlock()
 	}
-	if err := a.runtime.Close(ctx); err != nil {
-		return fmt.Errorf("failed to close runtime: %w", err)
+	if !runtimeDone {
+		runtimeErr = a.runtime.Close(ctx)
+		a.mu.Lock()
+		a.runtimeClosed = true
+		a.mu.Unlock()
+	}
+
+	switch {
+	case moduleErr != nil && runtimeErr != nil:
+		return fmt.Errorf("failed to close module (%v) and runtime: %w", moduleErr, runtimeErr)
+	case moduleErr != nil:
+		return fmt.Errorf("failed to close module: %w", moduleErr)
+	case runtimeErr != nil:
+		return fmt.Errorf("failed to close runtime: %w", runtimeErr)
 	}
 	return nil
 }
@@ -295,9 +356,42 @@ func (a *Agent) Stop(ctx context.Context) error {
 // could ask the host to materialise its whole address space per call.
 const maxHostCallBytes = 1 << 20
 
-// maxLogLines caps how many lines one agent may write, so a guest in a loop
-// cannot fill the node's disk through the host's logger.
+// maxLogLines caps how many lines one agent may write.
 const maxLogLines = 10000
+
+// maxLogBytes caps the TOTAL bytes one agent may write through the host logger.
+//
+// WHY BOTH. The line cap alone claimed to stop "a guest in a loop [filling] the
+// node's disk", and it capped the wrong dimension: a line may be up to
+// maxHostCallBytes, so lines x bytes-per-line is nearly 10 GiB. Measured with a
+// guest logging a 60 KiB line in a loop: 586 MiB written from ONE run, with the
+// line cap doing its job the whole time.
+//
+// 4 MiB is generous for an agent's own diagnostics and 150x smaller than that
+// measurement. The line cap stays because the two bound different things: bytes
+// bound the disk, lines bound the number of writes to a possibly-slow writer.
+const maxLogBytes = 4 << 20
+
+// maxSendLog and maxSendLogBytes bound what Sent() retains.
+//
+// WHY. Every send() attempt was appended to sendLog, INCLUDING refused ones -
+// "Refusals are still recorded (see Sent) so a test or an operator can see what
+// a module tried to do", which is a good reason to record something and not a
+// reason to record everything. A payload may be maxHostCallBytes, so a guest
+// looping on send() grew the log without limit.
+//
+// Measured in the DEFAULT posture, where every send is refused because no
+// policy is configured: 20000 refused sends holding 1172 MiB of host memory.
+// The secure default was a node OOM.
+//
+// The purpose is served by the first attempts plus a count of the rest: an
+// operator looking at what a module tried does not need the thousandth copy,
+// and for a REFUSED send the payload was never delivered anywhere, so retaining
+// a megabyte of it buys nothing at all.
+const (
+	maxSendLog      = 1000
+	maxSendLogBytes = 1 << 20
+)
 
 // readGuest copies length bytes at offset out of the guest's memory. It reports
 // false, having written the reason to stderr, when the range is not readable.
@@ -332,25 +426,41 @@ func (a *Agent) stderrOr() io.Writer {
 	return a.stderr
 }
 
-// hostLog writes a guest's bytes to the agent's stdout, one line per call.
+// hostLog writes a guest's bytes to the agent's stdout, one line per call,
+// within both the line and the byte budget.
 func (a *Agent) hostLog(_ context.Context, m api.Module, offset, length uint32) {
 	buf, ok := a.readGuest(m, "log", offset, length)
 	if !ok {
 		return
 	}
+
+	// The prefix and newline are bytes on the disk too, so they are charged.
+	cost := len("[") + len(a.ID) + len("] ") + len(buf) + len("\n")
+
 	a.mu.Lock()
-	if a.logLines >= maxLogLines {
+	overLines := a.logLines >= maxLogLines
+	overBytes := a.logBytes+cost > maxLogBytes
+	if overLines || overBytes {
+		// Say it once, then go quiet. Repeating the notice for every dropped
+		// call would itself be the flood.
+		announce := !a.budgetAnnounced
+		a.budgetAnnounced = true
+		reason := fmt.Sprintf("byte budget of %d", maxLogBytes)
+		if overLines {
+			reason = fmt.Sprintf("line limit of %d", maxLogLines)
+		}
 		a.mu.Unlock()
+		if announce {
+			fmt.Fprintf(a.stdout, "[%s] log budget reached (%s); further log calls are dropped\n",
+				a.ID, reason)
+		}
 		return
 	}
 	a.logLines++
-	last := a.logLines == maxLogLines
+	a.logBytes += cost
 	a.mu.Unlock()
 
 	fmt.Fprintf(a.stdout, "[%s] %s\n", a.ID, buf)
-	if last {
-		fmt.Fprintf(a.stdout, "[%s] log limit of %d lines reached; further log calls are dropped\n", a.ID, maxLogLines)
-	}
 }
 
 // hostSend hands a guest's message to the configured SendFunc, and records the
@@ -366,7 +476,15 @@ func (a *Agent) hostSend(_ context.Context, m api.Module, targetOffset, targetLe
 	}
 
 	a.mu.Lock()
-	a.sendLog = append(a.sendLog, Message{Target: string(target), Payload: payload})
+	// Bounded. The attempt is always COUNTED; only the retained copy is dropped
+	// once the budget is spent. See maxSendLog.
+	cost := len(target) + len(payload)
+	if len(a.sendLog) < maxSendLog && a.sendBytes+cost <= maxSendLogBytes {
+		a.sendLog = append(a.sendLog, Message{Target: string(target), Payload: payload})
+		a.sendBytes += cost
+	} else {
+		a.sendDropped++
+	}
 	handler := a.send
 	a.mu.Unlock()
 

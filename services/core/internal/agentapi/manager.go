@@ -106,18 +106,76 @@ type Deployment struct {
 	LastRunAtNS int64 `json:"last_run_at_ns"`
 }
 
+// MaxAllowedMemoryPages and MaxAllowedRunTime are the CEILINGS an untrusted
+// submitted module runs under, whatever it asked for.
+//
+// WHY THEY EXIST. Both limits arrive in the deployer's own request
+// (server.go reads them straight off the wire), and normalizeLimits used only
+// to fill in a default when a field was ZERO - it never bounded one from above.
+// agent.ResourceLimits.Validate allows 65536 pages, which is 4 GiB, and puts no
+// ceiling on MaxRunTime at all: only a negative value is rejected. So a
+// deployer asked for 65536 pages and 24 hours and one run could hold 4 GiB of
+// the node for a day. That the defaults are safe was never the point; they are
+// defaults, and the caller overrode them upward.
+//
+// The metering charge did not compensate. It is a FLAT price per run, so the
+// deployer paid the same whether the module returned immediately or consumed the
+// whole ceiling it chose for itself: paying once bought as much of the node as
+// the request asked for. Pricing by consumption would need an instruction meter
+// wazero does not have, so the answer is a ceiling on what one payment can buy.
+//
+// The numbers: 1024 pages is 64 MiB, four times the default and 64 times
+// smaller than what Validate permits, which leaves room for a real workload
+// while bounding one node. 30s is six times the default run time. Both are
+// deliberately well above what an ordinary agent needs, because the job here is
+// to stop the extreme case rather than to tune the common one.
+const (
+	MaxAllowedMemoryPages uint32 = 1024
+	MaxAllowedRunTime            = 30 * time.Second
+)
+
+// MaxInboxMessages and MaxInboxBytes bound one agent's inbox.
+//
+// An inbox lives in this Manager and outlives the run that filled it, which
+// makes it a worse place for unbounded growth than the sender's own send log: a
+// permitted guest looping on send() left the bytes resident until the recipient
+// deployment was removed. A delivered payload may be a megabyte.
+const (
+	MaxInboxMessages = 1024
+	MaxInboxBytes    = 8 << 20
+)
+
 // normalizeLimits fills any unset field of a submitted limits value from the
-// runtime's DefaultMemoryLimits, so a caller may omit limits entirely (or set
-// only one field) and get the safe defaults for the rest. A MaxRunTime of zero
-// means "no deadline", which is a deliberate choice only appropriate for a
-// trusted module; because a submitted module is untrusted, an unset run time
-// defaults to the runtime's bounded default rather than "run forever".
+// runtime's DefaultMemoryLimits, and CLAMPS every field to the ceilings above.
+//
+// A caller may omit limits entirely (or set only one field) and get the safe
+// defaults for the rest. A MaxRunTime of zero means "no deadline", which is a
+// deliberate choice only appropriate for a trusted module; because a submitted
+// module is untrusted, an unset run time defaults to the runtime's bounded
+// default rather than "run forever" - and a run time ABOVE the ceiling is
+// clamped rather than refused, so a hopeful request still deploys and simply
+// runs under the node's policy.
 func normalizeLimits(l agent.ResourceLimits) agent.ResourceLimits {
 	if l.MaxMemoryPages == 0 {
 		l.MaxMemoryPages = agent.DefaultMemoryLimits.MaxMemoryPages
 	}
 	if l.MaxRunTime <= 0 {
 		l.MaxRunTime = agent.DefaultMemoryLimits.MaxRunTime
+	}
+	return clampLimits(l)
+}
+
+// clampLimits bounds limits to the node's ceilings. It is separate from
+// normalizeLimits because Deployment.Limits rebuilds limits from the PERSISTED
+// record on every later run: a clamp applied only at deploy time would be undone
+// by a restart, and a deployment stored before the ceilings existed still
+// carries the old numbers.
+func clampLimits(l agent.ResourceLimits) agent.ResourceLimits {
+	if l.MaxMemoryPages > MaxAllowedMemoryPages {
+		l.MaxMemoryPages = MaxAllowedMemoryPages
+	}
+	if l.MaxRunTime > MaxAllowedRunTime {
+		l.MaxRunTime = MaxAllowedRunTime
 	}
 	return l
 }
@@ -132,7 +190,11 @@ func (d Deployment) Limits() agent.ResourceLimits {
 	if d.MaxRunTimeMS != 0 {
 		lim.MaxRunTime = time.Duration(d.MaxRunTimeMS) * time.Millisecond
 	}
-	return lim
+	// Clamped here as well as at deploy time. This is the path every run after
+	// the first takes, so a ceiling applied only on the way in would be undone
+	// by a restart - and a record written before the ceilings existed carries
+	// whatever the deployer asked for then.
+	return clampLimits(lim)
 }
 
 // Settler is the consensus-backed metering dependency. It is the same shape as
@@ -223,6 +285,10 @@ type Manager struct {
 	// target is a known deployment on this node; that is what a target "name"
 	// resolves to (see deliver).
 	inbox map[string][]agent.Message
+	// inboxBytes is the payload bytes each inbox holds, which is what the byte
+	// limit is against. Kept alongside rather than recomputed, so delivery stays
+	// O(1) instead of walking the inbox on every send.
+	inboxBytes map[string]int
 	// nonce is a per-deployer metering-transfer nonce sequence so repeated
 	// same-amount charges from one deployer remain distinct consensus
 	// transactions (the transfer nonce is a uniquifier; see
@@ -263,6 +329,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		records:    make(map[string]Deployment),
 		nonce:      make(map[string]uint64),
 		inbox:      make(map[string][]agent.Message),
+		inboxBytes: make(map[string]int),
 	}
 	if err := m.reload(); err != nil {
 		return nil, err
@@ -459,10 +526,27 @@ func (m *Manager) deliver(target string, payload []byte) error {
 	if _, ok := m.records[target]; !ok {
 		return fmt.Errorf("agentapi: no agent named %q is deployed on this node", target)
 	}
+	// Bounded, and the refusal is an ERROR the sending guest sees on its stderr
+	// rather than a silent drop.
+	//
+	// An inbox lives in this Manager and outlives the run that filled it, so an
+	// unbounded one is worse than the sender's own bounded send log: a permitted
+	// guest looping on send() left gigabytes resident until the recipient
+	// deployment was removed. A payload may be a megabyte, so a few thousand of
+	// them is the whole node.
+	if len(m.inbox[target]) >= MaxInboxMessages {
+		return fmt.Errorf("agentapi: the inbox of %q is full (%d messages); it must be drained "+
+			"(DrainInbox) before more can be delivered", target, MaxInboxMessages)
+	}
+	if m.inboxBytes[target]+len(payload) > MaxInboxBytes {
+		return fmt.Errorf("agentapi: the inbox of %q is at its %d-byte limit; it must be drained "+
+			"(DrainInbox) before more can be delivered", target, MaxInboxBytes)
+	}
 	m.inbox[target] = append(m.inbox[target], agent.Message{
 		Target:  target,
 		Payload: append([]byte(nil), payload...),
 	})
+	m.inboxBytes[target] += len(payload)
 	return nil
 }
 
@@ -473,7 +557,31 @@ func (m *Manager) deliver(target string, payload []byte) error {
 func (m *Manager) Inbox(id string) []agent.Message {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	msgs := m.inbox[id]
+	return copyMessages(m.inbox[id])
+}
+
+// DrainInbox returns the messages delivered to the agent named id AND clears
+// them, freeing the inbox for more.
+//
+// It exists because Inbox only peeks. With the inbox bounded, a peek-only API
+// meant a full inbox was full for good: nothing could ever free it, so a
+// permitted sender could permanently stop delivery to a recipient. Draining is
+// the consumer's half of a bounded queue, and without it the bound would have
+// traded an unbounded-memory bug for a permanent-refusal one.
+//
+// Inbox is kept as the non-destructive read because tests and an operator want
+// to look without consuming.
+func (m *Manager) DrainInbox(id string) []agent.Message {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := copyMessages(m.inbox[id])
+	delete(m.inbox, id)
+	delete(m.inboxBytes, id)
+	return out
+}
+
+// copyMessages returns a deep copy, so a caller cannot mutate what is stored.
+func copyMessages(msgs []agent.Message) []agent.Message {
 	out := make([]agent.Message, len(msgs))
 	for i, msg := range msgs {
 		out[i] = agent.Message{Target: msg.Target, Payload: append([]byte(nil), msg.Payload...)}
