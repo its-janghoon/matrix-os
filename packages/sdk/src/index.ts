@@ -311,6 +311,16 @@ export class MatrixClient {
     return list(out.jobs).map(decodeJob);
   }
 
+  /**
+   * Settles a job: the buyer pays the provider and the job becomes COMPLETED.
+   *
+   * The payment goes through consensus as a transfer signed by the buyer, so
+   * the NODE has to hold the buyer's signing key - it resolves one from the
+   * wallet files under ~/.matrix. A job whose buyer it holds no key for is
+   * refused with a `failed_precondition` MatrixError and the reservation left
+   * intact, so it can be cancelled. Paying out of an account without its
+   * owner's signature is what that refusal exists to prevent.
+   */
   async completeJob(id: string): Promise<Job> {
     const out = await this.call(MARKET, 'CompleteJob', { id });
     return decodeJob(record(out.job));

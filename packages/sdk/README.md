@@ -30,6 +30,8 @@ import { MatrixClient } from 'matrix-os-sdk';
 
 const matrix = new MatrixClient({ endpoint: 'http://127.0.0.1:9093' });
 
+// Throws a MatrixError if no node answers or it is not serving; returns nothing
+// when it is.
 await matrix.ping();
 
 const providers = await matrix.listProviders({ includeRemote: true });
@@ -42,19 +44,32 @@ const done = await matrix.completeJob(job.id);
 console.log(done.status, done.price); // JOB_STATUS_COMPLETED 21n
 ```
 
+`completeJob` settles through consensus: the payment is a transfer signed by
+the buyer that a quorum commits. The node therefore needs the buyer's signing
+key, which it resolves from the wallet files under `~/.matrix`, and refuses a
+job whose buyer it holds no key for with a `failed_precondition` `MatrixError`,
+leaving the reservation intact so you can cancel it. Paying out of an account
+without its owner's signature is what that refusal exists to prevent.
+
 Inference:
 
 ```ts
 const inference = await matrix.submitInferenceJob({
+  // A freshly initialized node registers this GPU-free echo provider on the
+  // market, so the path works before you have a model server. Point it at your
+  // own provider once you do.
+  provider: 'demo-inference-provider',
   buyer: myAccountId,
-  provider: 'local-demo',
-  model: 'llama3',
+  model: 'demo',
   prompt: 'Explain a lock-and-mint bridge in two sentences.',
   maxTokens: 256,
 });
 const finished = await matrix.fulfillInferenceJob(inference.id);
 console.log(finished.completion);
 ```
+
+Inference settles the same way `completeJob` does, so the same signing-key
+requirement applies to the buyer.
 
 ## Amounts are `bigint`
 
