@@ -81,17 +81,36 @@ func remoteProviderToProto(rp marketexchange.RemoteProvider) *marketv1.Provider 
 	}
 }
 
-// recordToProto converts a token chain record to the proto Transaction.
+// recordToProto converts a token chain record to the proto Transaction. It is
+// the fallback mapping used only by a Service with no consensus transfer settler
+// (tests / a library caller wiring the market on its own), where the history
+// still comes from the per-node token.Chain. The record's chain height is
+// reported as the transfer index in that mode.
 func recordToProto(rec *token.Record) *marketv1.Transaction {
 	return &marketv1.Transaction{
-		Height:    rec.Height,
-		From:      rec.Tx.SenderID(),
-		To:        rec.Tx.To,
-		Amount:    rec.Tx.Amount,
-		Nonce:     rec.Tx.Nonce,
-		Hash:      append([]byte(nil), rec.Hash...),
-		PrevHash:  append([]byte(nil), rec.Tx.PrevHash...),
-		Timestamp: nanosToTimestamp(rec.Tx.Timestamp),
+		Index:       rec.Height,
+		From:        rec.Tx.SenderID(),
+		To:          rec.Tx.To,
+		Amount:      rec.Tx.Amount,
+		Nonce:       rec.Tx.Nonce,
+		BlockHeight: rec.Height,
+		Timestamp:   nanosToTimestamp(rec.Tx.Timestamp),
+	}
+}
+
+// transferViewToProto converts a consensus committed-transfer view to the proto
+// Transaction. This is the mapping used when a consensus transfer settler backs
+// the history RPCs, which is the node's default: the history is the ordered
+// sequence of committed transfers, identical on every node.
+func transferViewToProto(t TransferView) *marketv1.Transaction {
+	return &marketv1.Transaction{
+		Index:       t.Index,
+		From:        t.From,
+		To:          t.To,
+		Amount:      t.Amount,
+		Nonce:       t.Nonce,
+		BlockHeight: t.BlockHeight,
+		Timestamp:   nanosToTimestamp(t.Timestamp),
 	}
 }
 
@@ -232,30 +251,61 @@ func (s *Service) GetBalance(ctx context.Context, req *marketv1.GetBalanceReques
 	return &marketv1.GetBalanceResponse{Account: req.GetAccount(), Balance: bal}, nil
 }
 
-// GetTransaction reads a single settled transaction from the chain by height.
+// GetTransaction reads a single committed transfer by its stable index. When a
+// consensus transfer settler is installed (the node's default) it reads the
+// globally-agreed consensus transaction history, so the same index resolves to
+// the same transfer on every node. Without one it falls back to the per-node
+// token.Chain by height.
 func (s *Service) GetTransaction(ctx context.Context, req *marketv1.GetTransactionRequest) (*marketv1.GetTransactionResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	rec, err := s.chain.TransactionAt(req.GetHeight())
+	if s.transferSettler != nil {
+		t, err := s.transferSettler.TransferAt(req.GetIndex())
+		if err != nil {
+			return nil, mapTransferHistoryError(err)
+		}
+		return &marketv1.GetTransactionResponse{Transaction: transferViewToProto(*t)}, nil
+	}
+	rec, err := s.chain.TransactionAt(req.GetIndex())
 	if err != nil {
 		return nil, mapMarketError(err)
 	}
 	return &marketv1.GetTransactionResponse{Transaction: recordToProto(rec)}, nil
 }
 
-// ListTransactions reads settled transactions from the chain in ascending
-// height order, starting at start_height and returning at most limit records.
+// ListTransactions reads committed transfers in ascending index (commit) order,
+// starting at start_index and returning at most limit records. When a consensus
+// transfer settler is installed (the node's default) it reads the
+// globally-agreed consensus transaction history, so two nodes return the
+// identical sequence. Without one it falls back to the per-node token.Chain.
 func (s *Service) ListTransactions(ctx context.Context, req *marketv1.ListTransactionsRequest) (*marketv1.ListTransactionsResponse, error) {
+	start := req.GetStartIndex()
+	limit := req.GetLimit()
+
+	if s.transferSettler != nil {
+		var lim int
+		if limit > 0 {
+			lim = int(limit)
+		}
+		transfers, total, err := s.transferSettler.History(start, lim)
+		if err != nil {
+			return nil, mapTransferHistoryError(err)
+		}
+		out := make([]*marketv1.Transaction, 0, len(transfers))
+		for _, t := range transfers {
+			out = append(out, transferViewToProto(t))
+		}
+		return &marketv1.ListTransactionsResponse{Transactions: out, Total: total}, nil
+	}
+
 	length, err := s.chain.Len()
 	if err != nil {
 		return nil, mapMarketError(err)
 	}
-
-	start := req.GetStartHeight()
 	out := make([]*marketv1.Transaction, 0)
 	for height := start; height < length; height++ {
-		if req.GetLimit() > 0 && uint64(len(out)) >= req.GetLimit() {
+		if limit > 0 && uint64(len(out)) >= limit {
 			break
 		}
 		rec, err := s.chain.TransactionAt(height)
@@ -264,13 +314,23 @@ func (s *Service) ListTransactions(ctx context.Context, req *marketv1.ListTransa
 		}
 		out = append(out, recordToProto(rec))
 	}
-
-	return &marketv1.ListTransactionsResponse{Transactions: out, ChainLength: length}, nil
+	return &marketv1.ListTransactionsResponse{Transactions: out, Total: length}, nil
 }
 
-// SubmitSignedTransfer verifies and applies a client-signed ed25519 transfer
-// through the signed-settlement path (token.SettledLedger.Settle), then returns
-// the settled chain record.
+// SubmitSignedTransfer verifies a client-signed ed25519 transfer and settles it.
+//
+// When a consensus transfer settler is installed - which is what the node does -
+// the transfer is submitted into consensus, ordered into a committed block by a
+// quorum, and applied deterministically by every node to the shared ledger, so
+// two nodes agree on the resulting balances and the transfer is subject to the
+// (default-off) protocol fee like every other committed transfer. The signature
+// and sender authorization are still required, an empty recipient and a
+// self-transfer are still rejected, and a transfer that commits but is
+// unaffordable at apply time returns FailedPrecondition (no credits moved),
+// while a settlement that cannot be confirmed in time returns DeadlineExceeded.
+//
+// Without a transfer settler (a Service with no consensus engine - tests, a
+// library caller) it falls back to the per-node token.SettledLedger path.
 func (s *Service) SubmitSignedTransfer(ctx context.Context, req *marketv1.SubmitSignedTransferRequest) (*marketv1.SubmitSignedTransferResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
@@ -288,11 +348,28 @@ func (s *Service) SubmitSignedTransfer(ctx context.Context, req *marketv1.Submit
 		PrevHash:  req.GetPrevHash(),
 		Signature: req.GetSignature(),
 	}
+
+	if s.transferSettler != nil {
+		result, err := s.transferSettler.SettleSignedTransfer(ctx, tx)
+		if err != nil {
+			return nil, mapSettlementError(err)
+		}
+		return &marketv1.SubmitSignedTransferResponse{
+			Transaction: transferViewToProto(result.Transfer),
+			Committed:   result.Committed,
+			Applied:     result.Applied,
+		}, nil
+	}
+
 	rec, err := s.settled.Settle(tx)
 	if err != nil {
 		return nil, mapMarketError(err)
 	}
-	return &marketv1.SubmitSignedTransferResponse{Transaction: recordToProto(rec)}, nil
+	return &marketv1.SubmitSignedTransferResponse{
+		Transaction: recordToProto(rec),
+		Committed:   true,
+		Applied:     true,
+	}, nil
 }
 
 // FundAccount moves native MATRIX from the genesis-allocated reward pool to the

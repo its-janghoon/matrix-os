@@ -323,16 +323,16 @@ export default function NetworkSetupPage() {
 
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
                     <h3 className='mb-2 text-lg font-bold text-white'>
-                      The fee applies to consensus-settled value, and one path escapes it
+                      The fee applies to every consensus-settled value transfer
                     </h3>
                     <p className='mb-0 text-gray-100'>
-                      Marketplace settlement - a compute job, an inference job - goes through consensus and pays.{' '}
-                      <code className='text-white'>matrix wallet transfer</code> does not: it appends to the
-                      signed-transfer chain instead, which moves credits on this node and is not ordered by any
-                      quorum. So a peer-to-peer transfer sent that way pays no fee. That path needs to move to
-                      consensus regardless of the fee - transfers no quorum agreed on are a correctness problem
-                      before they are a revenue one - and until it does, this is a hole and we would rather say so
-                      than let you find it.
+                      All value now moves through consensus. Marketplace settlement - a compute job, an inference
+                      job - and a plain{' '}
+                      <code className='text-white'>matrix wallet transfer</code> are all submitted as signed
+                      transfers that a quorum orders into a committed block and every node applies to the same
+                      ledger. So each of them pays the protocol fee the same way, and two nodes agree on the
+                      resulting balances. There is no longer a path that moves MATRIX on one node without a quorum
+                      or that escapes the fee.
                     </p>
                   </div>
 

@@ -72,7 +72,6 @@ const NOT_YET = [
   'No zero-knowledge proofs and no secure enclaves. A provider sees the work it runs.',
   'No agent deployment path over the network, and no agent-to-agent collaboration primitive. The runtime runs a module you hand it.',
   'The bridge is not on public Ethereum, and the SDK is not on npm.',
-  'Two paths move value and only one is agreed by consensus. Marketplace settlement goes through consensus; `matrix wallet transfer` appends to the signed-transfer chain instead, which moves credits on one node and pays no protocol fee. That path needs to move to consensus.',
 ];
 
 export default function MatrixOsIntroduction() {

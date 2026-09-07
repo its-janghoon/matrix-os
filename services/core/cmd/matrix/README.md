@@ -150,11 +150,16 @@ matrix balance --account <account-id>
 matrix --json balance --account <account-id>
 ```
 
-### Token chain / transactions
+### Transactions (consensus transfer history)
+
+Value transfers settle through consensus, so `tx list`/`tx get` read the
+consensus transaction history: the ordered sequence of committed value transfers
+(the same on every node). A transfer is addressed by its stable `--index`, not a
+per-node chain height.
 
 ```sh
-matrix tx get --height 0
-matrix tx list                      # all transactions + chain length
+matrix tx get --index 0
+matrix tx list                      # all committed transfers + total
 matrix tx list --start 10 --limit 20 --json
 ```
 
@@ -183,17 +188,24 @@ matrix wallet transfer --to <recipient-account-id> --amount 200
 
 #### Transfer flow
 
-`matrix wallet transfer` performs a fully client-side signed transfer:
+`matrix wallet transfer` performs a fully client-side signed transfer that
+settles through consensus:
 
-1. Reads the current chain head hash and derives the sender's next nonce by
-   inspecting the chain over gRPC (`ListTransactions`). An empty chain uses the
-   genesis prev-hash (32 zero bytes) and nonce `0`.
+1. Derives the sender's next transfer nonce by inspecting the consensus
+   transaction history over gRPC (`ListTransactions`). The nonce is a per-sender
+   uniquifier; consensus provides replay protection through its
+   committed-transaction dedup set, so an empty history uses nonce `0`.
 2. Builds the canonical transaction payload
    (`from_public_key`, `to`, `amount`, `nonce`, `timestamp`, `prev_hash`) and
-   signs it with the wallet's ed25519 private key. The signing is identical to
-   the node's `internal/token` verification, so the signature is accepted by
+   signs it with the wallet's ed25519 private key. `prev_hash` is a zero seed
+   (it is unused for consensus ledger linkage). The signing is identical to the
+   node's `internal/token` verification, so the signature is accepted by
    `SubmitSignedTransfer`.
-3. Calls `SubmitSignedTransfer` and prints the settled transaction record.
+3. Calls `SubmitSignedTransfer`, which submits the signed transfer into
+   consensus; a quorum orders it into a committed block and every node applies it
+   to the shared ledger, so all nodes agree on the resulting balances and the
+   transfer pays the protocol fee (when configured) like every other committed
+   transfer. The CLI prints the settled transfer once it has committed.
 
 The private key stays in the local wallet file the entire time; only the public
 key, signature, and transfer fields are sent to the node.

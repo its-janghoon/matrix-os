@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -87,24 +86,25 @@ func jobStatusString(s marketv1.JobStatus) string {
 	}
 }
 
-// txRow is the human/JSON view of a chain transaction.
+// txRow is the human/JSON view of a committed transfer in the consensus
+// transaction history.
 type txRow struct {
-	Height uint64 `json:"height"`
-	From   string `json:"from"`
-	To     string `json:"to"`
-	Amount uint64 `json:"amount"`
-	Nonce  uint64 `json:"nonce"`
-	Hash   string `json:"hash"`
+	Index       uint64 `json:"index"`
+	From        string `json:"from"`
+	To          string `json:"to"`
+	Amount      uint64 `json:"amount"`
+	Nonce       uint64 `json:"nonce"`
+	BlockHeight uint64 `json:"block_height"`
 }
 
 func txToRow(t *marketv1.Transaction) txRow {
 	return txRow{
-		Height: t.GetHeight(),
-		From:   t.GetFrom(),
-		To:     t.GetTo(),
-		Amount: t.GetAmount(),
-		Nonce:  t.GetNonce(),
-		Hash:   hex.EncodeToString(t.GetHash()),
+		Index:       t.GetIndex(),
+		From:        t.GetFrom(),
+		To:          t.GetTo(),
+		Amount:      t.GetAmount(),
+		Nonce:       t.GetNonce(),
+		BlockHeight: t.GetBlockHeight(),
 	}
 }
 
@@ -162,41 +162,43 @@ func printJob(w io.Writer, asJSON bool, j *marketv1.Job) error {
 	return nil
 }
 
-// printTransactions renders transactions as JSON or a table.
-func printTransactions(w io.Writer, asJSON bool, txs []*marketv1.Transaction, chainLength uint64) error {
+// printTransactions renders committed transfers as JSON or a table. total is
+// the number of committed transfers in the consensus history.
+func printTransactions(w io.Writer, asJSON bool, txs []*marketv1.Transaction, total uint64) error {
 	rows := make([]txRow, 0, len(txs))
 	for _, t := range txs {
 		rows = append(rows, txToRow(t))
 	}
 	if asJSON {
 		return printJSON(w, struct {
-			ChainLength  uint64  `json:"chain_length"`
+			Total        uint64  `json:"total"`
 			Transactions []txRow `json:"transactions"`
-		}{ChainLength: chainLength, Transactions: rows})
+		}{Total: total, Transactions: rows})
 	}
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "HEIGHT\tFROM\tTO\tAMOUNT\tNONCE\tHASH")
+	fmt.Fprintln(tw, "INDEX\tFROM\tTO\tAMOUNT\tNONCE\tBLOCK")
 	for _, r := range rows {
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%d\t%s\n", r.Height, r.From, r.To, r.Amount, r.Nonce, r.Hash)
+		fmt.Fprintf(tw, "%d\t%s\t%s\t%d\t%d\t%d\n", r.Index, r.From, r.To, r.Amount, r.Nonce, r.BlockHeight)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "chain length: %d\n", chainLength)
+	fmt.Fprintf(w, "transfers: %d\n", total)
 	return nil
 }
 
-// printTransaction renders a single transaction as JSON or key/value lines.
+// printTransaction renders a single committed transfer as JSON or key/value
+// lines.
 func printTransaction(w io.Writer, asJSON bool, t *marketv1.Transaction) error {
 	r := txToRow(t)
 	if asJSON {
 		return printJSON(w, r)
 	}
-	fmt.Fprintf(w, "Height: %d\n", r.Height)
+	fmt.Fprintf(w, "Index:  %d\n", r.Index)
 	fmt.Fprintf(w, "From:   %s\n", r.From)
 	fmt.Fprintf(w, "To:     %s\n", r.To)
 	fmt.Fprintf(w, "Amount: %d\n", r.Amount)
 	fmt.Fprintf(w, "Nonce:  %d\n", r.Nonce)
-	fmt.Fprintf(w, "Hash:   %s\n", r.Hash)
+	fmt.Fprintf(w, "Block:  %d\n", r.BlockHeight)
 	return nil
 }

@@ -164,8 +164,11 @@ func TestMarketService_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SubmitSignedTransfer: %v", err)
 	}
-	if xferResp.GetTransaction().GetHeight() != 0 {
-		t.Fatalf("expected first tx at height 0, got %d", xferResp.GetTransaction().GetHeight())
+	if xferResp.GetTransaction().GetIndex() != 0 {
+		t.Fatalf("expected first tx at index 0, got %d", xferResp.GetTransaction().GetIndex())
+	}
+	if !xferResp.GetCommitted() || !xferResp.GetApplied() {
+		t.Fatalf("expected committed+applied transfer, got committed=%v applied=%v", xferResp.GetCommitted(), xferResp.GetApplied())
 	}
 	if xferResp.GetTransaction().GetTo() != buyerID {
 		t.Fatalf("expected transfer recipient %q, got %q", buyerID, xferResp.GetTransaction().GetTo())
@@ -227,15 +230,15 @@ func TestMarketService_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTransactions: %v", err)
 	}
-	if txsResp.GetChainLength() != 1 {
-		t.Fatalf("expected chain length 1, got %d", txsResp.GetChainLength())
+	if txsResp.GetTotal() != 1 {
+		t.Fatalf("expected total 1, got %d", txsResp.GetTotal())
 	}
 	if len(txsResp.GetTransactions()) != 1 {
 		t.Fatalf("expected 1 transaction, got %d", len(txsResp.GetTransactions()))
 	}
 
-	// GetTransaction by height returns the same record.
-	getTx, err := h.client.GetTransaction(ctx, &marketv1.GetTransactionRequest{Height: 0})
+	// GetTransaction by index returns the same record.
+	getTx, err := h.client.GetTransaction(ctx, &marketv1.GetTransactionRequest{Index: 0})
 	if err != nil {
 		t.Fatalf("GetTransaction: %v", err)
 	}
@@ -293,8 +296,8 @@ func TestMarketService_ErrorMapping(t *testing.T) {
 	}
 
 	// GetTransaction out of range -> NotFound.
-	if _, err := h.client.GetTransaction(ctx, &marketv1.GetTransactionRequest{Height: 99}); status.Code(err) != codes.NotFound {
-		t.Fatalf("expected NotFound for out-of-range height, got %v (%v)", status.Code(err), err)
+	if _, err := h.client.GetTransaction(ctx, &marketv1.GetTransactionRequest{Index: 99}); status.Code(err) != codes.NotFound {
+		t.Fatalf("expected NotFound for out-of-range index, got %v (%v)", status.Code(err), err)
 	}
 
 	// SubmitSignedTransfer with a bad signature -> InvalidArgument.

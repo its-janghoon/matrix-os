@@ -214,8 +214,8 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       },
       {
         name: 'fee_basis_points',
-        def: '0',
-        note: 'The protocol fee taken from every value transfer a committed block carries, in hundredths of a percent, paid to the validator set pro rata by voting power. It is what makes a bond worth posting: without it stake is a pure cost. Taken OUT of the amount, so a 10,000 transfer at 1% credits the recipient 9,900 - adding it to the sender would make a transfer that was affordable at proposal time unaffordable at apply time. Capped at 100 IN CODE, so a mistyped 1000 fails at startup instead of taking ten times the cut. Every node must agree on the rate. Note that it reaches consensus-settled value: marketplace settlement pays it, and `matrix wallet transfer`, which appends to the signed-transfer chain instead, does not.',
+        def: '100',
+        note: 'The protocol fee taken from every value transfer a committed block carries, in hundredths of a percent, paid to the validator set pro rata by voting power. It is what makes a bond worth posting: without it stake is a pure cost. Taken OUT of the amount, so a 10,000 transfer at 1% credits the recipient 9,900 - adding it to the sender would make a transfer that was affordable at proposal time unaffordable at apply time. Capped at 100 IN CODE, so a mistyped 1000 fails at startup instead of taking ten times the cut. A generated config sets it to 100 (1%), the code cap; set it to 0 for a fee-free network. Every node must agree on the rate. It reaches ALL consensus-settled value: marketplace settlement AND a plain `matrix wallet transfer` are signed transfers that settle through consensus, so both pay it - there is no path that escapes the fee.',
       },
       {
         name: 'rewards.per_block',

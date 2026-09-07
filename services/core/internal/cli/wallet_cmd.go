@@ -149,10 +149,15 @@ func newWalletTransferCommand(opts *globalOptions) *cobra.Command {
 		Short: "Sign and submit a native MATRIX transfer to a recipient",
 		Long: `Build, sign, and submit a native MATRIX transfer.
 
-The command reads the current chain head (prev_hash) and derives the sender's
-next nonce from the chain over gRPC, signs the canonical transaction payload
-with the wallet's ed25519 private key, and calls SubmitSignedTransfer. The
-private key never leaves the local wallet.`,
+The transfer settles through consensus: it is signed locally, submitted via
+SubmitSignedTransfer, ordered into a committed block by a quorum, and applied by
+every node, so all nodes agree on the resulting balances and the transfer pays
+the protocol fee (default off) like every other committed transfer. The command
+derives the sender's next transfer nonce from the consensus transaction history
+over gRPC (a uniquifier; consensus dedups committed transfers for replay
+protection), signs the canonical transaction payload with the wallet's ed25519
+private key, and waits for the settlement to commit. The private key never
+leaves the local wallet.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if to == "" {
@@ -178,7 +183,7 @@ private key never leaves the local wallet.`,
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
 
-			prevHash, nonce, err := deriveHeadAndNonce(ctx, cc.market, acct.AccountID())
+			nonce, err := deriveNonce(ctx, cc.market, acct.AccountID())
 			if err != nil {
 				return mapErr(opts.Addr, err)
 			}
@@ -189,7 +194,10 @@ private key never leaves the local wallet.`,
 				Amount:    amount,
 				Nonce:     nonce,
 				Timestamp: time.Now().UnixNano(),
-				PrevHash:  prevHash,
+				// prev_hash is unused for consensus ledger linkage; a stable zero
+				// seed keeps the canonical signing bytes well-formed and matches
+				// what consensus.SubmitTransfer signs server-side.
+				PrevHash: make([]byte, chainHashSize),
 			}
 			if err := tx.Sign(acct.PrivateKey); err != nil {
 				return fmt.Errorf("failed to sign transfer: %w", err)
@@ -216,26 +224,31 @@ private key never leaves the local wallet.`,
 	return cmd
 }
 
-// deriveHeadAndNonce reads the chain over gRPC to compute the prev_hash a new
-// transfer must chain onto (the head record's link hash, or 32 zero bytes when
-// the chain is empty) and the sender's next nonce (the count of the sender's
-// prior transactions, since nonces are 0-based per sender). It pages through
-// ListTransactions from height 0 so it works regardless of any server-side page
+// deriveNonce reads the consensus transaction history over gRPC to compute the
+// sender's next transfer nonce (the count of the sender's prior committed
+// transfers, since the nonce is a per-sender uniquifier). It pages through
+// ListTransactions from index 0 so it works regardless of any server-side page
 // cap.
-func deriveHeadAndNonce(ctx context.Context, client marketv1.MarketServiceClient, senderID string) (prevHash []byte, nonce uint64, err error) {
+//
+// A signed transfer settles through consensus now, where replay protection
+// comes from the engine's committed-transaction dedup set rather than a strict
+// monotonic per-sender nonce. A count-derived nonce is still monotonic per
+// sender, which keeps otherwise-identical repeated transfers distinct; a rare
+// racing transfer that reuses a nonce is simply a distinct transaction (the
+// timestamp differs) and both commit independently.
+func deriveNonce(ctx context.Context, client marketv1.MarketServiceClient, senderID string) (nonce uint64, err error) {
 	var (
 		start     uint64
-		lastHash  []byte
 		senderTxs uint64
 		total     uint64
 		seen      uint64
 	)
 	for {
-		resp, err := client.ListTransactions(ctx, &marketv1.ListTransactionsRequest{StartHeight: start})
+		resp, err := client.ListTransactions(ctx, &marketv1.ListTransactionsRequest{StartIndex: start})
 		if err != nil {
-			return nil, 0, err
+			return 0, err
 		}
-		total = resp.GetChainLength()
+		total = resp.GetTotal()
 		txs := resp.GetTransactions()
 		if len(txs) == 0 {
 			break
@@ -244,19 +257,13 @@ func deriveHeadAndNonce(ctx context.Context, client marketv1.MarketServiceClient
 			if t.GetFrom() == senderID {
 				senderTxs++
 			}
-			lastHash = t.GetHash()
 			seen++
 		}
-		// Advance past the highest height returned.
-		start = txs[len(txs)-1].GetHeight() + 1
+		// Advance past the highest index returned.
+		start = txs[len(txs)-1].GetIndex() + 1
 		if seen >= total {
 			break
 		}
 	}
-
-	if total == 0 || len(lastHash) == 0 {
-		// Empty chain: genesis prev-hash is 32 zero bytes and nonce is 0.
-		return make([]byte, chainHashSize), 0, nil
-	}
-	return lastHash, senderTxs, nil
+	return senderTxs, nil
 }

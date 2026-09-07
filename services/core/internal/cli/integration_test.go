@@ -37,6 +37,13 @@ func startServer(t *testing.T) (addr string, mkt *market.Market, chain *token.Ch
 		Market:  mkt,
 		Settled: settled,
 		Chain:   chain,
+		// Exercise the CLI against the consensus settlement path it now targets:
+		// the transfer settler moves credits ignoring prev_hash (a consensus
+		// transfer uses nonce only as a uniquifier) and records committed history
+		// for `tx list`/`tx get`. This mirrors the node's real wiring closely
+		// enough to test the CLI's request/response handling without standing up
+		// a full consensus engine in a CLI unit test.
+		TransferSettler: newFakeConsensusSettler(mkt),
 	})
 	if err != nil {
 		t.Fatalf("marketapi.NewServer: %v", err)
@@ -165,8 +172,8 @@ func TestCLI_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tx list: %v (%s)", err, out)
 	}
-	if !strings.Contains(out, "\"chain_length\": 1") {
-		t.Fatalf("expected chain_length 1 in json: %s", out)
+	if !strings.Contains(out, "\"total\": 1") {
+		t.Fatalf("expected total 1 in json: %s", out)
 	}
 }
 
@@ -208,6 +215,104 @@ func TestCLI_SecondTransferNonce(t *testing.T) {
 		t.Fatalf("expected recipient balance 30: %s", out)
 	}
 }
+
+// fakeConsensusSettler is a marketapi.TransferSettler that stands in for the
+// consensus engine in CLI tests: it applies a verified signed transfer directly
+// to the market ledger (moving credits and skipping an unaffordable one, as the
+// consensus apply path does), ignores prev_hash (a consensus transfer uses nonce
+// only as a uniquifier), and records committed transfers so the history RPCs the
+// CLI reads return the same ordered sequence. It preserves the guards the RPC
+// relies on (signature/authZ, non-empty recipient, no self-transfer).
+type fakeConsensusSettler struct {
+	mkt     *market.Market
+	history []marketapi.TransferView
+}
+
+func newFakeConsensusSettler(mkt *market.Market) *fakeConsensusSettler {
+	return &fakeConsensusSettler{mkt: mkt}
+}
+
+func (f *fakeConsensusSettler) SettleSignedTransfer(_ context.Context, tx *token.Transaction) (*marketapi.SettledTransferResult, error) {
+	if err := tx.Verify(); err != nil {
+		return nil, err
+	}
+	sender := tx.SenderID()
+	if tx.To == "" {
+		return nil, token.ErrEmptyRecipient
+	}
+	if tx.To == sender {
+		return nil, token.ErrSelfTransfer
+	}
+	result := &marketapi.SettledTransferResult{
+		Transfer: marketapi.TransferView{
+			From:      sender,
+			To:        tx.To,
+			Amount:    tx.Amount,
+			Nonce:     tx.Nonce,
+			Timestamp: tx.Timestamp,
+		},
+	}
+	// Affordability: consensus deterministically skips an unaffordable transfer.
+	bal, err := f.mkt.Ledger().Balance(sender)
+	if err != nil {
+		return nil, err
+	}
+	if bal < tx.Amount {
+		result.Committed = true
+		result.Applied = false
+		return result, errTransferUnaffordable
+	}
+	if err := f.mkt.Ledger().Transfer(sender, tx.To, tx.Amount); err != nil {
+		return nil, err
+	}
+	idx := uint64(len(f.history))
+	view := marketapi.TransferView{
+		Index:       idx,
+		From:        sender,
+		To:          tx.To,
+		Amount:      tx.Amount,
+		Nonce:       tx.Nonce,
+		BlockHeight: idx,
+		Timestamp:   tx.Timestamp,
+	}
+	f.history = append(f.history, view)
+	result.Transfer = view
+	result.Committed = true
+	result.Applied = true
+	return result, nil
+}
+
+func (f *fakeConsensusSettler) History(start uint64, limit int) ([]marketapi.TransferView, uint64, error) {
+	total := uint64(len(f.history))
+	if start >= total {
+		return nil, total, nil
+	}
+	out := f.history[start:]
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return append([]marketapi.TransferView(nil), out...), total, nil
+}
+
+func (f *fakeConsensusSettler) TransferAt(index uint64) (*marketapi.TransferView, error) {
+	if index >= uint64(len(f.history)) {
+		return nil, marketapi.ErrTransferNotFound
+	}
+	v := f.history[index]
+	return &v, nil
+}
+
+// errTransferUnaffordable mirrors an unaffordable consensus settlement; it maps
+// to FailedPrecondition via marketapi.mapSettlementError's default case.
+var errTransferUnaffordable = errorsNew("transfer did not apply (unaffordable)")
+
+// errorsNew is a tiny indirection so this test file does not need an errors
+// import just for one sentinel.
+func errorsNew(msg string) error { return &settlerError{msg} }
+
+type settlerError struct{ msg string }
+
+func (e *settlerError) Error() string { return e.msg }
 
 // TestCLI_ConnectionRefused asserts a readable error when no node is listening.
 func TestCLI_ConnectionRefused(t *testing.T) {

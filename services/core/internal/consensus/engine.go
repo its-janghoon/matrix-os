@@ -3116,6 +3116,117 @@ func (e *Engine) MempoolLen() int {
 // Chain returns the committed-block ledger for inspection.
 func (e *Engine) Chain() *BlockChain { return e.chain }
 
+// CommittedTransfer is a single value transfer that a committed block carried,
+// in the globally-agreed order the block chain fixes it. It is the unit of the
+// consensus transaction history that `matrix tx list` reads: because ordering
+// and finality come from the committed block chain, two honest nodes enumerate
+// the identical sequence of transfers, which the per-node token.Chain could not
+// promise. The Index is a stable, monotonically increasing position across the
+// whole chain (not a token.Chain height): transfer 0 is the first value
+// transfer in the first block that carried one, and it only ever grows.
+type CommittedTransfer struct {
+	// Index is the transfer's stable zero-based position in the consensus
+	// transfer history (block-major, then transaction order within the block).
+	Index uint64
+	// Height is the committed block height the transfer landed in.
+	Height uint64
+	// From is the sender account ID (hex ed25519 public key).
+	From string
+	// To is the recipient account ID.
+	To string
+	// Amount is the gross amount the transfer carried, before any protocol fee.
+	Amount uint64
+	// Nonce is the sender's per-transfer uniquifier the transfer carried.
+	Nonce uint64
+	// Timestamp is the advisory wall-clock time (unix nanoseconds) the transfer
+	// carried.
+	Timestamp int64
+}
+
+// isHistoryTransfer reports whether a committed transaction is an ordinary
+// value transfer that belongs in the transaction history, as opposed to a
+// reserved-recipient consensus operation (a bond, a withdrawal, or a validator
+// set change) that carries protocol state rather than a user-visible payment.
+// It is the same recipient-namespace test the apply path uses to tell a
+// transfer from a stake/set-change operation, so the history shows exactly the
+// transfers that moved (or were skipped trying to move) native MATRIX.
+func isHistoryTransfer(tx *token.Transaction) bool {
+	if IsStakeRecipient(tx.To) || IsSetChangeRecipient(tx.To) {
+		return false
+	}
+	return true
+}
+
+// CommittedTransfers returns value transfers from the committed block chain in
+// globally-agreed order, starting at the given zero-based index and returning at
+// most limit of them (limit <= 0 means no limit). It also returns the total
+// number of committed value transfers, so a caller can page. Because it reads
+// the committed block chain - the same ordered log every node commits - two
+// nodes return the identical sequence, which is what makes `matrix tx list`
+// agree across nodes now that value transfers settle through consensus rather
+// than a per-node token.Chain.
+//
+// It reports every committed transfer, including one that was deterministically
+// skipped as unaffordable at apply time: the transfer is part of the agreed
+// ordered log whether or not it moved credits, and every node lists it the same
+// way. Reserved consensus operations (bonds, withdrawals, set changes) are
+// omitted; they are protocol state, not user payments.
+func (e *Engine) CommittedTransfers(start uint64, limit int) ([]CommittedTransfer, uint64, error) {
+	length, err := e.chain.Len()
+	if err != nil {
+		return nil, 0, err
+	}
+	out := make([]CommittedTransfer, 0)
+	var index uint64
+	for height := uint64(0); height < length; height++ {
+		b, err := e.chain.BlockAt(height)
+		if err != nil {
+			return nil, 0, err
+		}
+		for i := range b.Txs {
+			tx := &b.Txs[i]
+			if !isHistoryTransfer(tx) {
+				continue
+			}
+			cur := index
+			index++
+			if cur < start {
+				continue
+			}
+			if limit > 0 && len(out) >= limit {
+				// We have filled the page but must keep counting to return an
+				// accurate total, so continue the scan without appending.
+				continue
+			}
+			out = append(out, CommittedTransfer{
+				Index:     cur,
+				Height:    height,
+				From:      tx.SenderID(),
+				To:        tx.To,
+				Amount:    tx.Amount,
+				Nonce:     tx.Nonce,
+				Timestamp: tx.Timestamp,
+			})
+		}
+	}
+	return out, index, nil
+}
+
+// CommittedTransferAt returns the value transfer at the given zero-based index
+// in the committed consensus transfer history, or ErrHeightOutOfRange when no
+// such transfer exists. It is the single-record read behind `matrix tx get`.
+func (e *Engine) CommittedTransferAt(index uint64) (*CommittedTransfer, error) {
+	transfers, total, err := e.CommittedTransfers(index, 1)
+	if err != nil {
+		return nil, err
+	}
+	if len(transfers) == 0 {
+		return nil, fmt.Errorf("%w: %d (history holds %d transfers)", ErrHeightOutOfRange, index, total)
+	}
+	t := transfers[0]
+	return &t, nil
+}
+
 // Ledger returns the market ledger consensus applies committed transactions to.
 func (e *Engine) Ledger() *market.Ledger { return e.ledger }
 

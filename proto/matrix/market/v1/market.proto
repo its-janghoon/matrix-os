@@ -73,24 +73,30 @@ message Job {
     google.protobuf.Timestamp updated_at = 8;
 }
 
-// Transaction is a single settled, signed transfer recorded in the token chain.
+// Transaction is a single value transfer that consensus committed, read back
+// from the globally-agreed committed block chain. Native MATRIX transfers now
+// settle through consensus (a signed transfer is ordered and applied by a
+// quorum), so the transaction history is the ordered sequence of committed
+// transfers - the same on every node - rather than a per-node hash chain.
 message Transaction {
-    // Zero-based height (position) of the record in the chain.
-    uint64 height = 1;
+    // Stable zero-based position of this transfer in the consensus transfer
+    // history (block order, then transaction order within the block). It only
+    // grows and is identical on every node. Used as the index for
+    // GetTransaction and as the paging cursor for ListTransactions.
+    uint64 index = 1;
     // Sender account ID (hex-encoded ed25519 public key).
     string from = 2;
     // Recipient account ID.
     string to = 3;
-    // Amount transferred, in credits.
+    // Gross amount transferred, in credits, before any protocol fee.
     uint64 amount = 4;
-    // Per-sender monotonic nonce that provided replay protection.
+    // Per-sender transfer nonce (a uniquifier; consensus provides replay
+    // protection through its committed-transaction dedup set).
     uint64 nonce = 5;
-    // SHA-256 link hash of this record.
-    bytes hash = 6;
-    // Link hash of the previous record this transaction chained onto.
-    bytes prev_hash = 7;
-    // Advisory wall-clock time the transaction carried.
-    google.protobuf.Timestamp timestamp = 8;
+    // Committed block height the transfer landed in.
+    uint64 block_height = 6;
+    // Advisory wall-clock time the transfer carried.
+    google.protobuf.Timestamp timestamp = 7;
 }
 
 // RegisterProviderRequest advertises local compute capacity on the order book.
@@ -204,40 +210,52 @@ message GetBalanceResponse {
     uint64 balance = 2;
 }
 
-// GetTransactionRequest reads one settled transaction from the chain by height.
+// GetTransactionRequest reads one committed transfer from the consensus
+// transaction history by its stable index.
 message GetTransactionRequest {
-    // Zero-based chain height of the transaction to read.
-    uint64 height = 1;
+    // Zero-based index of the transfer in the consensus transaction history.
+    uint64 index = 1;
 }
 
-// GetTransactionResponse returns a single chain transaction.
+// GetTransactionResponse returns a single committed transfer.
 message GetTransactionResponse {
-    // The transaction recorded at the requested height.
+    // The transfer recorded at the requested index.
     Transaction transaction = 1;
 }
 
-// ListTransactionsRequest reads settled transactions from the chain in order.
+// ListTransactionsRequest reads committed transfers from the consensus
+// transaction history in order.
 message ListTransactionsRequest {
-    // Zero-based height to start from (inclusive).
-    uint64 start_height = 1;
-    // Maximum number of transactions to return. Zero means no explicit limit
-    // (the server may still cap the result).
+    // Zero-based index to start from (inclusive).
+    uint64 start_index = 1;
+    // Maximum number of transfers to return. Zero means no explicit limit (the
+    // server may still cap the result).
     uint64 limit = 2;
 }
 
-// ListTransactionsResponse returns settled transactions and the chain length.
+// ListTransactionsResponse returns committed transfers and the total count.
 message ListTransactionsResponse {
-    // Transactions in ascending height order.
+    // Transfers in ascending index (commit) order.
     repeated Transaction transactions = 1;
-    // Total number of records currently in the chain.
-    uint64 chain_length = 2;
+    // Total number of committed transfers in the consensus history.
+    uint64 total = 2;
 }
 
 // SubmitSignedTransferRequest carries a client-signed ed25519 transfer to be
-// verified and applied through the signed-settlement path. The signature must
-// cover the canonical serialization of the sender key, recipient, amount,
-// nonce, timestamp and prev_hash. prev_hash must equal the current chain head
-// (obtain it out of band via the most recent transaction / chain state).
+// ordered and settled through consensus. The signature must cover the canonical
+// serialization of the sender key, recipient, amount, nonce, timestamp and
+// prev_hash (the same signing bytes the wallet produces).
+//
+// The transfer now settles through consensus rather than a per-node signed
+// chain: it is submitted into the engine, a quorum orders it into a committed
+// block, and every node applies it deterministically to the shared ledger, so
+// two nodes agree on the resulting balances and the transfer is subject to the
+// protocol fee like every other committed transfer. Consensus provides replay
+// protection through its committed-transaction dedup set, so the nonce is a
+// per-sender uniquifier that keeps otherwise-identical transfers distinct; it no
+// longer has to equal a "next expected" value. prev_hash is no longer used for
+// ledger linkage and may be left empty; it is retained only so an existing
+// signature over the wallet's canonical payload still verifies.
 message SubmitSignedTransferRequest {
     // Sender's raw 32-byte ed25519 public key.
     bytes from_public_key = 1;
@@ -245,9 +263,11 @@ message SubmitSignedTransferRequest {
     string to = 2;
     // Amount to transfer, in credits.
     uint64 amount = 3;
-    // Per-sender monotonic nonce (must equal the sender's next expected nonce).
+    // Per-sender transfer nonce (a uniquifier; need only be distinct per
+    // sender, not "next expected").
     uint64 nonce = 4;
-    // Link hash of the current chain head this transfer chains onto.
+    // Retained only so a signature over the wallet's canonical payload still
+    // verifies; unused for consensus ledger linkage and may be empty.
     bytes prev_hash = 5;
     // ed25519 signature over the canonical transaction payload.
     bytes signature = 6;
@@ -255,10 +275,19 @@ message SubmitSignedTransferRequest {
     int64 timestamp = 7;
 }
 
-// SubmitSignedTransferResponse returns the settled transaction record.
+// SubmitSignedTransferResponse reports how a signed transfer settled through
+// consensus. The transfer field carries the settled transfer as it appears in
+// the committed history; committed/applied report the consensus outcome.
 message SubmitSignedTransferResponse {
-    // The settled transaction as recorded on the chain.
+    // The settled transfer, populated with its committed index and block height
+    // once it has committed.
     Transaction transaction = 1;
+    // Whether the transfer was ordered into a committed block.
+    bool committed = 2;
+    // Whether the transfer actually moved credits when applied. A committed but
+    // not-applied transfer was deterministically skipped as unaffordable at
+    // apply time, so no credits moved.
+    bool applied = 3;
 }
 
 // FundAccountRequest moves native MATRIX out of the genesis-allocated reward
@@ -329,23 +358,29 @@ service MarketService {
     // balance (zero for unknown accounts). No side effects.
     rpc GetBalance(GetBalanceRequest) returns (GetBalanceResponse) {}
 
-    // GetTransaction reads one settled transaction from the token chain by
-    // height. Input: chain height. Output: the transaction record. No side
-    // effects.
+    // GetTransaction reads one committed transfer from the consensus
+    // transaction history by its stable index. Input: transfer index. Output:
+    // the transfer record. No side effects. The history is the ordered sequence
+    // of committed transfers and is identical on every node.
     rpc GetTransaction(GetTransactionRequest) returns (GetTransactionResponse) {}
 
-    // ListTransactions reads settled transactions from the token chain in
-    // ascending height order. Input: start height and limit. Output: the
-    // transactions and the current chain length. No side effects.
+    // ListTransactions reads committed transfers from the consensus transaction
+    // history in ascending index (commit) order. Input: start index and limit.
+    // Output: the transfers and the total count. No side effects. Because it
+    // reads the committed block chain, two nodes return the identical sequence.
     rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse) {}
 
-    // SubmitSignedTransfer verifies and applies a client-signed ed25519 transfer
-    // through the signed-settlement path. Input: sender public key, recipient,
-    // amount, nonce, prev_hash, signature, and advisory timestamp. Output: the
-    // settled transaction record. Side effects: appends a record to the
-    // hash-chained transaction log and moves credits on the ledger atomically;
-    // rejects invalid signatures, wrong nonces, prev-hash mismatches, and
-    // unaffordable transfers without mutating any state.
+    // SubmitSignedTransfer orders and settles a client-signed ed25519 transfer
+    // through consensus. Input: sender public key, recipient, amount, nonce,
+    // prev_hash (unused for linkage), signature, and advisory timestamp. Output:
+    // the settled transfer plus its committed/applied outcome. Side effects: the
+    // signed transfer is submitted into consensus, ordered into a committed
+    // block by a quorum, and applied deterministically by every node to the
+    // shared ledger (subject to the protocol fee like every committed transfer).
+    // Rejects invalid signatures, an empty recipient, and self-transfers without
+    // mutating state; a transfer that commits but is unaffordable at apply time
+    // returns FailedPrecondition; a settlement that cannot be confirmed in time
+    // returns DeadlineExceeded.
     rpc SubmitSignedTransfer(SubmitSignedTransferRequest) returns (SubmitSignedTransferResponse) {}
 
     // FundAccount moves native MATRIX from the genesis-allocated reward pool to

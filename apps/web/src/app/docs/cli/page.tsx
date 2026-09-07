@@ -72,9 +72,9 @@ status:     completed
 units:      5
 completion: echo: user: one sentence about peer-to-peer compute`;
 
-const TX = `matrix tx list --limit 20      # ascending height order
+const TX = `matrix tx list --limit 20      # ascending commit order
 matrix tx list --start 10 --limit 20
-matrix tx get --height 3`;
+matrix tx get --index 3`;
 
 export default function MatrixCliDocs() {
   return (
@@ -184,15 +184,16 @@ export default function MatrixCliDocs() {
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Transactions</h2>
                   <CodeSample label='shell' code={TX} />
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
-                    <h3 className='mb-2 text-lg font-bold text-white'>What tx list does and does not show</h3>
+                    <h3 className='mb-2 text-lg font-bold text-white'>What tx list shows</h3>
                     <p className='mb-0 text-gray-100'>
-                      These read the signed-transfer chain, which is what{' '}
-                      <code className='text-white'>wallet transfer</code> and{' '}
-                      <code className='text-white'>SubmitSignedTransfer</code> append to. Job and inference
-                      settlements go through consensus and land in the committed block chain instead, so a node whose
-                      only activity was marketplace jobs reports{' '}
-                      <code className='text-white'>chain length: 0</code> here while balances have plainly moved. Use{' '}
-                      <code className='text-white'>matrix balance</code> to see settlement.
+                      These read the consensus transaction history: the ordered sequence of value transfers that
+                      committed blocks carried. A{' '}
+                      <code className='text-white'>wallet transfer</code>,{' '}
+                      <code className='text-white'>SubmitSignedTransfer</code>, and the buyer-to-provider payment
+                      behind a compute or inference settlement all settle through consensus, so they all appear here
+                      in commit order. Because the history comes from the committed block chain, two nodes list the
+                      same transfers in the same order. Reserved consensus operations (bonds, withdrawals, validator
+                      set changes) are protocol state, not transfers, so they are omitted.
                     </p>
                   </div>
 

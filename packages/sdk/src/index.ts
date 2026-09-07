@@ -108,16 +108,37 @@ export interface Job {
   updatedAt: string;
 }
 
+/**
+ * A committed value transfer read back from the consensus transaction history.
+ *
+ * Native MATRIX transfers settle through consensus now: a signed transfer is
+ * ordered and applied by a quorum, so the history is the ordered sequence of
+ * committed transfers (the same on every node) rather than a per-node hash
+ * chain. `index` is the transfer's stable position in that sequence and
+ * `blockHeight` is the committed block it landed in.
+ */
 export interface Transaction {
-  height: bigint;
+  /** Stable zero-based position in the consensus transaction history. */
+  index: bigint;
   from: string;
   to: string;
+  /** Gross amount, before any protocol fee. */
   amount: bigint;
+  /** Per-sender uniquifier (consensus dedups committed transfers for replay). */
   nonce: bigint;
-  /** Base64. */
-  hash: string;
-  prevHash: string;
+  /** Committed block height the transfer landed in. */
+  blockHeight: bigint;
   timestamp: string;
+}
+
+/** The outcome of settling a signed transfer through consensus. */
+export interface SettledTransfer {
+  /** The settled transfer, with its committed index and block height. */
+  transaction: Transaction;
+  /** Whether the transfer was ordered into a committed block. */
+  committed: boolean;
+  /** Whether the transfer actually moved credits (false = skipped as unaffordable). */
+  applied: boolean;
 }
 
 export interface Balance {
@@ -191,13 +212,12 @@ function decodeJob(raw: Record<string, unknown>): Job {
 
 function decodeTransaction(raw: Record<string, unknown>): Transaction {
   return {
-    height: big(raw.height),
+    index: big(raw.index),
     from: str(raw.from),
     to: str(raw.to),
     amount: big(raw.amount),
     nonce: big(raw.nonce),
-    hash: str(raw.hash),
-    prevHash: str(raw.prevHash),
+    blockHeight: big(raw.blockHeight),
     timestamp: str(raw.timestamp),
   };
 }
@@ -336,29 +356,46 @@ export class MatrixClient {
     return { account: str(out.account), balance: big(out.balance) };
   }
 
-  async getTransaction(height: bigint | number): Promise<Transaction> {
-    const out = await this.call(MARKET, 'GetTransaction', { height: String(height) });
+  /** Read one committed transfer from the consensus history by its index. */
+  async getTransaction(index: bigint | number): Promise<Transaction> {
+    const out = await this.call(MARKET, 'GetTransaction', { index: String(index) });
     return decodeTransaction(record(out.transaction));
   }
 
+  /**
+   * List committed transfers from the consensus transaction history in
+   * ascending index (commit) order. `total` is the number of committed
+   * transfers; two nodes return the identical sequence.
+   */
   async listTransactions(
-    input: { startHeight?: bigint | number; limit?: bigint | number } = {},
-  ): Promise<{ transactions: Transaction[]; chainLength: bigint }> {
+    input: { startIndex?: bigint | number; limit?: bigint | number } = {},
+  ): Promise<{ transactions: Transaction[]; total: bigint }> {
     const out = await this.call(MARKET, 'ListTransactions', {
-      startHeight: String(input.startHeight ?? 0),
+      startIndex: String(input.startIndex ?? 0),
       limit: String(input.limit ?? 0),
     });
     return {
       transactions: list(out.transactions).map(decodeTransaction),
-      chainLength: big(out.chainLength),
+      total: big(out.total),
     };
   }
 
   /**
-   * Broadcast a transfer signed by the sender's ed25519 key.
+   * Broadcast a transfer signed by the sender's ed25519 key. It settles through
+   * consensus: the signed transfer is ordered into a committed block by a quorum
+   * and applied by every node, so all nodes agree on the resulting balances and
+   * it pays the protocol fee (when configured) like every other committed
+   * transfer.
    *
    * The node verifies the signature; it never sees a private key. Sign with
-   * whatever ed25519 implementation you already trust and pass the bytes.
+   * whatever ed25519 implementation you already trust and pass the bytes. The
+   * nonce is a per-sender uniquifier (consensus dedups committed transfers for
+   * replay protection); prevHash is unused for linkage and may be empty, though
+   * it must match what the signature covers.
+   *
+   * The returned SettledTransfer reports whether the transfer committed and
+   * applied; a committed-but-unaffordable transfer surfaces as a
+   * FailedPrecondition error rather than a successful result.
    */
   async submitSignedTransfer(input: {
     fromPublicKey: Uint8Array;
@@ -368,7 +405,7 @@ export class MatrixClient {
     prevHash: Uint8Array;
     signature: Uint8Array;
     timestamp?: bigint | number;
-  }): Promise<Transaction> {
+  }): Promise<SettledTransfer> {
     const out = await this.call(MARKET, 'SubmitSignedTransfer', {
       fromPublicKey: toBase64(input.fromPublicKey),
       to: input.to,
@@ -378,7 +415,11 @@ export class MatrixClient {
       signature: toBase64(input.signature),
       timestamp: String(input.timestamp ?? 0),
     });
-    return decodeTransaction(record(out.transaction));
+    return {
+      transaction: decodeTransaction(record(out.transaction)),
+      committed: out.committed === true,
+      applied: out.applied === true,
+    };
   }
 
   /**

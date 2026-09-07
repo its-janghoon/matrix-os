@@ -9,7 +9,7 @@ import (
 func newTxCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "tx",
-		Short: "Inspect settled transactions on the token chain",
+		Short: "Inspect committed transfers in the consensus transaction history",
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(
@@ -20,10 +20,10 @@ func newTxCommand(opts *globalOptions) *cobra.Command {
 }
 
 func newTxGetCommand(opts *globalOptions) *cobra.Command {
-	var height uint64
+	var index uint64
 	cmd := &cobra.Command{
 		Use:   "get",
-		Short: "Read a single transaction by chain height",
+		Short: "Read a single committed transfer by its history index",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := dial(opts)
@@ -34,14 +34,14 @@ func newTxGetCommand(opts *globalOptions) *cobra.Command {
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
 
-			resp, err := cc.market.GetTransaction(ctx, &marketv1.GetTransactionRequest{Height: height})
+			resp, err := cc.market.GetTransaction(ctx, &marketv1.GetTransactionRequest{Index: index})
 			if err != nil {
 				return mapErr(opts.Addr, err)
 			}
 			return printTransaction(cmd.OutOrStdout(), opts.JSON, resp.GetTransaction())
 		},
 	}
-	cmd.Flags().Uint64Var(&height, "height", 0, "zero-based chain height to read")
+	cmd.Flags().Uint64Var(&index, "index", 0, "zero-based index in the consensus transaction history")
 	return cmd
 }
 
@@ -52,7 +52,7 @@ func newTxListCommand(opts *globalOptions) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "list",
-		Short: "List settled transactions in ascending height order",
+		Short: "List committed transfers in ascending index (commit) order",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := dial(opts)
@@ -64,16 +64,16 @@ func newTxListCommand(opts *globalOptions) *cobra.Command {
 			defer cancel()
 
 			resp, err := cc.market.ListTransactions(ctx, &marketv1.ListTransactionsRequest{
-				StartHeight: start,
-				Limit:       limit,
+				StartIndex: start,
+				Limit:      limit,
 			})
 			if err != nil {
 				return mapErr(opts.Addr, err)
 			}
-			return printTransactions(cmd.OutOrStdout(), opts.JSON, resp.GetTransactions(), resp.GetChainLength())
+			return printTransactions(cmd.OutOrStdout(), opts.JSON, resp.GetTransactions(), resp.GetTotal())
 		},
 	}
-	cmd.Flags().Uint64Var(&start, "start", 0, "start height (inclusive)")
-	cmd.Flags().Uint64Var(&limit, "limit", 0, "maximum number of transactions to return (0 = no limit)")
+	cmd.Flags().Uint64Var(&start, "start", 0, "start index (inclusive)")
+	cmd.Flags().Uint64Var(&limit, "limit", 0, "maximum number of transfers to return (0 = no limit)")
 	return cmd
 }

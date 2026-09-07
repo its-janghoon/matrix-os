@@ -439,10 +439,15 @@ func Initialize(configPath string) error {
 	// MATRIX before it could validate anything. The section is written so the
 	// knobs are visible.
 	config.Consensus.Stake = StakeConfig{Enabled: false}
-	// No fee in a generated config. What a network charges is a policy decision
-	// about who pays for validating, and a node that quietly took a cut of every
-	// transfer because that was the default would be the wrong surprise.
-	config.Consensus.FeeBasisPoints = 0
+	// Protocol fee set to 100 basis points (1%) in a generated config, which is
+	// the code cap (consensus.MaxFeeBasisPoints). This is the operator's explicit
+	// monetary-policy decision for this network, recorded here so a freshly
+	// initialized node charges the agreed rate; it is taken from every committed
+	// value transfer and paid to the validator set pro rata by voting power. An
+	// operator who wants a different rate (including 0, no fee) edits
+	// consensus.fee_basis_points; the engine still refuses any value above the
+	// cap at startup rather than silently clamping it.
+	config.Consensus.FeeBasisPoints = consensus.MaxFeeBasisPoints
 	// And no provider emission. Both are monetary policy, and a node that
 	// started paying out the genesis pool because that was the default would be
 	// making that policy on the operator's behalf.
@@ -887,15 +892,31 @@ func (n *Node) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to build the compute settlement coordinator: %w", err)
 	}
+	// External, client-signed value transfers (SubmitSignedTransfer /
+	// `matrix wallet transfer`) settle through the SAME consensus engine now,
+	// instead of token.SettledLedger.Settle. Before this, that path appended to
+	// the per-node token.Chain and moved credits on one node ordered by no
+	// quorum, so balances could diverge between nodes and the transfer escaped
+	// the protocol fee. Routing it through consensus makes the resulting balances
+	// a deterministic function of committed blocks (every node agrees) and
+	// subjects the transfer to the default-off fee like every other committed
+	// transfer. The coordinator also backs the GetTransaction/ListTransactions
+	// history with the committed block chain, so `matrix tx list` shows the same
+	// ordered transfers on every node.
+	transferCoordinator, err := NewTransferSettlementCoordinator(n.consensus)
+	if err != nil {
+		return fmt.Errorf("failed to build the transfer settlement coordinator: %w", err)
+	}
 	marketServer, err := marketapi.NewServer(marketapi.Config{
-		Addr:     n.config.Market.Addr,
-		Auth:     marketAuth,
-		Market:   n.market,
-		Settled:  marketSettled,
-		Chain:    n.tokenChain,
-		Exchange: n.exchange,
-		Funder:   n.treasury,
-		Settler:  settlementCoordinator,
+		Addr:            n.config.Market.Addr,
+		Auth:            marketAuth,
+		Market:          n.market,
+		Settled:         marketSettled,
+		Chain:           n.tokenChain,
+		Exchange:        n.exchange,
+		Funder:          n.treasury,
+		Settler:         settlementCoordinator,
+		TransferSettler: transferCoordinator,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)

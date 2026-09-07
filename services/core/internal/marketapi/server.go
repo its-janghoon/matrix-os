@@ -62,6 +62,13 @@ type Service struct {
 	// settler, when non-nil, settles CompleteJob through consensus instead of by
 	// a direct ledger transfer. See the JobSettler doc for why that matters.
 	settler JobSettler
+	// transferSettler, when non-nil, settles SubmitSignedTransfer through
+	// consensus and backs the GetTransaction/ListTransactions history with the
+	// committed block chain. See the TransferSettler doc. When nil (a Service
+	// with no consensus engine behind it - tests, a library caller wiring the
+	// market on its own), SubmitSignedTransfer falls back to the per-node
+	// token.SettledLedger path and the history RPCs read the token.Chain.
+	transferSettler TransferSettler
 	// authEnforced reports whether the server in front of this Service requires
 	// authentication on every mutating RPC. FundAccount refuses to run when it is
 	// false: unlike SubmitSignedTransfer, a funding request carries no per-request
@@ -91,6 +98,73 @@ func NewService(m *market.Market, settled *token.SettledLedger, chain *token.Cha
 	return &Service{market: m, settled: settled, chain: chain, exchange: exchange, funder: funder}, nil
 }
 
+// TransferView is a single committed value transfer read back from the
+// consensus transaction history. It is the marketapi-facing shape of a
+// consensus.CommittedTransfer, declared here (consumer side) so the market API
+// does not import internal/consensus (which would risk an import cycle through
+// internal/node) and tests can build one directly. It backs the Transaction the
+// GetTransaction/ListTransactions RPCs return now that value transfers settle
+// through consensus rather than the per-node token.Chain.
+type TransferView struct {
+	// Index is the transfer's stable zero-based position in the consensus
+	// transaction history (identical on every node).
+	Index uint64
+	// From is the sender account ID.
+	From string
+	// To is the recipient account ID.
+	To string
+	// Amount is the gross amount transferred, before any protocol fee.
+	Amount uint64
+	// Nonce is the sender's per-transfer uniquifier.
+	Nonce uint64
+	// BlockHeight is the committed block height the transfer landed in.
+	BlockHeight uint64
+	// Timestamp is the advisory wall-clock time (unix nanoseconds) the transfer
+	// carried.
+	Timestamp int64
+}
+
+// SettledTransferResult reports how a signed transfer settled through consensus.
+// It is the marketapi-facing result of TransferSettler.SettleSignedTransfer,
+// declared here for the same reason as TransferView.
+type SettledTransferResult struct {
+	// Transfer is the settled transfer's view (its committed index and block
+	// height are populated once it has committed and applied).
+	Transfer TransferView
+	// Committed reports whether the transfer was ordered into a committed block.
+	Committed bool
+	// Applied reports whether the transfer actually moved credits.
+	Applied bool
+}
+
+// TransferSettler settles an external, client-signed value transfer through
+// consensus and exposes the committed transaction history.
+//
+// It exists because SubmitSignedTransfer used to move native MATRIX through
+// token.SettledLedger.Settle: that appended to the per-node token.Chain and
+// moved credits on one node, ordered by no quorum, so balances could diverge
+// between nodes and the transfer escaped the protocol fee. Settling through
+// consensus fixes both - a quorum orders the signed transfer into a committed
+// block and every node applies it deterministically (taking the default-off
+// fee) - and makes the transaction history the same ordered sequence on every
+// node.
+//
+// It is satisfied by node.TransferSettlementCoordinator.
+type TransferSettler interface {
+	// SettleSignedTransfer verifies the signed transfer (signature, sender authZ,
+	// non-empty recipient, no self-transfer), submits it into consensus, and
+	// waits bounded for it to commit and apply. A committed-but-unaffordable
+	// transfer is reported as an error wrapping a precondition failure; a
+	// settlement that cannot be confirmed in time returns a context error.
+	SettleSignedTransfer(ctx context.Context, tx *token.Transaction) (*SettledTransferResult, error)
+	// History returns committed transfers in globally-agreed order for
+	// ListTransactions.
+	History(start uint64, limit int) ([]TransferView, uint64, error)
+	// TransferAt returns a single committed transfer by index for
+	// GetTransaction.
+	TransferAt(index uint64) (*TransferView, error)
+}
+
 // JobSettler settles a compute job through consensus and finalizes it.
 //
 // It exists because CompleteJob used to charge the buyer with a direct
@@ -113,6 +187,15 @@ type JobSettler interface {
 // transfer, which is only appropriate for a Service with no consensus engine
 // behind it (tests, and a library caller wiring the market on its own).
 func (s *Service) SetJobSettler(settler JobSettler) { s.settler = settler }
+
+// SetTransferSettler installs the consensus settlement path for
+// SubmitSignedTransfer and the consensus-backed transaction history. It is
+// called once during construction, before the server serves, so no locking is
+// needed. With no transfer settler installed SubmitSignedTransfer falls back to
+// the per-node token.SettledLedger path and the history RPCs read the
+// token.Chain, which is only appropriate for a Service with no consensus engine
+// behind it.
+func (s *Service) SetTransferSettler(settler TransferSettler) { s.transferSettler = settler }
 
 // SetAuthEnforced records whether the server hosting this Service requires
 // authentication on every mutating RPC. It is set by NewServer from cfg.Auth and
@@ -153,6 +236,11 @@ type Config struct {
 	// than by a direct ledger transfer. A node with a consensus engine must set
 	// it; see the JobSettler doc.
 	Settler JobSettler
+	// TransferSettler, when non-nil, makes SubmitSignedTransfer settle through
+	// consensus and backs the transaction-history RPCs with the committed block
+	// chain. A node with a consensus engine must set it; see the TransferSettler
+	// doc.
+	TransferSettler TransferSettler
 }
 
 // NewServer builds a market gRPC server. It installs the admin auth
@@ -167,6 +255,7 @@ func NewServer(cfg Config) (*Server, error) {
 	// (unsigned, unlike SubmitSignedTransfer) refuses to run without it.
 	svc.SetAuthEnforced(cfg.Auth != nil)
 	svc.SetJobSettler(cfg.Settler)
+	svc.SetTransferSettler(cfg.TransferSettler)
 
 	var opts []grpc.ServerOption
 	if cfg.Auth != nil {
@@ -299,6 +388,26 @@ func mapMarketError(err error) error {
 	default:
 		return status.Error(codes.Internal, err.Error())
 	}
+}
+
+// ErrTransferNotFound is returned by a TransferSettler's history reads when the
+// requested transfer index does not exist. It is declared here (consumer side)
+// so mapTransferHistoryError can map it to codes.NotFound without importing the
+// consensus package; the node coordinator wraps it around consensus's own
+// out-of-range error.
+var ErrTransferNotFound = errors.New("marketapi: transaction not found")
+
+// mapTransferHistoryError maps a consensus-history read failure to a gRPC
+// status. A missing index is NotFound; anything else is Internal so an
+// unexpected failure is not masked as benign.
+func mapTransferHistoryError(err error) error {
+	if err == nil {
+		return nil
+	}
+	if errors.Is(err, ErrTransferNotFound) {
+		return status.Error(codes.NotFound, err.Error())
+	}
+	return status.Error(codes.Internal, err.Error())
 }
 
 // mapSettlementError turns a consensus-settlement failure into a gRPC status.
