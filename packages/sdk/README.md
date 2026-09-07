@@ -23,6 +23,36 @@ rides on HTTP/2 trailers no browser can produce, which is why that endpoint
 exists and why this client works from a browser, a dApp front end, Node, Deno,
 Bun or a WebView. It has no dependencies.
 
+### If all you want is chat completions
+
+The same node also serves the OpenAI protocol at `/v1/chat/completions` and
+`/v1/models`, so for LLM inference alone you do not need this SDK at all - point
+the `openai` package at the node and change nothing else:
+
+```ts
+import OpenAI from 'openai';
+
+const client = new OpenAI({
+  baseURL: 'http://127.0.0.1:9093/v1', // your node, or any node
+  apiKey: process.env.MATRIX_API_KEY,
+});
+
+const r = await client.chat.completions.create({
+  model: 'llama-3.3-70b',
+  messages: [{ role: 'user', content: 'hello' }],
+});
+```
+
+That route needs an API key whose `account` is set (under
+`security.api_keys`), because the OpenAI protocol carries no buyer field and the
+key is the only thing that can say whose on-chain balance to charge. The request
+names a model, not a provider: it is routed to the cheapest provider advertising
+that model with capacity to spare. Streaming is not supported yet and a
+`stream: true` request is refused rather than answered with one whole body.
+
+Use this SDK when you need the marketplace itself - registering providers,
+submitting and inspecting jobs, balances, signed transfers, agents.
+
 ## Use
 
 ```ts

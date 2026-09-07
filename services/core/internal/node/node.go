@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,6 +26,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/marketexchange"
 	"github.com/ecirlabs/matrix-core/internal/matrix"
 	"github.com/ecirlabs/matrix-core/internal/metrics"
+	"github.com/ecirlabs/matrix-core/internal/openaiapi"
 	"github.com/ecirlabs/matrix-core/internal/p2p"
 	"github.com/ecirlabs/matrix-core/internal/soul"
 	"github.com/ecirlabs/matrix-core/internal/token"
@@ -32,6 +34,7 @@ import (
 	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
+	"google.golang.org/grpc/metadata"
 	"gopkg.in/yaml.v3"
 )
 
@@ -303,6 +306,15 @@ type APIKeyConfig struct {
 	Key  string `yaml:"key"`
 	Role string `yaml:"role"`
 	Name string `yaml:"name"`
+	// Account is the on-chain account this key spends from. It is what makes the
+	// OpenAI-compatible route usable: that protocol identifies the caller by the
+	// key alone and carries no buyer field, so the key has to say whose balance
+	// to charge. The balance stays on the ledger - this is a proof of account
+	// ownership, not a stored credit balance - and the node must hold that
+	// account's signing key to settle for it (an in-memory registration or a
+	// wallet file under its wallet directory). A key with no account can drive
+	// every other surface but cannot buy inference over /v1/chat/completions.
+	Account string `yaml:"account"`
 }
 
 // AgentConfig configures the external agent-deployment gRPC API and its
@@ -458,6 +470,41 @@ func connectAuth(auth *admin.Authenticator) connectapi.Authenticator {
 type authenticatorFunc func(ctx context.Context) (string, error)
 
 func (f authenticatorFunc) Authenticate(ctx context.Context) (string, error) { return f(ctx) }
+
+// openAIAuth adapts the node's API-key authenticator to the OpenAI-compatible
+// route, which needs the account a key spends from rather than only its role.
+// A nil authenticator returns nil, and openaiapi refuses every request in that
+// case: a route that charges an account must not fall back to guessing whose
+// money to spend.
+func openAIAuth(auth *admin.Authenticator) openaiapi.Authenticator {
+	if auth == nil {
+		return nil
+	}
+	return accountResolverFunc(func(r *http.Request) (string, error) {
+		// The admin authenticator reads the credential from gRPC metadata, which
+		// is how one key policy covers the gRPC and HTTP surfaces both. Reuse it
+		// by presenting the request headers in that form.
+		ctx := metadata.NewIncomingContext(r.Context(), metadataFromHTTPHeader(r.Header))
+		key, err := auth.AuthenticateKey(ctx)
+		if err != nil {
+			return "", err
+		}
+		return key.Account, nil
+	})
+}
+
+type accountResolverFunc func(r *http.Request) (string, error)
+
+func (f accountResolverFunc) AccountFor(r *http.Request) (string, error) { return f(r) }
+
+// metadataFromHTTPHeader lowercases HTTP header names into gRPC metadata keys.
+func metadataFromHTTPHeader(h http.Header) metadata.MD {
+	md := metadata.MD{}
+	for key, values := range h {
+		md[strings.ToLower(key)] = append([]string(nil), values...)
+	}
+	return md
+}
 
 // Node represents a Matrix node instance
 type Node struct {
@@ -949,9 +996,10 @@ func (n *Node) Start() error {
 				name = fmt.Sprintf("config-key-%d", i)
 			}
 			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:  k.Key,
-				Role: roleFromConfig(k.Role),
-				Name: name,
+				Key:     k.Key,
+				Role:    roleFromConfig(k.Role),
+				Name:    name,
+				Account: k.Account,
 			})
 		}
 		// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
@@ -1253,12 +1301,27 @@ func (n *Node) Start() error {
 	// serves both surfaces, so they cannot drift, and the same authenticator
 	// gates both when ACLs are enabled.
 	if addr := n.config.Connect.Addr; addr != "" && addr != "off" {
+		// The OpenAI-compatible route rides this same endpoint rather than taking
+		// a port of its own: it is HTTP/JSON for the same node, so it should share
+		// one listener, one origin list and one API-key policy. It authenticates
+		// itself because it needs the ACCOUNT a key spends from, which the
+		// blanket role check on the Connect methods does not resolve.
+		openAI, err := openaiapi.NewHandler(openaiapi.Config{
+			Inference: n.inferenceSvc,
+			Router:    n.market,
+			Auth:      openAIAuth(marketAuth),
+		})
+		if err != nil {
+			return fmt.Errorf("failed to build the OpenAI-compatible handler: %w", err)
+		}
+
 		connectServer, err := connectapi.NewServer(addr, connectapi.Config{
 			Bindings: []connectapi.Binding{
 				{Desc: &marketv1.MarketService_ServiceDesc, Impl: n.marketServer.Service()},
 				{Desc: &inferencev1.InferenceService_ServiceDesc, Impl: n.inferenceServer.Service()},
 				{Desc: &agentv1.AgentService_ServiceDesc, Impl: n.agentServer.Service()},
 			},
+			ExtraRoutes:    openAI.Routes(),
 			Auth:           connectAuth(marketAuth),
 			AllowedOrigins: n.config.Connect.AllowedOrigins,
 		})

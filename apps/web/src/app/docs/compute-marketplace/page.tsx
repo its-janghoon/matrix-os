@@ -109,6 +109,55 @@ export default function ComputeMarketplaceDocs() {
                     </p>
                   </div>
 
+                  {/* OpenAI-compatible */}
+                  <h2 className='text-3xl font-bold text-white mt-12 mb-6'>The OpenAI-compatible route</h2>
+                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      A node serves <code>POST /v1/chat/completions</code> and <code>GET /v1/models</code> on its
+                      HTTP endpoint (port 9093 by default), so reaching the marketplace is a one-line change:
+                    </p>
+                    <pre className='bg-black/50 rounded-lg p-4 overflow-x-auto text-sm text-gray-100 mb-4'>
+                      <code>{`from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:9093/v1",   # your node, or any node
+    api_key="<your matrix api key>",
+)
+
+r = client.chat.completions.create(
+    model="llama-3.3-70b",
+    messages=[{"role": "user", "content": "hello"}],
+)`}</code>
+                    </pre>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      Three things the OpenAI protocol does not carry, and where they come from here:
+                    </p>
+                    <ul className='text-gray-100 space-y-2 list-disc pl-6'>
+                      <li>
+                        <strong>Who pays</strong> - the API key. OpenAI identifies the caller by the key alone, so the
+                        key names the on-chain account to charge (<code>account</code> under{' '}
+                        <code>security.api_keys</code>). The balance stays on the ledger; the key is a proof of account
+                        ownership, not a stored credit balance. A key with no account cannot buy inference.
+                      </li>
+                      <li>
+                        <strong>Which provider</strong> - the model. The request is routed to the cheapest provider
+                        advertising that model with capacity to spare, ties breaking on provider id so two identical
+                        requests do not scatter at random. The response adds a <code>provider</code> field naming who
+                        served it, which an SDK ignores.
+                      </li>
+                      <li>
+                        <strong>How much to reserve</strong> - an upfront estimate from the request. The settled charge
+                        comes from the tokens the backend actually reported, so the estimate decides the reservation
+                        and never the price.
+                      </li>
+                    </ul>
+                    <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
+                      Not supported yet: streaming. A request with <code>&quot;stream&quot;: true</code> is refused
+                      rather than answered with one whole body, because a client expecting SSE frames would fail in a
+                      way that looks like a broken server.
+                    </p>
+                  </div>
+
                   {/* Console */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Matrix Console</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>

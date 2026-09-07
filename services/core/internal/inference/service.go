@@ -86,6 +86,13 @@ type InferenceJob struct {
 	Completion string
 	// Units is the billed units (== settled token amount), set once fulfilled.
 	Units uint64
+	// Usage is the token accounting the backend reported, set once fulfilled. It
+	// is kept alongside Units because the two answer different questions: Units
+	// is what the buyer paid (billable units scaled by the provider's price and
+	// clamped to the reservation), while Usage is how much work was done. An
+	// OpenAI-compatible response has to report the token counts, and a caller
+	// checking a bill needs both numbers to see how one became the other.
+	Usage Usage
 	// Model is the model that produced the completion.
 	Model string
 	// CreatedAt / UpdatedAt track timing.
@@ -318,6 +325,7 @@ func (s *Service) FulfillJob(ctx context.Context, jobID string) (*InferenceJob, 
 	job.Status = InferenceJobSettling
 	job.Completion = resp.Completion
 	job.Units = amount
+	job.Usage = resp.Usage
 	job.Model = resp.Model
 	job.UpdatedAt = time.Now().UTC()
 	s.mu.Unlock()

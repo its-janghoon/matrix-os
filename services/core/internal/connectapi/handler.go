@@ -75,6 +75,13 @@ type Config struct {
 	// Authorization header and is passed through to the authenticator as gRPC
 	// incoming metadata, so one policy covers both surfaces.
 	Auth Authenticator
+	// ExtraRoutes are additional exact paths served on the same mux, so a surface
+	// that is not a gRPC service - the OpenAI-compatible /v1/chat/completions -
+	// shares this endpoint's listener and CORS policy instead of needing a port
+	// and an origin list of its own. Each handler applies its own
+	// authentication, because the policy that fits a protocol-shaped route is
+	// not always the blanket "a valid key on every method" this handler applies.
+	ExtraRoutes map[string]http.Handler
 	// AllowedOrigins lists the browser origins allowed to call this endpoint.
 	// A single "*" allows any origin, which is the right default for a local
 	// daemon a user's own page talks to and the wrong one for a public
@@ -116,6 +123,16 @@ func NewHandler(cfg Config) (http.Handler, error) {
 				auth:       cfg.Auth,
 			})
 		}
+	}
+
+	for path, h := range cfg.ExtraRoutes {
+		if path == "" || h == nil {
+			return nil, errors.New("connectapi: an extra route needs both a path and a handler")
+		}
+		if !strings.HasPrefix(path, "/") {
+			return nil, fmt.Errorf("connectapi: extra route %q must start with /", path)
+		}
+		mux.Handle(path, h)
 	}
 
 	// A liveness probe that needs no protocol knowledge, so an operator (or a

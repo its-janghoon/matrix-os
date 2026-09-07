@@ -61,6 +61,15 @@ func jobToProto(j *inference.InferenceJob) *inferencev1.InferenceJob {
 	if !j.UpdatedAt.IsZero() {
 		pj.UpdatedAt = timestamppb.New(j.UpdatedAt)
 	}
+	// Left nil until the job has been fulfilled, so a caller can tell "no tokens
+	// reported yet" from "reported zero".
+	if j.Usage != (inference.Usage{}) {
+		pj.Usage = &inferencev1.TokenUsage{
+			PromptTokens:     uint32(j.Usage.PromptTokens),
+			CompletionTokens: uint32(j.Usage.CompletionTokens),
+			TotalTokens:      uint32(j.Usage.TotalTokens),
+		}
+	}
 	return pj
 }
 

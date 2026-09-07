@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"google.golang.org/grpc/metadata"
@@ -416,5 +417,81 @@ func TestLogsService_Authorization(t *testing.T) {
 				t.Errorf("GetLogs() len = %v, want %v", len(logs), tt.wantLen)
 			}
 		})
+	}
+}
+
+// TestAuthenticateKeyReturnsTheAccountAKeySpendsFrom covers what the
+// OpenAI-compatible route needs: that protocol carries no buyer field, so the
+// credential is the only thing that can say whose balance to charge.
+func TestAuthenticateKeyReturnsTheAccountAKeySpendsFrom(t *testing.T) {
+	auth := NewAuthenticator()
+	if err := auth.AddKey(&APIKey{Key: "k1", Role: RoleAdmin, Name: "n", Account: "acct-1"}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "Bearer k1"))
+
+	key, err := auth.AuthenticateKey(ctx)
+	if err != nil {
+		t.Fatalf("AuthenticateKey: %v", err)
+	}
+	if key.Account != "acct-1" {
+		t.Fatalf("Account = %q, want acct-1", key.Account)
+	}
+	if key.Role != RoleAdmin {
+		t.Fatalf("Role = %q, want admin", key.Role)
+	}
+}
+
+// TestAuthenticateKeyReturnsACopy: a caller must not be able to reach into the
+// authenticator's own record and edit the account a key spends from.
+func TestAuthenticateKeyReturnsACopy(t *testing.T) {
+	auth := NewAuthenticator()
+	if err := auth.AddKey(&APIKey{Key: "k1", Role: RoleViewer, Account: "acct-1"}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "k1"))
+
+	got, err := auth.AuthenticateKey(ctx)
+	if err != nil {
+		t.Fatalf("AuthenticateKey: %v", err)
+	}
+	got.Account = "acct-attacker"
+
+	again, err := auth.AuthenticateKey(ctx)
+	if err != nil {
+		t.Fatalf("AuthenticateKey: %v", err)
+	}
+	if again.Account != "acct-1" {
+		t.Fatalf("Account = %q after a caller mutated its copy, want acct-1", again.Account)
+	}
+}
+
+func TestAKeyWithNoAccountAuthenticatesButNamesNone(t *testing.T) {
+	auth := NewAuthenticator()
+	if err := auth.AddKey(&APIKey{Key: "k1", Role: RoleAdmin}); err != nil {
+		t.Fatalf("AddKey: %v", err)
+	}
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "k1"))
+
+	key, err := auth.AuthenticateKey(ctx)
+	if err != nil {
+		t.Fatalf("AuthenticateKey: %v", err)
+	}
+	if key.Account != "" {
+		t.Fatalf("Account = %q, want empty", key.Account)
+	}
+}
+
+func TestAuthenticateKeyRefusesAnUnknownCredential(t *testing.T) {
+	auth := NewAuthenticator()
+	ctx := metadata.NewIncomingContext(context.Background(),
+		metadata.Pairs("authorization", "Bearer nope"))
+
+	if _, err := auth.AuthenticateKey(ctx); !errors.Is(err, ErrUnauthorized) {
+		t.Fatalf("err = %v, want ErrUnauthorized", err)
 	}
 }

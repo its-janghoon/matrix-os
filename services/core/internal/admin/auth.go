@@ -71,6 +71,13 @@ type APIKey struct {
 	Key  string
 	Role Role
 	Name string
+	// Account is the on-chain account this key spends from, empty when the key
+	// is not tied to one. It is what lets a surface with no buyer field in its
+	// request - the OpenAI-compatible route, where OpenAI's own API identifies
+	// the caller by the key alone - know whose balance to charge. The balance
+	// itself lives on the ledger, so the key is a proof of account ownership and
+	// not a stored credit balance.
+	Account string
 }
 
 // Authenticator handles authentication and authorization
@@ -111,15 +118,28 @@ func (a *Authenticator) RemoveKey(key string) {
 
 // Authenticate validates an API key and returns the associated role
 func (a *Authenticator) Authenticate(ctx context.Context) (Role, error) {
+	key, err := a.AuthenticateKey(ctx)
+	if err != nil {
+		return "", err
+	}
+	return key.Role, nil
+}
+
+// AuthenticateKey validates an API key and returns a copy of the whole
+// credential, so a caller that needs more than the role - the account the key
+// spends from, or its name for a log line - gets it from the same lookup rather
+// than a second one that could race a RemoveKey. The returned value is a copy:
+// a caller cannot reach into the authenticator's own record.
+func (a *Authenticator) AuthenticateKey(ctx context.Context) (APIKey, error) {
 	md, ok := metadata.FromIncomingContext(ctx)
 	if !ok {
-		return "", ErrUnauthorized
+		return APIKey{}, ErrUnauthorized
 	}
 
 	// Extract API key from metadata
 	apiKeys := md.Get("authorization")
 	if len(apiKeys) == 0 {
-		return "", ErrUnauthorized
+		return APIKey{}, ErrUnauthorized
 	}
 
 	// Support "Bearer <token>" or just the token
@@ -133,15 +153,15 @@ func (a *Authenticator) Authenticate(ctx context.Context) (Role, error) {
 
 	key, exists := a.keys[apiKey]
 	if !exists {
-		return "", ErrUnauthorized
+		return APIKey{}, ErrUnauthorized
 	}
 
 	// Use constant-time comparison to prevent timing attacks
 	if subtle.ConstantTimeCompare([]byte(apiKey), []byte(key.Key)) != 1 {
-		return "", ErrUnauthorized
+		return APIKey{}, ErrUnauthorized
 	}
 
-	return key.Role, nil
+	return *key, nil
 }
 
 // Authorize checks if a role has the required permission

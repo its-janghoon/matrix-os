@@ -49,6 +49,21 @@ message ChatMessage {
     string content = 2;
 }
 
+// TokenUsage is the token accounting a provider's backend reported for a
+// completed inference, mirroring the OpenAI usage object. It answers a different
+// question from InferenceJob.units: usage is how much work was done, units is
+// what the buyer paid (billable units scaled by the provider's price and clamped
+// to the reservation). A caller checking a bill needs both to see how one became
+// the other.
+message TokenUsage {
+    // Tokens in the prompt/messages.
+    uint32 prompt_tokens = 1;
+    // Tokens in the generated completion.
+    uint32 completion_tokens = 2;
+    // prompt_tokens + completion_tokens.
+    uint32 total_tokens = 3;
+}
+
 // InferenceJob describes an inference job submitted by a buyer against an
 // inference-capable provider, and its result once fulfilled.
 message InferenceJob {
@@ -70,6 +85,9 @@ message InferenceJob {
     google.protobuf.Timestamp created_at = 8;
     // When the job's status last changed.
     google.protobuf.Timestamp updated_at = 9;
+    // Token accounting reported by the provider's backend, zero until the job
+    // has been fulfilled.
+    TokenUsage usage = 10;
 }
 
 // SubmitInferenceJobRequest submits an inference job to a provider. Capacity is
