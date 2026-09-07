@@ -80,6 +80,37 @@ func (e *Engine) SubmitWithdrawBond(from *token.Account, nonce uint64) (*token.T
 	return e.SubmitAccountTransfer(from, WithdrawRecipient(from.AccountID()), 0, nonce)
 }
 
+// ProviderEmissionAt returns what the pool pays out per block at a height,
+// which decays on the configured half-life and reaches zero.
+func (e *Engine) ProviderEmissionAt(height uint64) uint64 {
+	return EmissionFor(height, e.emissionPerBlock, e.emissionHalfLife)
+}
+
+// IsRewardedProvider reports whether an account earns provider rewards.
+func (e *Engine) IsRewardedProvider(id string) (bool, error) {
+	if e.providers == nil {
+		return false, nil
+	}
+	return e.providers.IsRegistered(id)
+}
+
+// RewardedProviders lists the accounts that earn provider rewards.
+func (e *Engine) RewardedProviders() ([]string, error) {
+	if e.providers == nil {
+		return nil, nil
+	}
+	return e.providers.All()
+}
+
+// RewardPoolBalance returns what is left of the genesis pool the provider
+// emission is paid from.
+func (e *Engine) RewardPoolBalance() (uint64, error) {
+	if e.ledger == nil {
+		return 0, nil
+	}
+	return e.ledger.Balance(rewardPoolAccount)
+}
+
 // BondedStake returns how much the given account has bonded, and zero on a
 // network without stake.
 func (e *Engine) BondedStake(id string) (uint64, error) {

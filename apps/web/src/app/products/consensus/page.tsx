@@ -97,6 +97,10 @@ export default function ConsensusPage() {
                 </CheckItem>
                 <CheckItem>Admission requires a minimum bond, so nobody validates with nothing at risk</CheckItem>
                 <CheckItem>
+                  A capped protocol fee on each committed transfer pays the set pro rata by power, so a bond earns
+                  as well as risks
+                </CheckItem>
+                <CheckItem>
                   A validator waits out an unbonding period after leaving before it can withdraw, so it cannot
                   equivocate and pull its bond out ahead of the evidence
                 </CheckItem>

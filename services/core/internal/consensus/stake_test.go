@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -529,14 +530,30 @@ func TestABondBecomesVotingPowerAtTheEpochBoundary(t *testing.T) {
 	amounts := []uint64{4_000, 3_000, 2_000, 1_000}
 	bondAll(t, nodes, amounts)
 
-	waitFor(t, 20*time.Second, "the bonds to become voting power everywhere", func() bool {
-		for _, nd := range nodes {
-			if nd.engine.vset().TotalPower() != 10_000 {
-				return false
+	// Reports what it saw rather than only that it timed out: a failure here
+	// could be a bond that never committed, a boundary that never re-weighted,
+	// or the nodes disagreeing, and those have different causes.
+	waitForOrReport(t, 30*time.Second, "the bonds to become voting power everywhere",
+		func() bool {
+			for _, nd := range nodes {
+				if nd.engine.vset().TotalPower() != 10_000 {
+					return false
+				}
 			}
-		}
-		return true
-	})
+			return true
+		},
+		func() string {
+			out := ""
+			for i, nd := range nodes {
+				vs := nd.engine.vset()
+				bonded := make([]uint64, len(nodes))
+				for j, owner := range nodes {
+					bonded[j], _ = nd.engine.BondedStake(owner.acct.AccountID())
+				}
+				out += fmt.Sprintf("\n  node %d height=%d totalPower=%d bonds=%v", i, nd.engine.Height(), vs.TotalPower(), bonded)
+			}
+			return out
+		})
 
 	for i, nd := range nodes {
 		vs := nd.engine.vset()
@@ -681,7 +698,9 @@ func TestStakeTransactionsMustNameTheirOwnSender(t *testing.T) {
 // The whole point, end to end: an equivocating validator loses its bond, and
 // the coins land in the reward pool rather than vanishing.
 func TestEquivocationCostsTheOffenderItsBond(t *testing.T) {
-	nodes, stop := stakeCluster(t, 4, 2, 0)
+	// Five, because one gets ejected: four minus one leaves quorum three of
+	// three, which tolerates no lag and crawls under load.
+	nodes, stop := stakeCluster(t, 5, 2, 0)
 	defer stop()
 
 	offender := nodes[1]
@@ -695,10 +714,10 @@ func TestEquivocationCostsTheOffenderItsBond(t *testing.T) {
 	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
 	defer stopTraffic()
 	const bond = 7000
-	bondAll(t, nodes, []uint64{bond, bond, bond, bond})
+	bondAll(t, nodes, []uint64{bond, bond, bond, bond, bond})
 	waitFor(t, 20*time.Second, "the set to be weighted by stake", func() bool {
 		for _, nd := range nodes {
-			if nd.engine.vset().TotalPower() != 4*bond {
+			if nd.engine.vset().TotalPower() != uint64(len(nodes))*bond {
 				return false
 			}
 		}

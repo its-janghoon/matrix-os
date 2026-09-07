@@ -150,6 +150,23 @@ type Config struct {
 		// native MATRIX, admission requires a minimum bond, and a proven offence
 		// takes the offender's bond instead of only its place.
 		Stake StakeConfig `yaml:"stake"`
+		// FeeBasisPoints is the protocol fee taken from every value transfer a
+		// committed block carries, in hundredths of a percent, and paid to the
+		// validator set pro rata by voting power. Zero charges nothing.
+		//
+		// It is what makes validating pay for itself: bonded stake gives a
+		// validator something to lose and nothing to earn, so without a fee a
+		// bond is a pure cost and no third party would post one. Turn the two on
+		// together.
+		//
+		// The build refuses a rate above 100 (one percent), so a mistyped 1000
+		// fails at startup rather than taking ten times the intended cut. EVERY
+		// node in a network must agree on the rate: a node charging differently
+		// would compute different balances from the same block, which is a fork.
+		FeeBasisPoints uint32 `yaml:"fee_basis_points"`
+		// Rewards configures the provider emission: what the genesis pool pays
+		// out per block to the accounts that supply compute.
+		Rewards RewardsConfig `yaml:"rewards"`
 	} `yaml:"consensus"`
 	Genesis GenesisConfig `yaml:"genesis"`
 }
@@ -201,11 +218,52 @@ func effectiveMinBond(cfg StakeConfig) uint64 {
 	return consensus.DefaultMinBond
 }
 
+func effectiveHalfLife(cfg RewardsConfig) uint64 {
+	if cfg.HalfLife > 0 {
+		return cfg.HalfLife
+	}
+	return consensus.DefaultProviderEmissionHalfLife
+}
+
 func effectiveUnbonding(cfg StakeConfig) uint64 {
 	if cfg.UnbondingPeriod > 0 {
 		return cfg.UnbondingPeriod
 	}
 	return consensus.DefaultUnbondingPeriod
+}
+
+// RewardsConfig configures the provider emission from the genesis pool.
+//
+// The token policy allocates a share of the pool to compute providers. This is
+// the mechanism for it, and its shape is forced by one fact: consensus cannot
+// see work. A job lives in the marketplace, whose provider list and job records
+// are per-node state no quorum ever ordered, so the chain knows only that native
+// MATRIX moved from one account to another.
+//
+// That rules out paying a provider a percentage of what it was paid, because a
+// percentage of a transfer is a money pump: send coins to an account you also
+// control, collect the percentage, send them back, repeat. So the emission is a
+// FIXED per-block budget, SHARED among the registered providers a block paid,
+// pro rata by how much. Faking volume can move a share of the budget; it cannot
+// increase it, so the pool empties on schedule and not faster.
+type RewardsConfig struct {
+	// PerBlock is what the pool pays out per committed block, in native base
+	// units, shared among the registered providers credited in that block. Zero
+	// pays nothing and leaves the pool untouched.
+	PerBlock uint64 `yaml:"per_block"`
+	// HalfLife is how many blocks halve the emission. Zero means the default
+	// (1,000,000 blocks). The schedule is a right shift, so it reaches exactly
+	// zero rather than trailing off asymptotically.
+	//
+	// To size these: the total ever paid is about 1.44 * PerBlock * HalfLife, so
+	// a target spend T over a half-life H wants PerBlock around T / (1.44 * H).
+	HalfLife uint64 `yaml:"half_life"`
+	// ApprovedProviders is this operator's allow-list of registry changes, as
+	// "add:<account id>" / "remove:<account id>". A registration needs a QUORUM
+	// of operators to have listed it, the same as admitting a validator: who
+	// earns from the pool is not something the protocol can decide, and without
+	// a registry the emission would pay whoever happened to receive a transfer.
+	ApprovedProviders []string `yaml:"approved_providers"`
 }
 
 // GenesisConfig describes the one-time native MATRIX genesis this node applies
@@ -381,6 +439,14 @@ func Initialize(configPath string) error {
 	// MATRIX before it could validate anything. The section is written so the
 	// knobs are visible.
 	config.Consensus.Stake = StakeConfig{Enabled: false}
+	// No fee in a generated config. What a network charges is a policy decision
+	// about who pays for validating, and a node that quietly took a cut of every
+	// transfer because that was the default would be the wrong surprise.
+	config.Consensus.FeeBasisPoints = 0
+	// And no provider emission. Both are monetary policy, and a node that
+	// started paying out the genesis pool because that was the default would be
+	// making that policy on the operator's behalf.
+	config.Consensus.Rewards = RewardsConfig{}
 	// Register the GPU-free deterministic echo backend for a demo provider so a
 	// freshly-initialized node can fulfill inference jobs locally without a GPU
 	// or a model server. Operators swap this for a local-http / provider-API
@@ -642,6 +708,16 @@ func (n *Node) Start() error {
 	var stakeLedger *consensus.StakeLedger
 	var minBond uint64
 	var zeroMinBond bool
+	if n.config.Consensus.FeeBasisPoints > 0 {
+		fmt.Printf("Consensus: a protocol fee of %d basis points (%.2f%%) is taken from every value transfer "+
+			"and paid to the validator set pro rata by voting power.\n",
+			n.config.Consensus.FeeBasisPoints, float64(n.config.Consensus.FeeBasisPoints)/100)
+	}
+	if n.config.Consensus.Rewards.PerBlock > 0 {
+		fmt.Printf("Consensus: provider rewards are ON. The genesis pool pays up to %d base units per block, "+
+			"halving every %d blocks, shared among the registered providers a block pays.\n",
+			n.config.Consensus.Rewards.PerBlock, effectiveHalfLife(n.config.Consensus.Rewards))
+	}
 	if n.config.Consensus.Stake.Enabled {
 		stakeLedger = consensus.NewStakeLedger(n.market.Ledger(), n.kvStore)
 		if n.config.Consensus.Stake.MinBond != nil {
@@ -684,6 +760,12 @@ func (n *Node) Start() error {
 		ZeroMinBond:     zeroMinBond,
 		UnbondingPeriod: n.config.Consensus.Stake.UnbondingPeriod,
 		TargetBond:      n.config.Consensus.Stake.Bond,
+		FeeBasisPoints:  n.config.Consensus.FeeBasisPoints,
+		// The provider emission and the registry that decides who earns it.
+		Providers:                consensus.NewProviderRegistry(n.kvStore),
+		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
+		ProviderEmissionHalfLife: n.config.Consensus.Rewards.HalfLife,
+		ApprovedProviders:        n.config.Consensus.Rewards.ApprovedProviders,
 		OnEquivocation: func(eq *consensus.Equivocation) {
 			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+
 				"consensus/evidence/ in this node's database.\n", eq.VoterID, eq.Height, eq.Round)

@@ -25,12 +25,13 @@ These are constraints, not opinions. Changing any of them is a code change.
 | The only runtime faucet is `FundAccount`, and it is admin-authenticated | `matrix.market.v1.MarketService/FundAccount` |
 | The bridge cannot create native MATRIX. Burning wMATRIX only releases native that was locked earlier | `internal/bridge`, `WrappedMatrix.sol` |
 | Wrapped supply always equals locked native, by construction | mint requires an attestation per lock id; burn releases per event |
-| **There is no protocol fee anywhere.** A job pays buyer to provider in full | `internal/market`, `internal/marketapi` |
-| **There is no emission schedule.** Nothing pays anyone per block | no code |
+| **There is no emission to VALIDATORS.** They are paid from the fee, which is usage, not from an emission | by design |
 | The validator set is chain state: a change rides in a committed block and takes effect at an epoch boundary, and it needs a quorum of operators to have approved it | `internal/consensus/setchange.go` |
 | A validator proven to have equivocated is ejected the same way, with no config entry, because the evidence proves itself | `internal/consensus/evidence.go`, `Engine.reportEquivocation` |
 | Bonded stake exists and is OFF by default. With it on, voting power is bonded MATRIX, admission requires a minimum bond, and equivocation moves the offender's whole bond to the reward pool | `internal/consensus/stake.go` |
-| **A bond earns nothing.** Nothing pays a validator per block, so staking is a deterrent and not a yield - which is why the settlement fee below is the next piece, not an optional one | no code |
+| A protocol fee, capped at 1% in code, takes a cut of every value transfer a committed block carries and pays the validator set pro rata by voting power. OFF by default | `internal/consensus/fees.go` |
+| A provider emission pays a fixed, halving per-block budget out of the genesis pool to the registered providers a block paid. OFF by default | `internal/consensus/rewards.go` |
+| **The fee reaches consensus-settled value only.** Marketplace settlement pays it; `matrix wallet transfer` appends to the signed-transfer chain instead and pays nothing. That path is also not agreed by any quorum, so it needs to move to consensus for correctness before revenue | `internal/marketapi`, `token.SettledLedger` |
 | **A bond is necessary to be admitted, never sufficient.** A quorum of operators still has to approve the change, so this is permissioned-with-skin-in-the-game rather than permissionless | `internal/consensus/setchange.go` |
 
 Three consequences follow, and they drive everything below.
@@ -120,11 +121,19 @@ Three options, and I would take the third:
    when the network is idle, and gives stake something to earn, which is what
    makes slashing a deterrent rather than a threat.
 
-Option 3's prerequisites are now in place: membership is chain state, and stake
-is bonded, weighted and slashable. What is missing is the fee itself. Until it
-exists a bond earns nothing and only stands to be lost, which is a deterrent
-that works and an incentive that does not - so option 1 is still what we have,
-and we should say so rather than implying otherwise.
+Option 3 is built. The fee is capped at one percent in code, comes out of the
+transferred amount, and is split across the validator set in force pro rata by
+voting power. It is off by default, because the rate is policy and I am not
+setting it for you: my recommendation is still to start at 1% (100 basis
+points), which is what the cap allows.
+
+One thing to decide with it. The fee is paid to the set in force rather than to
+the validators whose precommits carried the block, and that is not a preference
+- the certificate a node observes is node-specific, so a split that depended on
+it would give two honest nodes different balances, which is a fork. The cost is
+that the fee pays for stake rather than for participation: a validator that
+never votes still earns. The remedy is the one we already have, which is to
+remove it.
 
 ### What I would refuse to do
 
@@ -237,9 +246,30 @@ and 6, and they are the whole difference between "a token" and "money".
 
 In the order I would do them:
 
-1. **Programmatic provider rewards** in the consensus apply step, with a fixed
-   decay from the genesis pool. Without it, the 40% is a promise with no
-   mechanism.
+1. ~~**Programmatic provider rewards**~~ - DONE, and the shape was forced by one
+   fact I did not appreciate when I wrote this: consensus cannot see work. A job
+   lives in the marketplace, whose provider list and job records are per-node
+   state no quorum ordered, so the chain knows only that MATRIX moved between
+   two accounts.
+
+   That rules out the obvious mechanism, a percentage of what a provider was
+   paid, because a percentage of a transfer is a MONEY PUMP: send coins to an
+   account you also control, collect the percentage, send them back, repeat. It
+   would have drained the pool to whoever looped fastest and nothing about it
+   would have looked irregular.
+
+   So the emission is a FIXED per-block budget, halving on a schedule, shared
+   among the registered providers a block paid, pro rata by how much. Faked
+   volume can move a share of the budget and cannot increase it, so the pool
+   empties on schedule and not faster. Eligibility is a registry a quorum of
+   operators changes, the same as admitting a validator, because otherwise the
+   emission would pay whoever happened to receive a transfer.
+
+   What that means for the 40%: it now has a mechanism, and the mechanism is
+   permissioned. A provider earns from the pool because operators approved it,
+   not because the chain verified it served anything. Making it permissionless
+   needs jobs to be consensus state, which is a substantially larger piece of
+   work than this was.
 2. ~~**Dynamic validator set**, then **stake**~~ - DONE. A change is a
    transaction to a reserved recipient, it needs a quorum of operators to have
    approved it, and it takes effect at an epoch boundary so every node switches
@@ -249,11 +279,20 @@ In the order I would do them:
    bond to the reward pool. A bond is withdrawable only after the validator has
    left the set and served an unbonding period, so it cannot equivocate and
    withdraw ahead of the evidence.
-3. **A settlement fee**, capped in code, split among the validators of the
-   committing block.
+3. ~~**A settlement fee**, capped in code~~ - DONE, split across the validator
+   set in force rather than the validators of the committing block, for the
+   determinism reason above.
 4. **A bridge mint cap** in the contract, plus the reconciliation report as a
    node endpoint rather than a manual query.
 
-Items 1, 3 and 4 are days, and item 3 is now the one that matters most: with
-stake in place and no fee, a validator's bond earns nothing and only stands to
-be lost, which is why I would not invite a third-party validator yet.
+Item 4 is what is left of this list, and one thing that was not on it: the
+signed-transfer path has to move to consensus. Two paths move value today and
+only one is agreed by a quorum, which was already a correctness problem and is
+now also the one way to move MATRIX without paying the fee.
+
+What I need from you on the numbers: the fee rate (I recommend 100 basis
+points, the cap), and the emission's per-block amount and half-life. The
+arithmetic is that total spend is about 1.44 x per_block x half_life, so
+targeting the 40% provider allocation of 4e17 base units over a half-life of a
+million blocks wants a per-block figure near 2.8e11. I would rather you set
+those than inherit a default I invented.

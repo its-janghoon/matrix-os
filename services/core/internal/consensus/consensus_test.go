@@ -76,6 +76,9 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		// never has to reach into a running engine to install one, which would
 		// be a data race on the driver goroutine.
 		stake := NewStakeLedger(ledger, store)
+		// The provider reward registry, for the same reason: a test that uses it
+		// must not reach into a running engine to install one.
+		providers := NewProviderRegistry(store)
 		cfg := Config{
 			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
@@ -87,6 +90,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			Evidence:        evidence,
 			Sets:            sets,
 			Stake:           stake,
+			Providers:       providers,
 			// Nothing is bonded in most tests, so an admission floor would refuse
 			// every set change. Tests about the floor set one.
 			ZeroMinBond: true,

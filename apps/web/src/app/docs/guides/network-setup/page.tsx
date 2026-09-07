@@ -63,6 +63,26 @@ const STAKE = `consensus:
     unbonding_period: 1000        # blocks to wait after leaving before withdrawing
     bond: 2000000000000000        # what THIS node keeps bonded from its own account`;
 
+const ECONOMICS = `consensus:
+  fee_basis_points: 100          # 1%, taken from each transfer; the build caps this at 100
+  rewards:
+    per_block: 400               # what the pool pays per block, shared by the providers it paid
+    half_life: 1000000           # blocks until that halves; total spend is about 1.44 * per_block * half_life
+    approved_providers:
+      - add:cf4f75dc...          # an ACCOUNT id; needs a quorum of operators to have listed it`;
+
+const ECONOMICS_LOG = `Consensus: a protocol fee of 100 basis points (1.00%) is taken from every value transfer
+  and paid to the validator set pro rata by voting power.
+Consensus: provider rewards are ON. The genesis pool pays up to 400 base units per block,
+  halving every 1000000 blocks, shared among the registered providers a block pays.
+consensus: provider registry change in force at height 0: add:cf4f75dc...
+consensus: paid 400 native base units of provider rewards from the pool at height 1
+
+# a job priced at 10000, settled through consensus:
+#   provider  +9900   (10000 less the 1% fee)   +400 (this block's emission)
+#   validator   +100  (the fee, one validator so no remainder)
+#   pool        -400`;
+
 const STAKE_LOG = `Consensus identity: 0c2265316242995a96890c698af0e1959264bb6b1f805ed7352fe6174f6fcabb
 Consensus: bonded stake is ON. Voting power is bonded MATRIX; a validator must bond at least
   1000 base units to be admitted, and waits 4 blocks after leaving to withdraw.
@@ -237,9 +257,82 @@ export default function NetworkSetupPage() {
                     <h3 className='mb-2 text-lg font-bold text-white'>What stake does not make this</h3>
                     <p className='mb-0 text-gray-100'>
                       Membership is still a decision a quorum of operators makes, not one anyone can buy into: a bond
-                      is necessary to be admitted and it is not sufficient. There are no rewards for staking either -
-                      nothing pays a validator per block - so a bond earns nothing and only stands to be lost. That
-                      is the honest state of it: stake here is a deterrent, not yet a yield.
+                      is necessary to be admitted and it is not sufficient. So this is permissioned with capital at
+                      risk, not permissionless.
+                    </p>
+                  </div>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>6. Paying for it: the fee and the emission</h2>
+                  <p className='mb-4 text-gray-300'>
+                    Both off by default, because what a network charges and what it pays out is monetary policy and
+                    not something a generated config should decide.
+                  </p>
+                  <CodeSample label='config.yaml' code={ECONOMICS} />
+
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>The protocol fee</h3>
+                  <p className='mb-4 text-gray-300'>
+                    A cut of every value transfer a committed block carries, paid to the validator set pro rata by
+                    voting power. It is what makes a bond worth posting: without it, stake is a pure cost and no
+                    third party has a reason to put capital at risk. Turn the two on together.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    It comes <strong className='text-white'>out of the amount</strong>, so a transfer of 10,000 at 1%
+                    credits the recipient 9,900 and the validators 100. Adding it to the sender instead would make a
+                    transfer that was affordable when it was proposed unaffordable when it was applied, so a job
+                    priced at exactly the buyer&apos;s balance would commit and then be skipped. Providers price for
+                    the cut the way they would on any marketplace that takes one.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    The rate is capped at <strong className='text-white'>100 basis points in code</strong>, not in
+                    config validation. A build refuses to start on a higher number, so the worst a mistyped{' '}
+                    <code className='text-white'>1000</code> can do is fail loudly rather than take ten times the
+                    intended cut. Every node must agree on the rate: a node charging differently would compute
+                    different balances from the same block.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    It is paid to the set in force, not to the validators whose votes carried the block. That is not
+                    a preference - the commit certificate a node observes is node-specific, so a split that depended
+                    on it would give two honest nodes different balances. The cost of the choice is real and worth
+                    knowing: it pays for stake rather than for participation, so a validator that never votes still
+                    earns, and the answer to that is to remove it.
+                  </p>
+
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>The provider emission</h3>
+                  <p className='mb-4 text-gray-300'>
+                    A fixed budget per block, paid out of the genesis reward pool and shared among the{' '}
+                    <em>registered</em> providers that a block paid, pro rata by how much. It halves every{' '}
+                    <code className='text-white'>half_life</code> blocks and reaches exactly zero, so the pool
+                    empties on a schedule rather than trailing off.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    Why a fixed budget and not a percentage of what a provider earned: consensus cannot see work. A
+                    job lives in the marketplace, whose provider list and job records are per-node state no quorum
+                    ever ordered, so the chain knows only that MATRIX moved between two accounts. A percentage of a
+                    transfer would be a money pump - send coins to an account you also control, collect the
+                    percentage, send them back, repeat. A fixed budget means faked volume can move a share of it and
+                    cannot increase it.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    Which accounts are eligible is a registry the chain keeps, changed the way the validator set is:
+                    a quorum of operators has to have listed the change under{' '}
+                    <code className='text-white'>approved_providers</code>. Without a registry the emission would pay
+                    whoever happened to receive a transfer. Registration takes effect from the next block, so a block
+                    cannot register an account and pay it in the same breath.
+                  </p>
+                  <CodeSample label='node log' code={ECONOMICS_LOG} />
+
+                  <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h3 className='mb-2 text-lg font-bold text-white'>
+                      The fee applies to consensus-settled value, and one path escapes it
+                    </h3>
+                    <p className='mb-0 text-gray-100'>
+                      Marketplace settlement - a compute job, an inference job - goes through consensus and pays.{' '}
+                      <code className='text-white'>matrix wallet transfer</code> does not: it appends to the
+                      signed-transfer chain instead, which moves credits on this node and is not ordered by any
+                      quorum. So a peer-to-peer transfer sent that way pays no fee. That path needs to move to
+                      consensus regardless of the fee - transfers no quorum agreed on are a correctness problem
+                      before they are a revenue one - and until it does, this is a hole and we would rather say so
+                      than let you find it.
                     </p>
                   </div>
 

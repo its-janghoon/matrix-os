@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -260,6 +262,23 @@ func submitSetChange(t *testing.T, nodes []*testNode, from *token.Account, recip
 	}
 }
 
+// waitForOrReport is waitFor with a diagnostic: on timeout it prints what the
+// cluster actually looked like, so a failure says which of several causes it was
+// rather than only that it did not happen.
+func waitForOrReport(t *testing.T, timeout time.Duration, what string, cond func() bool, report func() string) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timeout waiting for %s; state was:%s", what, report())
+		}
+		time.Sleep(3 * time.Millisecond)
+	}
+}
+
 func waitFor(t *testing.T, timeout time.Duration, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -409,15 +428,14 @@ func TestUnapprovedSetChangeDoesNotPass(t *testing.T) {
 	}
 
 	// Ordinary traffic, so the chain has reason to advance past several epochs.
-	for i := uint64(1); i < 10; i++ {
-		t2 := signedTransfer(t, alice, fmt.Sprintf("r-%d", i), 1, i)
-		for _, nd := range nodes {
-			_ = nd.engine.Submit(t2)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// Open-ended rather than a fixed batch: one block can carry any number of
+	// transfers, so a fixed batch is not a reliable way to produce a fixed
+	// number of HEIGHTS - it produced enough until the machine was busy enough
+	// to batch them together.
+	stopTraffic := keepTrafficFlowing(t, nodes, alice)
+	defer stopTraffic()
 
-	waitFor(t, 8*time.Second, "the chain to pass several epochs", func() bool {
+	waitFor(t, 15*time.Second, "the chain to pass several epochs", func() bool {
 		return nodes[0].engine.Height() >= 4
 	})
 
@@ -451,15 +469,11 @@ func TestRemovedValidatorStopsVotingAndTheRestCarryOn(t *testing.T) {
 	alice := nodes[0].acct
 	mintAll(t, nodes, alice.AccountID(), 1000)
 	submitSetChange(t, nodes, alice, RemoveValidatorRecipient(victim.acct.AccountID()), 0)
-	go func() {
-		for i := uint64(1); i < 14; i++ {
-			tx := signedTransfer(t, alice, fmt.Sprintf("r-%d", i), 1, i)
-			for _, nd := range nodes {
-				_ = nd.engine.Submit(tx)
-			}
-			time.Sleep(12 * time.Millisecond)
-		}
-	}()
+	// Open-ended traffic: the assertions below run AFTER the removal has landed,
+	// and a fixed batch of transfers is long spent by then - leaving the chain
+	// idle exactly where the test wants to see it still committing.
+	stopTraffic := keepTrafficFlowing(t, nodes, alice)
+	defer stopTraffic()
 
 	waitFor(t, 10*time.Second, "the validator to be removed everywhere", func() bool {
 		for _, nd := range nodes {
@@ -487,9 +501,11 @@ func TestRemovedValidatorStopsVotingAndTheRestCarryOn(t *testing.T) {
 		t.Fatal("the removed node still considers itself a validator")
 	}
 
-	// And the remaining three keep committing.
+	// And the remaining three keep committing. Quorum is 3 of 3 here, which
+	// tolerates no lag at all, so this is given a generous window rather than a
+	// tight one: it is asserting that progress happens, not how fast.
 	before := nodes[0].engine.Height()
-	waitFor(t, 8*time.Second, "progress after the removal", func() bool {
+	waitFor(t, 20*time.Second, "progress after the removal", func() bool {
 		return nodes[0].engine.Height() > before
 	})
 	waitForConvergedLength(t, nodes, 8*time.Second)
@@ -781,9 +797,27 @@ func setChangeClusterApprovals(t *testing.T, n int, epoch uint64, approvals [][]
 func keepTrafficFlowing(t *testing.T, nodes []*testNode, from *token.Account) func() {
 	t.Helper()
 	mintAll(t, nodes, from.AccountID(), 1000000)
+	stop := keepTrafficFlowingAmount(t, nodes, from, 1)
+	return func() { stop() }
+}
+
+// recipientName is the deterministic name traffic pays to, so a test can sum
+// every recipient's balance and check the ledger conserved value.
+func recipientName(n int) string { return fmt.Sprintf("recipient-%d", n) }
+
+// keepTrafficFlowingAmount is keepTrafficFlowing with a chosen transfer size,
+// and without minting: a caller that cares how much was funded does that itself.
+//
+// The returned stop is idempotent and reports how many transfers were
+// submitted, so a test that adds up every recipient's balance knows exactly how
+// many recipients there are. Idempotent because it is natural to both defer it
+// and call it, and closing a closed channel panics.
+func keepTrafficFlowingAmount(t *testing.T, nodes []*testNode, from *token.Account, amount uint64) func() int {
+	t.Helper()
 
 	done := make(chan struct{})
 	stopped := make(chan struct{})
+	var submitted atomic.Uint64
 	go func() {
 		defer close(stopped)
 		// Signed here rather than via signedTransfer: that helper takes a
@@ -798,8 +832,8 @@ func keepTrafficFlowing(t *testing.T, nodes []*testNode, from *token.Account) fu
 			}
 			tx := &token.Transaction{
 				From:      from.PublicKey,
-				To:        fmt.Sprintf("recipient-%d", nonce),
-				Amount:    1,
+				To:        recipientName(int(nonce)),
+				Amount:    amount,
 				Nonce:     nonce,
 				Timestamp: time.Now().UnixNano(),
 				PrevHash:  make([]byte, token.HashSize),
@@ -810,11 +844,16 @@ func keepTrafficFlowing(t *testing.T, nodes []*testNode, from *token.Account) fu
 			for _, nd := range nodes {
 				_ = nd.engine.Submit(tx)
 			}
+			submitted.Store(nonce)
 		}
 	}()
-	return func() {
-		close(done)
-		<-stopped
+	var once sync.Once
+	return func() int {
+		once.Do(func() {
+			close(done)
+			<-stopped
+		})
+		return int(submitted.Load())
 	}
 }
 
@@ -995,7 +1034,12 @@ func TestASetChangeReachesItsEpochBoundaryOnAnIdleChain(t *testing.T) {
 // and nothing could act on it because the set was fixed at startup. Now the
 // network removes the offender itself.
 func TestProvenEquivocationEjectsTheOffender(t *testing.T) {
-	nodes, stop := setChangeCluster(t, 4, 2)
+	// FIVE, because one gets ejected. Four minus one is a three-member set with
+	// quorum three, which tolerates no lag at all - so under load every round
+	// times out before all three precommit and the chain crawls. Five leaves
+	// four, quorum three, which tolerates one slow node. That is the fault
+	// threshold, not a timeout to tune.
+	nodes, stop := setChangeCluster(t, 5, 2)
 	defer stop()
 
 	offender := nodes[1]
@@ -1027,8 +1071,8 @@ func TestProvenEquivocationEjectsTheOffender(t *testing.T) {
 
 	for i, nd := range nodes {
 		vs := nd.engine.vset()
-		if vs.Len() != 3 {
-			t.Fatalf("node %d has %d validators, want 3 after the ejection", i, vs.Len())
+		if vs.Len() != 4 {
+			t.Fatalf("node %d has %d validators, want 4 after the ejection", i, vs.Len())
 		}
 		// The removal is chain state, so a restart must not bring the offender
 		// back.
@@ -1041,8 +1085,7 @@ func TestProvenEquivocationEjectsTheOffender(t *testing.T) {
 		}
 	}
 
-	// The remaining three keep committing: quorum for a set of three is three,
-	// and all three are honest and present.
+	// The remaining four keep committing.
 	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
 	defer stopTraffic()
 	before := nodes[0].engine.Height()

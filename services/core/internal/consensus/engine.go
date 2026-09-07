@@ -141,6 +141,38 @@ type Config struct {
 	// account must wait before withdrawing its bond. Zero means
 	// DefaultUnbondingPeriod.
 	UnbondingPeriod uint64
+	// FeeBasisPoints is the protocol fee taken from every value transfer a
+	// committed block carries, in hundredths of a percent, and paid to the
+	// validator set pro rata by voting power. Zero charges nothing.
+	//
+	// It must not exceed MaxFeeBasisPoints; New refuses a higher rate rather
+	// than clamping it, because an operator who typed 1000 meaning 1% should
+	// find out at startup and not by taking ten times the intended cut.
+	//
+	// Every node in a network must agree on it. A node charging a different rate
+	// would compute different balances from the same block, which is a fork.
+	FeeBasisPoints uint32
+	// Providers, when non-nil, is the registry of accounts that earn provider
+	// rewards from the genesis pool. Without it no emission is paid.
+	Providers *ProviderRegistry
+	// ProviderEmissionPerBlock is the reward the pool pays per committed block,
+	// in native base units, SHARED among the registered providers credited in
+	// that block. Zero pays nothing.
+	//
+	// A fixed schedule rather than a percentage of what a provider was paid,
+	// and that is the whole design: a percentage of a transfer is a money pump,
+	// because anyone can send coins to an account they also control and collect
+	// the percentage. A fixed per-block budget means faking settlements can move
+	// a share of it and cannot increase it.
+	ProviderEmissionPerBlock uint64
+	// ProviderEmissionHalfLife is how many blocks halve the emission. Zero means
+	// DefaultProviderEmissionHalfLife.
+	ProviderEmissionHalfLife uint64
+	// ApprovedProviders is this operator's allow-list of provider registry
+	// changes, as "add:<account id>" / "remove:<account id>". Same veto model as
+	// ApprovedSetChanges: a node offers what its operator listed and votes
+	// against anything else, so a registration needs a quorum of operators.
+	ApprovedProviders []string
 	// TargetBond is how much this node should have bonded on its own consensus
 	// account. When its bond is below this the node submits a bond for the
 	// difference, and keeps doing so until the target is met.
@@ -215,6 +247,16 @@ type Engine struct {
 	// minBond gates admission; unbondingPeriod gates withdrawal.
 	minBond         uint64
 	unbondingPeriod uint64
+	// feeBasisPoints is the protocol fee rate; see Config.FeeBasisPoints.
+	feeBasisPoints uint32
+	// providers, emission settings and the operator's provider allow-list.
+	providers          *ProviderRegistry
+	emissionPerBlock   uint64
+	emissionHalfLife   uint64
+	approvedProviders  map[string]struct{}
+	approvedProvSpecs  []ProviderChange
+	lastProviderOffer  time.Time
+	providerOfferNonce uint64
 	// targetBond is how much this node should have bonded; see Config.TargetBond.
 	targetBond uint64
 	// lastBondTop rate-limits the top-up check, and bondNonce keeps each top-up
@@ -363,6 +405,10 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Ledger == nil {
 		return nil, fmt.Errorf("consensus: ledger is required")
 	}
+	if cfg.FeeBasisPoints > MaxFeeBasisPoints {
+		return nil, fmt.Errorf("consensus: fee of %d basis points exceeds the %d-basis-point ceiling this build allows",
+			cfg.FeeBasisPoints, MaxFeeBasisPoints)
+	}
 	e := &Engine{
 		transport:            cfg.Transport,
 		chain:                cfg.Chain,
@@ -387,6 +433,11 @@ func New(cfg Config) (*Engine, error) {
 		minBond:            stakeMinBond(cfg),
 		unbondingPeriod:    orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
 		targetBond:         cfg.TargetBond,
+		feeBasisPoints:     cfg.FeeBasisPoints,
+		providers:          cfg.Providers,
+		emissionPerBlock:   cfg.ProviderEmissionPerBlock,
+		emissionHalfLife:   orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
+		approvedProviders:  make(map[string]struct{}, len(cfg.ApprovedProviders)),
 		epochLength:        orUint64C(cfg.EpochLength, DefaultEpochLength),
 		approvedChanges:    make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:         make(map[string]struct{}),
@@ -422,6 +473,17 @@ func New(cfg Config) (*Engine, error) {
 		for i := range records {
 			e.approveRemovalLocked(records[i].VoterID)
 		}
+	}
+	for _, spec := range cfg.ApprovedProviders {
+		change, err := ParseProviderChangeSpec(spec)
+		if err != nil {
+			// Same reason a mistyped set-change approval fails startup: an operator
+			// who believes they approved a registration should not find out later
+			// that their node has been voting against it.
+			return nil, fmt.Errorf("consensus: approved provider change %q: %w", spec, err)
+		}
+		e.approvedProviders[strings.ToLower(change.String())] = struct{}{}
+		e.approvedProvSpecs = append(e.approvedProvSpecs, change)
 	}
 	e.validatorSet.Store(cfg.Validators)
 	if cfg.Self != nil {
@@ -638,6 +700,7 @@ func (e *Engine) driver(ctx context.Context) {
 			e.maybeRequestSync(ctx)
 			e.maybeProposeApprovedChanges()
 			e.maybeTopUpBond()
+			e.maybeOfferProviderChanges()
 			e.tick(ctx)
 		}
 	}
@@ -1118,6 +1181,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
 			}
 		}
+		if IsProviderChangeRecipient(b.Txs[i].To) {
+			if err := e.verifyProviderChangeLocked(&b.Txs[i]); err != nil {
+				return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+			}
+		}
 		key := mempoolKey(&b.Txs[i])
 		// Reject a block that replays an already-committed transaction: an honest
 		// validator will not vote for it, so a malicious leader cannot double-apply
@@ -1263,6 +1331,123 @@ func (e *Engine) verifyStakeTxLocked(tx *token.Transaction, height uint64) error
 	}
 }
 
+// verifyProviderChangeLocked decides whether a provider registry change may be
+// in a block. Callers must hold e.mu.
+//
+// Same shape as a validator-set change: only a sitting validator may put one to
+// the network, it carries no value, and it has to change something. Whether it
+// SHOULD pass is local policy - see approvesProviderChangesLocked - because who
+// deserves to earn from the pool is not a question the protocol can answer.
+func (e *Engine) verifyProviderChangeLocked(tx *token.Transaction) error {
+	change, err := ParseProviderChange(tx.To)
+	if err != nil {
+		return err
+	}
+	if tx.Amount != 0 {
+		return fmt.Errorf("%w: a provider registry change must carry no value, got %d", ErrInvalidMessage, tx.Amount)
+	}
+	sender := tx.SenderID()
+	if !e.vset().Contains(sender) {
+		return fmt.Errorf("%w: provider change submitted by %s, who is not a validator", ErrNotValidator, sender)
+	}
+	if e.providers == nil {
+		return fmt.Errorf("%w: this network does not pay provider rewards", ErrInvalidMessage)
+	}
+	registered, err := e.providers.IsRegistered(change.ProviderID)
+	if err != nil {
+		return err
+	}
+	// A change that alters nothing is invalid, so a re-offer cannot commit twice
+	// and a stale offer cannot sit in mempools being proposed forever.
+	if (change.Kind == ProviderChangeAdd) == registered {
+		return fmt.Errorf("%w: %s", ErrNotRegisteredProvider, change)
+	}
+	return nil
+}
+
+// approvesProviderChangesLocked reports whether this operator approved every
+// provider change in a block. Callers must hold e.mu.
+func (e *Engine) approvesProviderChangesLocked(b *Block) bool {
+	for i := range b.Txs {
+		if !IsProviderChangeRecipient(b.Txs[i].To) {
+			continue
+		}
+		change, err := ParseProviderChange(b.Txs[i].To)
+		if err != nil {
+			return false
+		}
+		if _, ok := e.approvedProviders[strings.ToLower(change.String())]; !ok {
+			fmt.Printf("consensus: refusing to vote for a block that would %s (not in market.approved_providers)\n",
+				change)
+			return false
+		}
+	}
+	return true
+}
+
+// providerChangesInLocked extracts the provider changes a block carries.
+// Callers must hold e.mu.
+func (e *Engine) providerChangesInLocked(b *Block) []ProviderChange {
+	var out []ProviderChange
+	for i := range b.Txs {
+		if !IsProviderChangeRecipient(b.Txs[i].To) {
+			continue
+		}
+		change, err := ParseProviderChange(b.Txs[i].To)
+		if err != nil {
+			continue
+		}
+		out = append(out, change)
+	}
+	return out
+}
+
+// maybeOfferProviderChanges submits the provider registry changes this operator
+// approved and that have not taken effect, the same way approved validator-set
+// changes are offered: approving is an action, not only a vote.
+func (e *Engine) maybeOfferProviderChanges() {
+	if e.providers == nil || e.self == nil || !e.isValidator.Load() {
+		return
+	}
+
+	e.mu.Lock()
+	if len(e.approvedProvSpecs) == 0 {
+		e.mu.Unlock()
+		return
+	}
+	if !e.lastProviderOffer.IsZero() && time.Since(e.lastProviderOffer) < offerBackoffRounds*e.roundTimeout {
+		e.mu.Unlock()
+		return
+	}
+	e.lastProviderOffer = time.Now()
+	inMempool := make(map[string]struct{}, len(e.mempool))
+	for i := range e.mempool {
+		if IsProviderChangeRecipient(e.mempool[i].To) {
+			inMempool[e.mempool[i].To] = struct{}{}
+		}
+	}
+	specs := append([]ProviderChange(nil), e.approvedProvSpecs...)
+	nonce := e.providerOfferNonce
+	e.providerOfferNonce += uint64(len(specs))
+	e.mu.Unlock()
+
+	for i, spec := range specs {
+		registered, err := e.providers.IsRegistered(spec.ProviderID)
+		if err != nil {
+			continue
+		}
+		if (spec.Kind == ProviderChangeAdd) == registered {
+			continue // already in force
+		}
+		if _, queued := inMempool[spec.Recipient()]; queued {
+			continue
+		}
+		if _, err := e.SubmitAccountTransfer(e.self, spec.Recipient(), 0, nonce+uint64(i)); err != nil {
+			fmt.Printf("consensus: could not offer the approved provider change %s: %v\n", spec, err)
+		}
+	}
+}
+
 // setChangesInLocked extracts the changes a block carries. Callers must hold
 // e.mu.
 func (e *Engine) setChangesInLocked(b *Block) []SetChange {
@@ -1386,6 +1571,13 @@ func (e *Engine) acceptProposal(b *Block, round uint64, polka *PolkaCertificate)
 			return false, nil
 		}
 		e.locked = false
+	}
+
+	// The operator's veto on provider registry changes, on the same terms: who
+	// earns from the genesis pool is not something the protocol can decide, so a
+	// registration needs a quorum of operators to have listed it.
+	if !e.approvesProviderChangesLocked(b) {
+		return false, nil
 	}
 
 	// The operator's veto on validator-set changes. The block is valid and
@@ -2158,6 +2350,13 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	// when the block was verified at this height.
 	var withdrawals []string
 	var withdrawFor []string
+	// feesTaken is what this block charged, used only to decide whether a
+	// distribution pass is needed at all. credited is what each recipient
+	// received, which is how the provider emission is shared out.
+	var feesTaken uint64
+	credited := make(map[string]uint64, len(b.Txs))
+	// emitted is what the pool actually paid out this block, for the log line.
+	var emitted uint64
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
 		for i := range b.Txs {
 			tx := &b.Txs[i]
@@ -2194,10 +2393,65 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = false
 				continue
 			}
-			if err := ltx.Transfer(sender, tx.To, tx.Amount); err != nil {
+			// The protocol fee comes out of the amount, so the transfer is always
+			// affordable if the amount was. Two moves rather than one: the
+			// recipient gets what is left, and the fee goes to the accrual
+			// account for distribution below.
+			fee := uint64(0)
+			if paysFee(tx.To) {
+				fee = FeeFor(tx.Amount, e.feeBasisPoints)
+				feesTaken += fee
+			}
+			net := tx.Amount - fee
+			if err := ltx.Transfer(sender, tx.To, net); err != nil {
 				return err
 			}
+			if net > 0 {
+				// What each recipient was actually credited, which is the weight the
+				// provider emission is shared by.
+				if credited[tx.To] > ^uint64(0)-net {
+					credited[tx.To] = ^uint64(0)
+				} else {
+					credited[tx.To] += net
+				}
+			}
+			if fee > 0 {
+				if err := ltx.Transfer(sender, feeAccrualAccount, fee); err != nil {
+					return err
+				}
+			}
 			applied[mempoolKey(tx)] = true
+		}
+
+		// Pay out the fees this block took, plus any dust left by earlier
+		// blocks, inside the SAME critical section that moved the transfers.
+		// Fees and the transfers they came from land together or not at all.
+		//
+		// The set used is the one in force for this height: the epoch boundary
+		// runs later, in advanceHeight, so every node applying this block splits
+		// the fee across the identical set with the identical power.
+		//
+		// Skipped entirely on a chain with no fee configured, so the default
+		// costs not even a balance read per block. Turning the rate off leaves
+		// any dust where it is until the rate is turned back on, which is the
+		// honest behaviour: the alternative is reading a balance every block
+		// forever in case a rate that is off left something behind.
+		if feesTaken > 0 || e.feeBasisPoints > 0 {
+			if err := distributeFeesLocked(ltx, e.vset()); err != nil {
+				return err
+			}
+		}
+
+		// Pay this block's provider emission out of the genesis pool, shared
+		// among the registered providers it credited. In the same critical
+		// section for the same reason as the fees: the emission and the
+		// settlements that earned it land together or not at all.
+		if emission := EmissionFor(b.Height, e.emissionPerBlock, e.emissionHalfLife); emission > 0 {
+			paid, err := distributeEmissionLocked(ltx, e.providers, credited, emission)
+			if err != nil {
+				return err
+			}
+			emitted = paid
 		}
 		return nil
 	}); err != nil {
@@ -2229,6 +2483,11 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 		if returned > 0 {
 			fmt.Printf("consensus: returned bond of %d to %s at height %d\n", returned, id, b.Height)
 		}
+	}
+
+	if emitted > 0 {
+		fmt.Printf("consensus: paid %d native base units of provider rewards from the pool at height %d\n",
+			emitted, b.Height)
 	}
 
 	// Publish the applied/skipped result and wake any settlement waiters. Done
@@ -2326,6 +2585,19 @@ func (e *Engine) advanceHeight(committed *Block) {
 		kept = append(kept, e.mempool[i])
 	}
 	e.mempool = append([]token.Transaction(nil), kept...)
+
+	// Provider registry changes take effect from the NEXT block: the reward for
+	// this block was already shared out above, so a block cannot register an
+	// account and pay it in the same breath.
+	if e.providers != nil {
+		for _, c := range e.providerChangesInLocked(committed) {
+			if err := e.providers.Apply(c); err != nil {
+				fmt.Printf("consensus: %v\n", err)
+				continue
+			}
+			fmt.Printf("consensus: provider registry change in force at height %d: %s\n", committed.Height, c)
+		}
+	}
 
 	// A committed bond or withdrawal changes what the next boundary should weigh
 	// the set by. Nothing else does, so nothing else makes the boundary do I/O.
@@ -2639,7 +2911,6 @@ func (e *Engine) maybeProposeApprovedChanges() {
 	// dropSetChangesFromMempool), so an offer that was voted down leaves no trace
 	// to dedup against. Wait several rounds before offering again: long enough
 	// that the previous offer has either committed or lost its vote.
-	const offerBackoffRounds = 4
 	var todo []SetChange
 	for _, spec := range e.approvedSpecs {
 		key := spec.String()
@@ -2781,6 +3052,12 @@ func (e *Engine) maybeTopUpBond() {
 // bondTopUpInterval is how often a node checks whether its bond is short. Slow
 // on purpose: it corrects a config drift, it is not a hot path.
 const bondTopUpInterval = 5 * time.Second
+
+// offerBackoffRounds is how many round timeouts pass before an approved change
+// is offered again. A proposal is dropped from the mempool after one attempt, so
+// an offer that was voted down leaves no trace to dedup against; waiting several
+// rounds means the previous offer has either committed or lost its vote.
+const offerBackoffRounds = 4
 
 // PendingSetChanges returns the changes waiting for the next epoch boundary.
 func (e *Engine) PendingSetChanges() []SetChange {

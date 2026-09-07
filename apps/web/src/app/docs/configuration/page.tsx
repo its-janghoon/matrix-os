@@ -57,6 +57,11 @@ consensus:
     min_bond: null                       # null = 1e15 base units; 0 = no minimum
     unbonding_period: 0                  # 0 = 1000 blocks after leaving before withdrawal
     bond: 0                              # what THIS node keeps bonded from its own account
+  fee_basis_points: 0                    # cut of each transfer to validators; capped at 100 in code
+  rewards:
+    per_block: 0                         # pool payout per block, shared by the providers it paid
+    half_life: 0                         # 0 = halve every 1,000,000 blocks
+    approved_providers: []               # "add:<account id>"; needs a quorum of operators
 
 genesis:
   allocations: []                        # [{account, amount}] credited once, at first start
@@ -206,6 +211,26 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         name: 'stake.bond',
         def: '0',
         note: 'How much of its own native MATRIX this node keeps bonded. The node bonds the shortfall itself and keeps topping it up, because bonding must be signed by the validator’s own key and that key lives inside the node. Its consensus account has to hold the coins first - the id is printed at startup - and the node says so plainly if it does not. Zero bonds nothing, so on a staked network the node cannot be admitted.',
+      },
+      {
+        name: 'fee_basis_points',
+        def: '0',
+        note: 'The protocol fee taken from every value transfer a committed block carries, in hundredths of a percent, paid to the validator set pro rata by voting power. It is what makes a bond worth posting: without it stake is a pure cost. Taken OUT of the amount, so a 10,000 transfer at 1% credits the recipient 9,900 - adding it to the sender would make a transfer that was affordable at proposal time unaffordable at apply time. Capped at 100 IN CODE, so a mistyped 1000 fails at startup instead of taking ten times the cut. Every node must agree on the rate. Note that it reaches consensus-settled value: marketplace settlement pays it, and `matrix wallet transfer`, which appends to the signed-transfer chain instead, does not.',
+      },
+      {
+        name: 'rewards.per_block',
+        def: '0',
+        note: 'What the genesis reward pool pays out per committed block, shared among the REGISTERED providers that block paid, pro rata by how much. A fixed budget rather than a percentage of what a provider earned, because consensus cannot see work: a percentage of a transfer is a money pump, since anyone can send coins to an account they also control and collect it. A fixed budget means faked volume moves a share and cannot increase the total, so the pool empties on schedule. Zero leaves the pool untouched.',
+      },
+      {
+        name: 'rewards.half_life',
+        def: '0 (1,000,000 blocks)',
+        note: 'How many blocks halve the emission. The schedule is a right shift, so it reaches exactly zero rather than trailing off. Total ever paid is about 1.44 × per_block × half_life, so a target spend T over a half-life H wants per_block near T / (1.44 × H).',
+      },
+      {
+        name: 'rewards.approved_providers',
+        def: '[]',
+        note: 'This operator’s allow-list of registry changes, as add:<64-hex account id> or remove:<id>. A registration needs a QUORUM of operators to have listed it, the same as admitting a validator, and the node offers what it has listed until the change commits. Without a registry the emission would pay whoever happened to receive a transfer. Registration takes effect from the next block, so a block cannot register an account and pay it in the same breath.',
       },
       {
         name: 'eject_equivocators',
