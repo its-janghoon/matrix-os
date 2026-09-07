@@ -9,7 +9,7 @@
 #
 # or simply `make` to do both.
 
-.PHONY: all proto build test vet
+.PHONY: all proto build test vet fmt
 
 all: proto build
 
@@ -31,3 +31,17 @@ test: proto
 # Vet the Go packages.
 vet: proto
 	cd services/core && go vet ./...
+
+# Fail if any Go file is not gofmt-clean, naming the files.
+#
+# gofmt is not just cosmetic here: it realigns struct literals and const blocks
+# when a longer name is added, so an unformatted tree produces diffs full of
+# whitespace changes to lines nobody touched, and a reviewer cannot see the
+# actual change. Five files had drifted before this target existed.
+fmt:
+	@unformatted=$$(cd services/core && gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "These files are not gofmt-clean (run gofmt -w on them):"; \
+		echo "$$unformatted" | sed 's|^|  services/core/|'; \
+		exit 1; \
+	fi

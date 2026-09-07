@@ -75,11 +75,11 @@ func TestSubcommandHelp(t *testing.T) {
 // network call (so these run without a server).
 func TestArgValidationErrors(t *testing.T) {
 	cases := [][]string{
-		{"provider", "register"},                    // missing --id/--capacity/--price
-		{"job", "submit", "--provider", "p"},         // missing --buyer/--units
-		{"job", "get"},                               // missing --id
-		{"balance"},                                  // missing --account
-		{"wallet", "transfer", "--amount", "1"},      // missing --to
+		{"provider", "register"},                // missing --id/--capacity/--price
+		{"job", "submit", "--provider", "p"},    // missing --buyer/--units
+		{"job", "get"},                          // missing --id
+		{"balance"},                             // missing --account
+		{"wallet", "transfer", "--amount", "1"}, // missing --to
 	}
 	for _, args := range cases {
 		_, err := executeArgs(t, args...)

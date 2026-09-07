@@ -45,7 +45,7 @@ func TestLoadWallet_RejectsMismatchedKeyPair(t *testing.T) {
 	}
 
 	wf := walletFile{
-		PublicKey:  hex.EncodeToString(b.PublicKey), // mismatched: B's public
+		PublicKey:  hex.EncodeToString(b.PublicKey),  // mismatched: B's public
 		PrivateKey: hex.EncodeToString(a.PrivateKey), // A's private
 	}
 	data, err := json.MarshalIndent(wf, "", "  ")

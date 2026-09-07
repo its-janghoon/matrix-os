@@ -100,14 +100,14 @@ func main() {
 	must(err)
 
 	out := map[string]any{
-		"attestors":         attestorAddrs,
-		"threshold":         *threshold,
-		"recipient":         recipient.Hex(),
-		"lockId":            "0x" + hex.EncodeToString(att.LockID[:]),
-		"nativeAmount":      *native,
-		"wrappedAmount":     att.Amount.String(),
-		"signatures":        hexSignatures(att.Signatures),
-		"outstandingNative": rec.OutstandingNative,
+		"attestors":          attestorAddrs,
+		"threshold":          *threshold,
+		"recipient":          recipient.Hex(),
+		"lockId":             "0x" + hex.EncodeToString(att.LockID[:]),
+		"nativeAmount":       *native,
+		"wrappedAmount":      att.Amount.String(),
+		"signatures":         hexSignatures(att.Signatures),
+		"outstandingNative":  rec.OutstandingNative,
 		"outstandingWrapped": rec.OutstandingERC20.String(),
 	}
 	enc := json.NewEncoder(os.Stdout)

@@ -29,6 +29,10 @@ jobs:
     # stubs present, failing every package that imports them with
     # "module github.com/ecirlabs/matrix-proto ... does not contain package
     # github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1".
+    # gofmt before vet, because an unformatted tree is the cheapest failure to
+    # report and the one that most pollutes later diffs.
+    - name: make fmt
+      run: make fmt
     - name: make vet
       run: make vet
     - name: make test

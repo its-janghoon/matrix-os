@@ -20,10 +20,10 @@ import (
 // namespace so bridge bookkeeping never collides with the market/balance/* or
 // token/native/* keyspaces.
 const (
-	lockPrefix    = "bridge/lock/"     // bridge/lock/<lockId hex> -> LockEvent JSON
-	burnPrefix    = "bridge/burn/"     // bridge/burn/<burnId hex> -> BurnEvent JSON (processed marker)
-	lockSeqKey    = "bridge/lock_seq"  // uint64 monotonically increasing lock counter
-	lockedTTLKey  = "bridge/locked"    // uint64 running total of locked native base units
+	lockPrefix     = "bridge/lock/"    // bridge/lock/<lockId hex> -> LockEvent JSON
+	burnPrefix     = "bridge/burn/"    // bridge/burn/<burnId hex> -> BurnEvent JSON (processed marker)
+	lockSeqKey     = "bridge/lock_seq" // uint64 monotonically increasing lock counter
+	lockedTTLKey   = "bridge/locked"   // uint64 running total of locked native base units
 	unlockedTTLKey = "bridge/unlocked" // uint64 running total of unlocked native base units
 )
 

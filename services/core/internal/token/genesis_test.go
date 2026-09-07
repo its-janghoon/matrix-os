@@ -261,10 +261,10 @@ func TestConversion_NativeERC20RoundTrip(t *testing.T) {
 	cases := []uint64{
 		0,
 		1,
-		NativeUnit,               // one whole MATRIX
-		123_456_789,              // arbitrary sub-coin amount
-		1_000 * NativeUnit,       // a thousand whole MATRIX
-		NativeMaxSupply,          // the entire native supply
+		NativeUnit,                  // one whole MATRIX
+		123_456_789,                 // arbitrary sub-coin amount
+		1_000 * NativeUnit,          // a thousand whole MATRIX
+		NativeMaxSupply,             // the entire native supply
 		math.MaxUint64 / NativeUnit, // large but in-range
 	}
 	for _, native := range cases {
@@ -312,8 +312,8 @@ func TestConversion_NonMultipleRejected(t *testing.T) {
 	}
 	// A value whose native quotient overflows uint64 is rejected.
 	over := new(big.Int).SetUint64(math.MaxUint64)
-	over.Add(over, big.NewInt(1))          // MaxUint64+1 native units...
-	over.Mul(over, erc20PerNativeUnitBig)  // ...expressed in erc20 base units
+	over.Add(over, big.NewInt(1))         // MaxUint64+1 native units...
+	over.Mul(over, erc20PerNativeUnitBig) // ...expressed in erc20 base units
 	if _, err := ERC20ToNative(over); !errors.Is(err, ErrConversionOverflow) {
 		t.Errorf("ERC20ToNative(overflow) error = %v, want ErrConversionOverflow", err)
 	}
