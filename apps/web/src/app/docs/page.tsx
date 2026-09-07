@@ -98,7 +98,7 @@ const sections: { section: string; blurb: string; items: Entry[] }[] = [
       {
         name: 'Agent development',
         href: '/docs/guides/agent-development',
-        blurb: 'The four host functions the WebAssembly runtime exposes, its fuel and memory budget, and the deployment path that does not exist yet.',
+        blurb: 'The four host functions the WebAssembly runtime exposes, its memory ceiling and run-time deadline, and how to load a module into it.',
       },
       {
         name: 'Network setup',

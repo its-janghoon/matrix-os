@@ -55,7 +55,7 @@ const REAL = [
   },
   {
     title: 'A WebAssembly agent runtime',
-    body: 'A node embeds wazero and runs a module against four host functions - log, send, get_memory, set_memory - under a fuel and memory budget, so a runaway module cannot take the node with it.',
+    body: 'A node embeds wazero and runs a module against four host functions - log, send, get_memory, set_memory - under a memory ceiling and a per-call deadline, so a guest that never returns is torn down rather than holding the node.',
   },
 ];
 

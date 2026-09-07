@@ -73,44 +73,44 @@ func TestAuthenticator_Authenticate(t *testing.T) {
 	}
 
 	tests := []struct {
-		name    string
-		ctx     context.Context
+		name     string
+		ctx      context.Context
 		wantRole Role
-		wantErr error
+		wantErr  error
 	}{
 		{
-			name:    "valid admin key",
-			ctx:     metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "admin-key-123"})),
+			name:     "valid admin key",
+			ctx:      metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "admin-key-123"})),
 			wantRole: RoleAdmin,
 			wantErr:  nil,
 		},
 		{
-			name:    "valid operator key",
-			ctx:     metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "operator-key-456"})),
+			name:     "valid operator key",
+			ctx:      metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "operator-key-456"})),
 			wantRole: RoleOperator,
 			wantErr:  nil,
 		},
 		{
-			name:    "bearer token format",
-			ctx:     metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "Bearer admin-key-123"})),
+			name:     "bearer token format",
+			ctx:      metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "Bearer admin-key-123"})),
 			wantRole: RoleAdmin,
 			wantErr:  nil,
 		},
 		{
-			name:    "invalid key",
-			ctx:     metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "invalid-key"})),
+			name:     "invalid key",
+			ctx:      metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "invalid-key"})),
 			wantRole: "",
 			wantErr:  ErrUnauthorized,
 		},
 		{
-			name:    "no metadata",
-			ctx:     context.Background(),
+			name:     "no metadata",
+			ctx:      context.Background(),
 			wantRole: "",
 			wantErr:  ErrUnauthorized,
 		},
 		{
-			name:    "no authorization header",
-			ctx:     metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{})),
+			name:     "no authorization header",
+			ctx:      metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{})),
 			wantRole: "",
 			wantErr:  ErrUnauthorized,
 		},
@@ -292,7 +292,7 @@ func TestDeployService_Authorization(t *testing.T) {
 			name: "admin can deploy agent",
 			ctx:  metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "admin-key"})),
 			fn: func(ctx context.Context) error {
-				return service.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+				return service.DeployAgent(ctx, "test-agent", testAgentConfig())
 			},
 			wantErr: nil,
 		},
@@ -300,7 +300,7 @@ func TestDeployService_Authorization(t *testing.T) {
 			name: "viewer cannot deploy agent",
 			ctx:  metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{"authorization": "viewer-key"})),
 			fn: func(ctx context.Context) error {
-				return service.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+				return service.DeployAgent(ctx, "test-agent", testAgentConfig())
 			},
 			wantErr: ErrForbidden,
 		},
@@ -308,7 +308,7 @@ func TestDeployService_Authorization(t *testing.T) {
 			name: "no auth cannot deploy",
 			ctx:  context.Background(),
 			fn: func(ctx context.Context) error {
-				return service.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+				return service.DeployAgent(ctx, "test-agent", testAgentConfig())
 			},
 			wantErr: ErrUnauthorized,
 		},
@@ -318,7 +318,7 @@ func TestDeployService_Authorization(t *testing.T) {
 			fn: func(ctx context.Context) error {
 				// First deploy (use a unique ID to avoid colliding with
 				// the deployment created by earlier subtests).
-				if err := service.DeployAgent(ctx, "test-agent-stop", map[string]interface{}{}); err != nil {
+				if err := service.DeployAgent(ctx, "test-agent-stop", testAgentConfig()); err != nil {
 					return err
 				}
 				return service.StopDeployment(ctx, "test-agent-stop")

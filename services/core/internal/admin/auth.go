@@ -36,11 +36,11 @@ const (
 type Permission string
 
 const (
-	PermissionDeployAgent  Permission = "deploy:agent"
-	PermissionDeployMatrix Permission = "deploy:matrix"
-	PermissionStopDeploy   Permission = "deploy:stop"
-	PermissionRemoveDeploy Permission = "deploy:remove"
-	PermissionReadLogs     Permission = "logs:read"
+	PermissionDeployAgent   Permission = "deploy:agent"
+	PermissionDeployMatrix  Permission = "deploy:matrix"
+	PermissionStopDeploy    Permission = "deploy:stop"
+	PermissionRemoveDeploy  Permission = "deploy:remove"
+	PermissionReadLogs      Permission = "logs:read"
 	PermissionReadSensitive Permission = "logs:sensitive"
 )
 

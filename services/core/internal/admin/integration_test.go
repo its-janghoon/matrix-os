@@ -38,9 +38,7 @@ func TestServer_WithAuthentication(t *testing.T) {
 
 	// Test deployment with auth
 	deploySvc := server.GetDeployService()
-	err = deploySvc.DeployAgent(ctx, "test-agent", map[string]interface{}{
-		"image": "test:latest",
-	})
+	err = deploySvc.DeployAgent(ctx, "test-agent", testAgentConfig())
 	if err != nil {
 		t.Errorf("DeployAgent() with valid auth should succeed, got: %v", err)
 	}
@@ -71,7 +69,7 @@ func TestServer_WithoutAuthentication(t *testing.T) {
 	// Operations should work without auth when RequireAuth is false
 	ctx := context.Background()
 	deploySvc := server.GetDeployService()
-	err = deploySvc.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+	err = deploySvc.DeployAgent(ctx, "test-agent", testAgentConfig())
 	if err != nil {
 		t.Errorf("DeployAgent() without auth requirement should succeed, got: %v", err)
 	}
@@ -95,7 +93,7 @@ func TestServer_UnauthorizedAccess(t *testing.T) {
 	// Test without auth header
 	ctx := context.Background()
 	deploySvc := server.GetDeployService()
-	err = deploySvc.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+	err = deploySvc.DeployAgent(ctx, "test-agent", testAgentConfig())
 	if err != ErrUnauthorized {
 		t.Errorf("DeployAgent() without auth should fail with ErrUnauthorized, got: %v", err)
 	}
@@ -104,7 +102,7 @@ func TestServer_UnauthorizedAccess(t *testing.T) {
 	ctx = metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{
 		"authorization": "invalid-key",
 	}))
-	err = deploySvc.DeployAgent(ctx, "test-agent", map[string]interface{}{})
+	err = deploySvc.DeployAgent(ctx, "test-agent", testAgentConfig())
 	if err != ErrUnauthorized {
 		t.Errorf("DeployAgent() with invalid key should fail with ErrUnauthorized, got: %v", err)
 	}
@@ -136,7 +134,7 @@ func TestServer_RoleBasedAccess(t *testing.T) {
 	adminCtx := metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{
 		"authorization": "admin-key",
 	}))
-	err = deploySvc.DeployAgent(adminCtx, "test-agent", map[string]interface{}{})
+	err = deploySvc.DeployAgent(adminCtx, "test-agent", testAgentConfig())
 	if err != nil {
 		t.Errorf("Admin should be able to deploy, got: %v", err)
 	}
@@ -145,7 +143,7 @@ func TestServer_RoleBasedAccess(t *testing.T) {
 	viewerCtx := metadata.NewIncomingContext(context.Background(), metadata.New(map[string]string{
 		"authorization": "viewer-key",
 	}))
-	err = deploySvc.DeployAgent(viewerCtx, "test-agent-2", map[string]interface{}{})
+	err = deploySvc.DeployAgent(viewerCtx, "test-agent-2", testAgentConfig())
 	if err != ErrForbidden {
 		t.Errorf("Viewer should not be able to deploy, got: %v", err)
 	}

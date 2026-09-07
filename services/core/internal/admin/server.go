@@ -12,7 +12,7 @@ import (
 
 // Server represents the admin gRPC server
 type Server struct {
-	grpcServer   *grpc.Server
+	grpcServer  *grpc.Server
 	healthSvc   *health.Server
 	addr        string
 	deploySvc   *DeployService

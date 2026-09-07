@@ -6,16 +6,18 @@ import { GITHUB_URL } from '@/lib/releases';
 export const metadata = {
   title: 'Agent development',
   description:
-    'A node embeds a WebAssembly runtime with four host functions. This page documents that ABI, and the deployment path that does not exist yet.',
+    'A node embeds a WebAssembly runtime with four host functions, a memory ceiling and a run-time deadline. This page documents that ABI and how to load a module into it.',
 };
 
 /**
  * This page used to show an `Agent` class and an `AgentContext` imported from
  * `@matrix-os/core`, with lifecycle hooks that appear nowhere in this
- * repository. What a node actually has is a wazero WebAssembly runtime with
- * four host functions and a fuel and memory budget - and no way to load a
- * module into it from outside the process. Both halves of that are documented
- * here.
+ * repository.
+ *
+ * It then documented the real runtime, but described an ABI that did not work:
+ * all four host functions were empty stubs, so a guest could call log() and get
+ * silence. The "fuel budget" was a struct field nothing read. Both are fixed in
+ * the code now, and this page describes what the code does.
  */
 const HOST_ABI = `// Imported by the guest module from the host module "env":
 log(offset: u32, length: u32)
@@ -25,8 +27,8 @@ set_memory(offset: u32, length: u32)`;
 
 const LIMITS = `// services/core/internal/agent/agent.go
 var DefaultMemoryLimits = ResourceLimits{
-    MaxMemoryPages: 256,      // 256 * 64KB = 16MB
-    MaxFuel:        1000000,  // execution budget
+    MaxMemoryPages: 256,             // 256 * 64KB = 16MB
+    MaxRunTime:     5 * time.Second, // per call into the guest
 }`;
 
 const LOAD = `// From Go, inside the process:
@@ -35,11 +37,26 @@ a, err := agent.New(ctx, agent.Config{
     Code:   wasmBytes,   // a compiled module
     Stdout: os.Stdout,
     Stderr: os.Stderr,
+    // Nil refuses every send() the guest makes, and says so on stderr.
+    Send:   func(target string, payload []byte) error { return nil },
 }, agent.DefaultMemoryLimits)
 if err != nil { return err }
 
-if err := a.Start(ctx); err != nil { return err }
-defer a.Stop(ctx)`;
+if err := a.Start(ctx); err != nil { return err }   // runs _start under MaxRunTime
+defer a.Stop(ctx)
+
+out, err := a.Call(ctx, "some_export")   // any export, same deadline
+a.Memory()                               // the host-side buffer set_memory writes
+a.Sent()                                 // every send() the guest attempted`;
+
+const DEPLOY = `// Or through the admin service, from a module on the node or inline:
+deploySvc.DeployAgent(ctx, "my-agent", map[string]interface{}{
+    "wasm_path": "/srv/agents/my-agent.wasm",
+    // or: "wasm_base64": "<the module, base64>"
+})
+
+deploySvc.Agent("my-agent")              // the loaded runtime, to call exports
+deploySvc.StopDeployment(ctx, "my-agent")  // closes the module and its runtime`;
 
 const RUST = `# A guest module can be written in any language that targets wasm.
 # Rust, for example:
@@ -63,19 +80,22 @@ export default function AgentDevelopmentPage() {
                   <div className='mb-10 rounded-xl border border-primary-400/20 bg-gradient-to-r from-primary-400/10 via-accent-300/10 to-primary-400/10 p-8'>
                     <h1 className='mb-4 text-4xl font-bold text-white'>Agent development</h1>
                     <p className='text-xl text-gray-100'>
-                      A node embeds a WebAssembly runtime. An agent is a wasm module with a fuel budget, a memory
-                      cap, and four host functions.
+                      A node embeds a WebAssembly runtime. An agent is a wasm module with a memory cap, a run-time
+                      deadline, and four host functions - and nothing else.
                     </p>
                   </div>
 
                   <div className='mb-10 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
-                    <h2 className='mb-2 text-xl font-bold text-white'>Status: the runtime exists, the deployment path does not</h2>
+                    <h2 className='mb-2 text-xl font-bold text-white'>Status: it runs, and it is not yet a product</h2>
                     <p className='mb-0 text-gray-100'>
-                      The runtime below is real and runs modules today, from Go, in-process. What is missing is a way
-                      to get a module into it from outside: the admin service&apos;s{' '}
-                      <code className='text-white'>DeployAgent</code> records a deployment in a map and reports it as
-                      running, but it never loads or executes any wasm. Until that is wired up, agents are a library
-                      feature rather than a product one, and this page will not pretend otherwise.
+                      The runtime runs modules, the four host functions below do what they say, and{' '}
+                      <code className='text-white'>DeployAgent</code> loads and runs a module you give it - it used
+                      to record a deployment in a map, report it running, and never execute a byte of wasm. What is
+                      still missing is the product around it: no gRPC surface exposes{' '}
+                      <code className='text-white'>DeployAgent</code>, so a module has to come from inside the
+                      process; deployments do not survive a restart; and running an agent costs nobody anything,
+                      because the runtime is not metered against the marketplace. Agents are a library feature, not
+                      a product one, and this page will not pretend otherwise.
                     </p>
                   </div>
 
@@ -90,8 +110,16 @@ export default function AgentDevelopmentPage() {
                       wazero
                     </a>
                     , which is a pure-Go wasm runtime: no CGO, no external toolchain in the node. Every module gets a
-                    memory ceiling and a fuel budget, so a runaway agent costs its own budget rather than the
-                    node&apos;s.
+                    memory ceiling and a per-call deadline, so a guest that never returns is torn down instead of
+                    holding the calling goroutine forever.
+                  </p>
+                  <p className='mb-4 text-gray-300'>
+                    The deadline is what a <code className='text-white'>MaxFuel</code> field used to promise here.
+                    wazero has no instruction meter to spend a fuel budget against, so that number was decoration
+                    and <code className='text-white'>{'for {}'}</code> in a guest ran until the process died. A
+                    deadline is a bound the runtime can enforce, and it enforces the property that matters. Exceeding
+                    it returns an error wrapping <code className='text-white'>context.DeadlineExceeded</code>, and
+                    the module is not usable afterwards.
                   </p>
                   <CodeSample label='Go' code={LIMITS} />
 
@@ -104,8 +132,31 @@ export default function AgentDevelopmentPage() {
                   <CodeSample label='host functions' code={HOST_ABI} />
                   <p className='mt-4 text-gray-300'>
                     Each takes a pointer and a length into the guest&apos;s own linear memory, which is the usual wasm
-                    convention for passing bytes across the boundary.
+                    convention for passing bytes across the boundary. None of them trusts those numbers: a range that
+                    is not wholly inside the guest&apos;s memory is a refused call, reported on the agent&apos;s
+                    stderr, rather than a read of whatever sits next to it. The ABI has no return values, so a guest
+                    cannot be handed an error - a refusal is visible to the operator, not to the module.
                   </p>
+                  <ul className='mt-4 list-disc space-y-3 pl-6 text-gray-300'>
+                    <li>
+                      <code className='text-white'>log</code> writes the guest&apos;s bytes to the agent&apos;s
+                      stdout, tagged with its id, capped at 10,000 lines so a guest in a loop cannot fill a disk
+                      through the host&apos;s logger.
+                    </li>
+                    <li>
+                      <code className='text-white'>set_memory</code> and{' '}
+                      <code className='text-white'>get_memory</code> move bytes between the guest and a host-side
+                      buffer that outlives a call. The buffer is deliberately not addressable by the guest: those two
+                      functions are the only way in and out of it.
+                    </li>
+                    <li>
+                      <code className='text-white'>send</code> hands a target and a payload to the{' '}
+                      <code className='text-white'>SendFunc</code> the host configured. With none configured every
+                      send is refused, because who a module may address is a policy question and inventing an answer
+                      here would be worse than having none. The attempt is recorded either way, so you can see what a
+                      module tried to do.
+                    </li>
+                  </ul>
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Building a module</h2>
                   <CodeSample label='shell' code={RUST} />
@@ -117,6 +168,11 @@ export default function AgentDevelopmentPage() {
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Loading one</h2>
                   <CodeSample label='Go' code={LOAD} />
+                  <p className='mb-4 mt-4 text-gray-300'>
+                    Or through the admin deploy service, which takes the module as a path on the node or inline as
+                    base64:
+                  </p>
+                  <CodeSample label='Go' code={DEPLOY} />
                   <p className='mt-4 text-gray-300'>
                     See{' '}
                     <a
@@ -133,17 +189,19 @@ export default function AgentDevelopmentPage() {
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>What has to be built next</h2>
                   <ul className='list-disc space-y-3 pl-6 text-gray-300'>
                     <li>
-                      Wire <code className='text-white'>DeployAgent</code> to the runtime, so an operator can upload a
-                      module rather than recompile the node.
+                      Expose <code className='text-white'>DeployAgent</code> over gRPC, so an operator can upload a
+                      module instead of driving the service from inside the process. It loads and runs one today;
+                      nothing outside the node can ask it to.
                     </li>
                     <li>Persist deployments, so an agent survives a restart.</li>
                     <li>
-                      Meter fuel against the marketplace, so running an agent costs MATRIX the way a compute job
-                      does. Today the fuel budget protects the node but bills nobody.
+                      Meter execution against the marketplace, so running an agent costs MATRIX the way a compute job
+                      does. Today the deadline protects the node but bills nobody.
                     </li>
                     <li>
-                      Decide what <code className='text-white'>send</code> may address. A host function that can
-                      message other agents needs a policy before it can be exposed to untrusted modules.
+                      Decide what <code className='text-white'>send</code> may address. The host function is real and
+                      refuses everything without a policy, which is the safe default and not a useful one: a
+                      messaging primitive for untrusted modules needs to say who may be named and what a name means.
                     </li>
                   </ul>
 
