@@ -16,9 +16,20 @@ Two contracts:
 - **`WrappedMatrix.sol` (wMATRIX)** — the bridge-backed wrapped token. Its
   supply is minted/burned **only** through the lock-and-mint bridge, so it is
   always backed 1:1 by locked native MATRIX. This is the real bridge token.
-- **`MatrixToken.sol` (MATRIX)** — the original standalone ERC-20 mirror kept
-  for its existing deploy/test surface and EIP-2612 `permit` support. It is an
-  owner-minted mirror; prefer `WrappedMatrix` for the bridge.
+- **`MatrixToken.sol` (MATRIX)** - the standalone ERC-20 mirror kept for its
+  existing deploy/test surface and EIP-2612 `permit` support. Prefer
+  `WrappedMatrix` for the bridge.
+
+  Its minting used to be `onlyOwner`: one key could issue up to the 1e27 cap in
+  a single transaction, with no warning to holders, sitting next to a bridge
+  token that already required m-of-n. `Ownable` is now gone entirely - not
+  merely pointed at a multisig, because that is a deploy-time convention nothing
+  enforces. Every mint needs a threshold of distinct registered minter
+  signatures AND a 2-day timelock: `proposeMint` starts the clock, the proposal
+  is publicly visible, `executeMint` lands it, and the same threshold can
+  `cancelMint` during the delay. The threshold, minter set and delay are
+  immutable, so changing any of them means redeploying. `scripts/deploy.ts`
+  refuses a threshold below 2 on a real network.
 
 ## Native <-> wrapped scale (single source of truth)
 
@@ -141,6 +152,14 @@ sleep 4                                                   # wait for readiness
 npx hardhat run scripts/deploy.ts        --network localhost   # MatrixToken
 npx hardhat run scripts/deploy-bridge.ts --network localhost   # WrappedMatrix
 ```
+
+`scripts/deploy.ts` reads the minter set from `MINTERS` (comma-separated `0x`
+addresses), the threshold from `THRESHOLD`, and the initial-supply holder from
+`INITIAL_HOLDER` (defaults to the deployer). On a local chain, with none set, it
+uses a published 2-of-3 development key set and says so. On `mainnet` or
+`sepolia` it **requires** `MINTERS` and refuses any threshold below 2 or a set
+smaller than 2: a 1-of-1 set satisfies the contract's m-of-n code and is exactly
+the single minting key the design removed.
 
 `scripts/deploy-bridge.ts` reads the attestor set from the `ATTESTORS` env var
 (comma-separated `0x` addresses) and the mint threshold from `THRESHOLD`
