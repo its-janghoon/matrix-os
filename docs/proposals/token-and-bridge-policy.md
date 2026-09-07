@@ -27,7 +27,9 @@ These are constraints, not opinions. Changing any of them is a code change.
 | Wrapped supply always equals locked native, by construction | mint requires an attestation per lock id; burn releases per event |
 | **There is no protocol fee anywhere.** A job pays buyer to provider in full | `internal/market`, `internal/marketapi` |
 | **There is no emission schedule.** Nothing pays anyone per block | no code |
-| **There is no stake.** The validator set is a fixed list in config | `internal/node`, `consensus.ValidatorSetFromConfig` |
+| The validator set is chain state: a change rides in a committed block and takes effect at an epoch boundary, and it needs a quorum of operators to have approved it | `internal/consensus/setchange.go` |
+| A validator proven to have equivocated is ejected the same way, with no config entry, because the evidence proves itself | `internal/consensus/evidence.go`, `Engine.reportEquivocation` |
+| **There is no stake.** Membership is agreement between operators, not capital at risk, so an ejected validator loses its place and nothing else | no code |
 
 Three consequences follow, and they drive everything below.
 
@@ -116,8 +118,11 @@ Three options, and I would take the third:
    when the network is idle, and gives stake something to earn, which is what
    makes slashing a deterrent rather than a threat.
 
-Option 3 needs stake, which needs the dynamic validator set. Until then, option
-1 is what we have, and we should say so rather than implying otherwise.
+Option 3 needs stake. The dynamic validator set it was waiting on has landed -
+membership is now chain state and equivocation is punished by ejection - so
+stake is the next piece, and it is the only remaining prerequisite. Until it
+exists, option 1 is what we have, and we should say so rather than implying
+otherwise.
 
 ### What I would refuse to do
 
@@ -135,8 +140,14 @@ Option 3 needs stake, which needs the dynamic validator set. Until then, option
    (and whether there is a sale at all). This needs a lawyer, not me.
 4. Audit budget. It sets the bridge timeline in part 2.
 5. Is the validator set permissioned at launch, or open with stake? I recommend
-   permissioned for the first release, with the dynamic set landing before any
-   third-party validator is invited.
+   permissioned for the first release. The mechanism that made that
+   recommendation conditional - a set that could only change by a coordinated
+   restart of every node - is gone, so a third-party validator can now be
+   admitted and, if it misbehaves provably, ejected while the network runs.
+   What is still missing is a cost to misbehaving: ejection without stake
+   removes a validator but takes nothing from it, so the deterrent is
+   reputational. That is acceptable among operators who know each other and
+   not acceptable for an open set.
 
 ## Part 2: getting wMATRIX to a market
 
@@ -227,13 +238,17 @@ In the order I would do them:
 1. **Programmatic provider rewards** in the consensus apply step, with a fixed
    decay from the genesis pool. Without it, the 40% is a promise with no
    mechanism.
-2. **Dynamic validator set** (ledger-backed, applied at epoch boundaries), then
-   **stake**, then **equivocation evidence and slashing**. Stake is the
-   prerequisite for the settlement fee, and slashing is what makes a permissive
-   validator set safe to open.
+2. ~~**Dynamic validator set** (ledger-backed, applied at epoch boundaries)~~ -
+   DONE. A change is a transaction to a reserved recipient, it needs a quorum of
+   operators to have approved it, and it takes effect at an epoch boundary so
+   every node switches at the same height. Proven equivocation ejects the
+   offender through the same path. What remains is **stake**: a bond that
+   ejection burns. Stake is the prerequisite for the settlement fee, and it is
+   what turns ejection from a reputational cost into a financial one, which is
+   what a permissionless validator set needs.
 3. **A settlement fee**, capped in code, split among the validators of the
    committing block.
 4. **A bridge mint cap** in the contract, plus the reconciliation report as a
    node endpoint rather than a manual query.
 
-Items 1, 3 and 4 are days. Item 2 is the large one.
+Items 1, 3 and 4 are days. Item 2's remaining half - stake - is the large one.
