@@ -1072,6 +1072,45 @@ Added to the architecture page: gossip validation before the relay, and peer
 scoring. Added to the README layout: `packages/protocol` and `packages/sdk`,
 neither of which was listed, plus the SDK build section.
 
+### Screenshots
+
+Re-captured, all at the 1280x577 the originals used so they drop into the README
+layout without reflowing it, and every one checked by eye rather than by exit
+code.
+
+**The console shot was stale in a way that mattered.** It showed MarketService
+and InferenceService on separate ports 9091 and 9092; the console now points both
+at one matrixd HTTP endpoint on 9093. It also showed the Connection tab,
+disconnected - an empty form under a caption claiming "the whole thing running".
+It is now the Providers tab connected to the built-in demo backend, which exists
+so the console can be driven with no daemon: all six tabs, and local versus
+remote providers with the peer ids they were discovered from.
+
+**Four captures were deleted.** `web-introduction`, `web-cli`,
+`web-network-setup` and `web-agent-dev` were doc-page shots that nothing
+embedded, and the screenshots README claimed five files while nine existed.
+`web-cli` had already been removed once on the reasoning that a doc page is
+navigational rather than a claim, then came back unreferenced - so deleting
+again without a rule would just repeat. The README now carries the rule: every
+file in the directory is embedded in the root README, and a capture is added
+only together with the change that embeds it. A screenshot of prose goes stale
+every time the prose changes and nothing points at it to notice, which is
+exactly how those four came to show a site that had moved on. Verified before
+deleting that the only remaining mention was an untracked `.agents` scratch file
+listing images themselves deleted long ago.
+
+Two capture failures are recorded in that README, because the file is the
+instructions for doing this again:
+
+- **Wait for the entry animation to finish, and only for the FINITE ones.**
+  Awaiting every animation hangs forever on a looping background one - the first
+  script burned 600s that way. The capture now asserts no visible element is
+  below full opacity, so a mid-fade shot fails loudly instead of shipping an
+  almost-invisible headline.
+- **Chromium in a container needs `--no-sandbox --disable-dev-shm-usage`.**
+  Without them the renderer dies partway through and every later wait hangs
+  against a closed target.
+
 ## Non-blocking notes
 
 Known and accepted, not blocking:
