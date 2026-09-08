@@ -808,15 +808,40 @@ holds only the four host functions, so there is no file or socket to reach for.
 The run-time deadline is real (`WithCloseOnContextDone`, proven by `spin.rs`),
 and `MaxFuel` was already replaced by it - a counter nothing could spend.
 
-### Identified, not fixed: no cap on deployments per account
+### Identified, not fixed: stored module bytes are never charged for
 
-Nothing limits how many agents one account deploys, and each stores its module
-(up to 32 MiB) persistently. `DeployAgent` needs an API key, so today the
-deployer is operator-authenticated and this is an operator's own disk. It stops
-being that the moment keys are issued to paying deployers, which is what the
-metering exists for. The fix is a per-account deployment cap, and the number is
-a business-model decision rather than a security default, so it is left for the
-CTO rather than guessed.
+Nothing bounds how much wasm one deployer accumulates on a node.
+`agentapi.Manager` persists `agent/module/<id>` as raw bytes, up to
+`DefaultMaxModuleBytes` (32 MiB) each, and `matrix.agent.v1.AgentService` is
+served on the network (default `0.0.0.0:9094`). Today the deployer is
+operator-authenticated, so this is an operator's own disk. It stops being that
+the moment keys are issued to paying deployers, which is what the metering
+exists for.
+
+**This was previously written up as "no cap on deployments per account", asking
+the CTO for a number. That framing was wrong on three counts, and the question
+should not have been asked in that shape.**
+
+1. **Count is the wrong unit.** Disk is the resource and `Deployment.ModuleSize`
+   already records it. A cap of 10 permits 320 MiB and a cap of 1000 permits
+   32 GiB, so a count only bounds disk if every module is assumed to be maximal.
+2. **There is nothing to count against.** `Deployment` carries ID, status,
+   module hash and size, limits, last output, last error, last charge and
+   timestamps - and no owner. The deployer IS known at deploy time
+   (`Deploy(ctx, id, module, limits, deployer string)`, used to charge) and is
+   then dropped. So no per-account accounting exists at all, and a per-account
+   cap cannot be expressed, let alone enforced across a restart.
+3. **The metering charges the wrong thing.** `LastCharge` is the credits settled
+   through consensus for a RUN. Storage is charged nothing, so it is the one
+   resource a deployer takes for free and keeps indefinitely. In a market the
+   answer to heavy resource use is to price it, not to forbid it: a cap turns a
+   paying customer into a refused one and bounds revenue at the same time.
+
+The recommendation is therefore **storage rent through the metering path that
+already exists**, not a number. Its one prerequisite is a code change rather
+than a business decision - put the deployer on the `Deployment` record, so
+stored bytes have an owner to bill. A hard byte quota, if one is wanted as a
+backstop, needs the same field first. Neither is built.
 
 ## Adversarial pass: the p2p layer
 
