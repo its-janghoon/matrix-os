@@ -1307,6 +1307,11 @@ demonstrated. A third e2e case now drives the consensus path end to end:
 consensus-derived lock id, real signatures, real mint, and a replay of the same
 id reverted. `cmd/bridge-attest -consensus -nonce N` exercises it.
 
+That e2e proved the derivation and the attestation and **proved nothing about
+the locking**, because it did the escrow move and the record in two separate
+`Atomically` calls where the engine does both in one. The section below is what
+happened when a real node did it the engine's way.
+
 `matrix bridge lock --to <address> --amount N` is the front door and prints the
 lock id the attestation step needs; `matrix bridge attestor-new` generates a
 validator's key.
@@ -1322,6 +1327,61 @@ So: lock -> gather a threshold -> `WrappedMatrix.mint` -> wMATRIX exists -> a po
 can be seeded. What remains is genuinely not code: a mainnet deploy, an audit,
 the liquidity capital, and putting the attestor addresses in `ATTESTORS` at
 deploy time.
+
+### The first lock on a real node deadlocked it
+
+Driven against a running `matrixd` with a hardhat chain behind it, an ordinary
+transfer committed and `matrix bridge lock` reported "did not commit within
+1m0s". A `SIGQUIT` stack dump named it in one goroutine: `commitAndApply` ->
+`Ledger.Atomically` -> `applyBridgeLock` -> `Bridge.RecordLock` ->
+`Ledger.Atomically`. A non-reentrant `RWMutex`, re-entered by the goroutine
+already holding it. `RecordLock` also took `b.mu` while holding the ledger, the
+inverse of the order `Reconcile` and `ProcessBurn` use, so it was an AB-BA
+deadlock as well.
+
+**The consensus driver goroutine never came back.** The node kept answering
+`health` (SERVING) and `tx list`, and hung on anything that reads a balance. It
+produced no further blocks. Nothing in the log said so, because a parked
+goroutine writes nothing - the last line was an ordinary pubsub validation, six
+minutes before.
+
+Two things about how it got there are worth keeping:
+
+- **The rule was already written down.** `ApplyAttestedUnlock` is the same shape
+  and takes the caller's `LedgerTx`; the `consensusOrdered` field doc spells out
+  that mixing the two lock orders is a deadlock. `RecordLock` was written next to
+  both and did neither.
+- **Every test passed the whole time**, including the four-validator cluster
+  test, because all of them drive a `fakeLocker` that takes no locks. A test
+  double that omits the only behaviour that matters tests the harness.
+
+The fix is `ApplyAttestedUnlock`'s: `RecordLock` takes the caller's
+`market.LedgerTx` and no lock of its own. The parameter is deliberately unused -
+it exists so the contract is checked by the compiler instead of by a comment. It
+is deliberately NOT gated on `consensusOrdered`: the unlock half has a mode (a
+solo node may release escrow itself, a set may not), the lock half does not, and
+gating it would leave a solo node escrowing value it never recorded.
+
+`Reconcile` had a smaller version of the same mistake: it read the counters
+outside the ledger lock and the escrow balance inside it, so a lock landing
+between the two reads reported a backing mismatch that never existed. It now
+takes one snapshot in one section.
+
+`TestARealBridgeDoesNotWedgeTheNode` wires a genuine `*bridge.Bridge` into a
+running cluster and, after the lock, commits an ordinary transfer to prove the
+node is still a node. Every read in it is watchdogged, because the failure mode
+is a hang and an unbounded poll loop turns a one-sentence failure into a
+1500-line stack dump. Both new tests were run against the deadlock restored.
+
+**Then the whole round trip, on a live node:** `matrix bridge lock` committed,
+escrow held 4,000,000,000, a transfer after it committed at block 1,
+`GetLockAttestation` returned a real signature from the node's keystore attestor,
+`WrappedMatrix.mint` minted 4e18 wMATRIX from it on chain, and the replay
+reverted with `LockAlreadyMinted`. That is the on-ramp, demonstrated rather than
+argued.
+
+A **public** testnet run (Sepolia) is still not possible from here: it needs a
+funded key and an RPC endpoint, which is operator capital, not code.
 
 ## Docs and website, brought in line
 
