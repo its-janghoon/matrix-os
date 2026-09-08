@@ -510,91 +510,22 @@ would encode one way in our code and the other way in the wallet.
 
 ## Still pending
 
-**A USDC on-ramp.** This is now the only thing between a MetaMask user and using
-the network with money they already hold. The path exists in full - a DEX
-purchase of wMATRIX, `WrappedMatrix.burn`, and the burn watcher in
-`node/bridge_watch.go` releasing native from escrow - and every piece is built.
-What is missing is a mainnet contract deploy, an audit, and DEX liquidity.
+**A USDC on-ramp.** The path is connected end to end in code: lock (now
+consensus-ordered), gather a threshold of attestations, `WrappedMatrix.mint`,
+then a DEX purchase and `WrappedMatrix.burn` back to native through the
+quorum-attested unlock. See "The on-ramp, end to end" for how each half works and
+why.
 
-**Update: the consensus-ordered lock is now built; what remains is an attestor
-key.** A lock is a signed transfer to `bridge/lock/<eth address>`, applied by
-every node from the committed block: value moves to `bridge/escrow`, the id is
-derived from the transaction (nonce, sender, recipient, amount) rather than from
-a per-node counter, and the bridge records it. It is the one reserved recipient
-besides a stake bond that carries value, and it pays no fee - deliberately, since
-escrow must receive the full amount or the wrapped supply minted against it
-exceeds the collateral by exactly the fee. A node with no bridge still escrows,
-or its balances would diverge from every node that has one.
+What remains is not code: a mainnet deploy, an audit, the liquidity capital, and
+putting the validators' attestor addresses in `ATTESTORS` at deploy time.
 
-**The attestation path is now built too, with the key in the keystore.** The node
-held no secp256k1 attestor at all, so nothing could sign a mint authorization.
-The CTO chose the encrypted keystore over a hex config field, which is the right
-answer for a key that is unilateral authority to mint against escrow.
-
-- `token.Keystore` gained a `KeyType`. Absent means ed25519, so every file
-  written before it reads unchanged and nothing migrates. It is also a GUARD:
-  both secrets are 32 bytes, so without a recorded type an attestor file could be
-  unlocked as an account - producing a live ed25519 key nobody meant to exist -
-  and a wallet file could become a minting key derived from someone's seed. Both
-  directions are refused and both are tested.
-- `EncryptSecretKeystore` / `DecryptSecretKeystore` reuse the account
-  construction exactly: scrypt, AES-256-GCM, the file carrying its own KDF
-  parameters. The attestor's Ethereum address is the authenticated additional
-  data, so a ciphertext cannot be moved into a file advertising a different
-  attestor - pinned by a test that swaps the label and expects the decryption to
-  fail.
-- `matrix bridge attestor-new --out <path>` generates one, refuses to overwrite
-  an existing key, writes 0600, and prints the address to register in the
-  contract's attestor set. Driven end to end, not just built.
-- The node unlocks it at startup from `bridge.attestor_keystore` with the
-  passphrase in `MATRIX_ATTESTOR_PASSPHRASE`, env-only. A configured key that
-  will not unlock is a startup FAILURE, not a warning: a validator that looks
-  like it is attesting and is not means mints silently stop reaching quorum with
-  nothing pointing at the node responsible.
-- `GetLockAttestation` returns this node's single signature. One, deliberately:
-  each validator holds its own key and the contract counts the threshold, so a
-  client gathers m of them. Gossiping partial signatures would be a second
-  consensus for something the contract already verifies.
-
-Three checked-in guards caught this change and all three were right: the read
-classification pin (the new RPC joins the public surface, so the reasoning is now
-written next to it), the RPC manifest, and the SDK's every-served-method-is-
-wrapped test.
-
-The paragraph below is what the entry said before any of this, kept because the
-reasoning still applies to the half that remains.
-
-**"None of which is code" was wrong, and this is the correction.** The INBOUND
-direction is indeed complete: buy wMATRIX, `WrappedMatrix.burn`, watcher,
-quorum-attested unlock, native released. But nothing can create the wMATRIX
-there is to buy. Minting requires a native LOCK, and `bridge.Lock` has exactly
-one caller in the tree - `cmd/bridge-attest`, which runs against a throwaway
-ledger it seeds itself. `MarketService` exposes thirteen RPCs and the only
-bridge one among them is `GetBridgeReconciliation`, a READ. There is no CLI
-command either.
-
-So a user on a running node cannot bridge native out, no wMATRIX supply can come
-into existence, and therefore the DEX liquidity the on-ramp depends on cannot be
-seeded. The missing piece is a lock RPC - request, escrow the native, return the
-validator-signed attestation - and that IS code. It is the smallest remaining
-thing standing between this repo and the token existing anywhere at all.
-
-Worth noting while we are here: `Bridge.Lock` writes the ledger directly through
-`ledger.Atomically`, not as a committed transaction, so a lock pays no protocol
-fee and the 1:1 backing invariant is exact. That is correct today only because
-nothing can call it over the network. Whoever adds the lock RPC has to make it
-consensus-ordered first, for the same reason the unlock had to be: a direct
-ledger write moves collateral on one node and nowhere else. `bridge/escrow` is
-also NOT in `IsReservedRecipient`, so if a lock ever does become a committed
-transfer it will start paying the fee, and minting the full pre-fee amount
-against a post-fee escrow balance would break the backing invariant by exactly
-the fee.
-
-(This paragraph used to end by repeating the watcher's own comment - that the
-unlock "is NOT consensus-ordered, which is correct for a solo operator and not
-for a validator set". Both the comment and this copy of it are gone: on a
-validator set the release is now ordered by quorum attestation. See "Docs and
-website, brought in line".)
+This entry previously said the remaining work was "a mainnet contract deploy, an
+audit, and DEX liquidity, none of which is code", and that was wrong twice over -
+first because nothing could mint wMATRIX at all, then because nothing could sign
+the authorization. Both are now built. The correction is left recorded rather
+than quietly overwritten, because the failure mode it names is the one this
+document is most prone to: an entry that describes the state it was written in
+and is never revisited.
 
 **Separate hosts and a NAT are now verified; two separate machines are not.**
 Two containers with distinct network namespaces, IPs and routing tables - one of
@@ -636,7 +567,19 @@ a guard.
 
 **Client-streaming** is refused by `connectapi` by design; nothing needs it.
 
-**No vesting contract.** Still open.
+**No vesting contract, and no vesting of any kind.** Still open, and worth
+stating precisely because a model built on this repo got it wrong: a grep for
+vest/cliff/lockup across the Go and Solidity trees returns nothing.
+`GenesisAllocation` is `{Account, Amount}` and `ApplyGenesis` credits balances
+once at first start - that is the whole mechanism. The "12-month cliff, 36 months
+linear" in `docs/proposals/token-and-bridge-policy.md` is a document, not code.
+
+Also worth knowing before anyone plans a cap table against that proposal: a
+genesis allocation is applied from each node's OWN config at first start, and the
+chain carries transactions rather than the balances they started from. So an
+allocation exists only if every operator writes the identical genesis into their
+own file. A node with a different one agrees on history while disagreeing about
+money.
 
 The multisig half is done. `MatrixToken.mint` was `onlyOwner`: one address could
 issue up to the 1e27 cap in a single transaction, sitting next to
@@ -881,134 +824,6 @@ holds only the four host functions, so there is no file or socket to reach for.
 The run-time deadline is real (`WithCloseOnContextDone`, proven by `spin.rs`),
 and `MaxFuel` was already replaced by it - a counter nothing could spend.
 
-### The maintainer share: how the person running the network gets paid
-
-The protocol fee pays validators for validating. It paid nothing for
-MAINTENANCE, and the two alternatives available to a founder both fail at
-exactly the wrong moment: a validator share **dilutes as the set grows**, so it
-shrinks precisely as the project succeeds, and a genesis allocation funds a
-moment rather than an ongoing obligation.
-
-`consensus.maintainer_account` is now paid a fixed cut of the fee, taken before
-the rest is split pro rata. Zero by default.
-
-- **It is a share OF THE FEE, not of the transfer**, so it inherits the fee's
-  1% ceiling. At the maximum fee and this share's own ceiling, a maintainer
-  takes 0.5% of transferred value and can never take more, whatever anyone
-  configures. A cut quoted against the transfer would need its own ceiling and a
-  second worst case to reason about.
-- **Capped at half the fee** (`MaxMaintainerShareBasisPoints = 5000`), in code
-  rather than config, for the reason the fee itself is capped: the fee is what
-  makes a bond worth posting by a third party, and a maintainer funding
-  themselves out of most of it would be spending the budget that buys the
-  network its security.
-- **An operator cannot quietly zero it.** It is read from config like the fee
-  rate, and like the fee rate every node must agree: a node using a different
-  share computes different balances from the same block and forks itself off.
-  Nobody built that as enforcement, it falls out of the fee being consensus
-  arithmetic - but it is stronger than a promise, because the cost of not paying
-  is leaving the network.
-- **It is a tax on users, and it is disclosed rather than hidden.** Default
-  zero, bounded in code, printed at startup with both the share of the fee and
-  the share of transferred value, and readable through `Engine.MaintainerShare`.
-- **A misconfiguration refuses to start.** A share over the ceiling, a share
-  with no account, a reserved id, or anything that is not 64 lowercase hex.
-  That last one matters most: a mistyped account is a fee paid every block into
-  something nobody holds a key for, forever, and it looks exactly like it is
-  working.
-
-The arithmetic divides before multiplying, as `FeeFor` does, because the accrual
-can reach the supply cap and `accrued * 5000` wraps a uint64 - a wrapped share
-is a wrong balance on every node rather than an error anywhere. Pinned at seven
-scales from one base unit to the whole cap.
-
-What is still only the CTO's to decide is the number. The mechanism defaults to
-paying nobody.
-
-### Storage rent, built
-
-Stored module bytes are now charged for. The manager charged for a RUN and
-nothing for STORAGE, so a deployed module was the one resource a deployer took
-for free and kept indefinitely - `agent/module/<id>`, raw wasm up to 32 MiB each,
-on a service served to the network.
-
-`MeterConfig.StoragePrice` is credits per MiB per day, zero by default, on the
-same reasoning as the per-run price: what storage costs is monetary policy. When
-set, an hourly sweep charges each deployment's owner through the same consensus
-settler the run charge uses, and evicts what goes unpaid past a grace period
-(72h default). Eviction is what makes rent a bound on disk rather than an
-unpayable debt that grows.
-
-**The rounding is the whole problem, and a naive version silently charges
-nothing.** Rent for one hour on a small module is a fraction of a credit.
-Truncating per sweep charges zero forever, and gets WORSE the more often the
-sweep runs - the opposite of what a shorter interval should mean. So the
-watermark advances only by the time the paid credits actually cover, and the
-sub-credit remainder keeps accruing until it crosses one credit. Measured
-against the naive version: **24 hourly sweeps charged 0 where one daily sweep
-charged 10**. Two tests pin it, and both fail against the truncating
-implementation. The accrual is `big.Int` because bytes x price x nanoseconds
-passes 2^64 well before any of the three is unreasonable, and a wrapped multiply
-produces a wrong bill rather than an error.
-
-**A second defect surfaced while building it: the payer was whoever the client
-said.** `deployer` was a request field, and the auth interceptor only checked
-that the caller held a valid key with the deploy permission - not that the named
-account was theirs. Any caller who could deploy could bill any account the node
-holds a signing key for. Survivable when every key was the operator's and the
-only charge was one run; not survivable with rent, which re-bills the named
-account every hour for as long as the bytes sit there. The payer is now the
-account on the caller's own key, the same rule the OpenAI route already uses,
-and naming a different account is refused rather than silently redirected. Four
-tests; the refusal test fails against the old behaviour.
-
-Other properties pinned: the deployer is persisted and survives a restart (rent
-has to find the payer an hour later); re-deploying the same id does NOT reset the
-rent clock (or the bill is avoidable by re-pushing before every sweep); a record
-written before rent existed starts its clock at the sweep rather than
-back-charging to CreatedAt; a record with no owner is skipped, never evicted, so
-an upgrade cannot delete an operator's own agents; and a node configured to
-charge rent it cannot collect refuses to start.
-
-Not done: `Deployment.Deployer` is not surfaced in the proto response, so a
-client cannot read back who it is billed as. The record has it and the CLI does
-not show it.
-
-### Superseded: the per-account deployment cap
-
-Nothing bounds how much wasm one deployer accumulates on a node.
-`agentapi.Manager` persists `agent/module/<id>` as raw bytes, up to
-`DefaultMaxModuleBytes` (32 MiB) each, and `matrix.agent.v1.AgentService` is
-served on the network (default `0.0.0.0:9094`). Today the deployer is
-operator-authenticated, so this is an operator's own disk. It stops being that
-the moment keys are issued to paying deployers, which is what the metering
-exists for.
-
-**This was previously written up as "no cap on deployments per account", asking
-the CTO for a number. That framing was wrong on three counts, the question
-should not have been asked in that shape, and rent above is what was built
-instead.**
-
-1. **Count is the wrong unit.** Disk is the resource and `Deployment.ModuleSize`
-   already records it. A cap of 10 permits 320 MiB and a cap of 1000 permits
-   32 GiB, so a count only bounds disk if every module is assumed to be maximal.
-2. **There is nothing to count against.** `Deployment` carries ID, status,
-   module hash and size, limits, last output, last error, last charge and
-   timestamps - and no owner. The deployer IS known at deploy time
-   (`Deploy(ctx, id, module, limits, deployer string)`, used to charge) and is
-   then dropped. So no per-account accounting exists at all, and a per-account
-   cap cannot be expressed, let alone enforced across a restart.
-3. **The metering charges the wrong thing.** `LastCharge` is the credits settled
-   through consensus for a RUN. Storage is charged nothing, so it is the one
-   resource a deployer takes for free and keeps indefinitely. In a market the
-   answer to heavy resource use is to price it, not to forbid it: a cap turns a
-   paying customer into a refused one and bounds revenue at the same time.
-
-The answer was therefore **storage rent through the metering path that already
-existed**, not a number, and it is built - see above. A hard byte quota, if one
-is ever wanted as a backstop, has its prerequisite in place now: the deployer is
-on the record.
-
 ## Adversarial pass: the p2p layer
 
 Two amplification findings, both fixed, both measured.
@@ -1230,6 +1045,264 @@ Solidity source.
 Nothing on the list. Remote existence oracles (whether a response reveals that
 an account or provider exists) were treated as out of scope here: they are
 answered by the response itself, not by its timing.
+
+## Money: how the operator gets paid
+
+Everything in this section is OFF by default. Every price and every share is
+monetary policy, so none of it is a default the engine picks on an operator's
+behalf.
+
+### The maintainer share: how the person running the network gets paid
+
+The protocol fee pays validators for validating. It paid nothing for
+MAINTENANCE, and the two alternatives available to a founder both fail at
+exactly the wrong moment: a validator share **dilutes as the set grows**, so it
+shrinks precisely as the project succeeds, and a genesis allocation funds a
+moment rather than an ongoing obligation.
+
+`consensus.maintainer_account` is now paid a fixed cut of the fee, taken before
+the rest is split pro rata. Zero by default.
+
+- **It is a share OF THE FEE, not of the transfer**, so it inherits the fee's
+  1% ceiling. At the maximum fee and this share's own ceiling, a maintainer
+  takes 0.5% of transferred value and can never take more, whatever anyone
+  configures. A cut quoted against the transfer would need its own ceiling and a
+  second worst case to reason about.
+- **Capped at half the fee** (`MaxMaintainerShareBasisPoints = 5000`), in code
+  rather than config, for the reason the fee itself is capped: the fee is what
+  makes a bond worth posting by a third party, and a maintainer funding
+  themselves out of most of it would be spending the budget that buys the
+  network its security.
+- **An operator cannot quietly zero it.** It is read from config like the fee
+  rate, and like the fee rate every node must agree: a node using a different
+  share computes different balances from the same block and forks itself off.
+  Nobody built that as enforcement, it falls out of the fee being consensus
+  arithmetic - but it is stronger than a promise, because the cost of not paying
+  is leaving the network.
+- **It is a tax on users, and it is disclosed rather than hidden.** Default
+  zero, bounded in code, printed at startup with both the share of the fee and
+  the share of transferred value, and readable through `Engine.MaintainerShare`.
+- **A misconfiguration refuses to start.** A share over the ceiling, a share
+  with no account, a reserved id, or anything that is not 64 lowercase hex.
+  That last one matters most: a mistyped account is a fee paid every block into
+  something nobody holds a key for, forever, and it looks exactly like it is
+  working.
+
+The arithmetic divides before multiplying, as `FeeFor` does, because the accrual
+can reach the supply cap and `accrued * 5000` wraps a uint64 - a wrapped share
+is a wrong balance on every node rather than an error anywhere. Pinned at seven
+scales from one base unit to the whole cap.
+
+What is still only the CTO's to decide is the number. The mechanism defaults to
+paying nobody.
+
+### Storage rent, built
+
+Stored module bytes are now charged for. The manager charged for a RUN and
+nothing for STORAGE, so a deployed module was the one resource a deployer took
+for free and kept indefinitely - `agent/module/<id>`, raw wasm up to 32 MiB each,
+on a service served to the network.
+
+`MeterConfig.StoragePrice` is credits per MiB per day, zero by default, on the
+same reasoning as the per-run price: what storage costs is monetary policy. When
+set, an hourly sweep charges each deployment's owner through the same consensus
+settler the run charge uses, and evicts what goes unpaid past a grace period
+(72h default). Eviction is what makes rent a bound on disk rather than an
+unpayable debt that grows.
+
+**The rounding is the whole problem, and a naive version silently charges
+nothing.** Rent for one hour on a small module is a fraction of a credit.
+Truncating per sweep charges zero forever, and gets WORSE the more often the
+sweep runs - the opposite of what a shorter interval should mean. So the
+watermark advances only by the time the paid credits actually cover, and the
+sub-credit remainder keeps accruing until it crosses one credit. Measured
+against the naive version: **24 hourly sweeps charged 0 where one daily sweep
+charged 10**. Two tests pin it, and both fail against the truncating
+implementation. The accrual is `big.Int` because bytes x price x nanoseconds
+passes 2^64 well before any of the three is unreasonable, and a wrapped multiply
+produces a wrong bill rather than an error.
+
+**A second defect surfaced while building it: the payer was whoever the client
+said.** `deployer` was a request field, and the auth interceptor only checked
+that the caller held a valid key with the deploy permission - not that the named
+account was theirs. Any caller who could deploy could bill any account the node
+holds a signing key for. Survivable when every key was the operator's and the
+only charge was one run; not survivable with rent, which re-bills the named
+account every hour for as long as the bytes sit there. The payer is now the
+account on the caller's own key, the same rule the OpenAI route already uses,
+and naming a different account is refused rather than silently redirected. Four
+tests; the refusal test fails against the old behaviour.
+
+Other properties pinned: the deployer is persisted and survives a restart (rent
+has to find the payer an hour later); re-deploying the same id does NOT reset the
+rent clock (or the bill is avoidable by re-pushing before every sweep); a record
+written before rent existed starts its clock at the sweep rather than
+back-charging to CreatedAt; a record with no owner is skipped, never evicted, so
+an upgrade cannot delete an operator's own agents; and a node configured to
+charge rent it cannot collect refuses to start.
+
+Not done: `Deployment.Deployer` is not surfaced in the proto response, so a
+client cannot read back who it is billed as. The record has it and the CLI does
+not show it.
+
+### Superseded: the per-account deployment cap
+
+Nothing bounds how much wasm one deployer accumulates on a node.
+`agentapi.Manager` persists `agent/module/<id>` as raw bytes, up to
+`DefaultMaxModuleBytes` (32 MiB) each, and `matrix.agent.v1.AgentService` is
+served on the network (default `0.0.0.0:9094`). Today the deployer is
+operator-authenticated, so this is an operator's own disk. It stops being that
+the moment keys are issued to paying deployers, which is what the metering
+exists for.
+
+**This was previously written up as "no cap on deployments per account", asking
+the CTO for a number. That framing was wrong on three counts, the question
+should not have been asked in that shape, and rent above is what was built
+instead.**
+
+1. **Count is the wrong unit.** Disk is the resource and `Deployment.ModuleSize`
+   already records it. A cap of 10 permits 320 MiB and a cap of 1000 permits
+   32 GiB, so a count only bounds disk if every module is assumed to be maximal.
+2. **There is nothing to count against.** `Deployment` carries ID, status,
+   module hash and size, limits, last output, last error, last charge and
+   timestamps - and no owner. The deployer IS known at deploy time
+   (`Deploy(ctx, id, module, limits, deployer string)`, used to charge) and is
+   then dropped. So no per-account accounting exists at all, and a per-account
+   cap cannot be expressed, let alone enforced across a restart.
+3. **The metering charges the wrong thing.** `LastCharge` is the credits settled
+   through consensus for a RUN. Storage is charged nothing, so it is the one
+   resource a deployer takes for free and keeps indefinitely. In a market the
+   answer to heavy resource use is to price it, not to forbid it: a cap turns a
+   paying customer into a refused one and bounds revenue at the same time.
+
+The answer was therefore **storage rent through the metering path that already
+existed**, not a number, and it is built - see above. A hard byte quota, if one
+is ever wanted as a backstop, has its prerequisite in place now: the deployer is
+on the record.
+
+### Rotating the maintainer account
+
+`maintainer_account` was startup config and nothing else, so moving to a fresh
+key meant editing YAML on every validator and restarting them - and because the
+share is consensus arithmetic, a network part-way through that edit computes
+different balances from the same block. A fork. The operation most likely to be
+needed was the one most likely to break the chain.
+
+A rotation is now a transaction to `consensus/maintainer/rotate/<successor>`,
+applied inside the same critical section as the block's transfers, so every node
+switches at the same height with no coordinated restart.
+
+Only the CURRENT maintainer may rotate, proved by the transaction's own
+signature. **A validator-quorum override was deliberately not added**: it would
+let a validator majority redirect the maintainer's income to themselves, turning
+a standing share into something held at the set's pleasure. That may be right for
+some network; it is not a default for the engine.
+
+No new persisted key. The engine already replays every committed block at startup
+to rebuild the dedup set and the burn tallies, so rotations replay too and the
+CHAIN stays the single authority - last committed rotation wins. The account is
+an `atomic.Pointer` because the block-apply path writes it while the ledger
+critical section reads it, and taking `e.mu` under the ledger lock would
+establish a second lock order; the validator set is atomic for the same reason.
+
+What it does NOT fix, and the file says so: a lost key cannot sign, so it cannot
+rotate. This is key hygiene, not key recovery. Nothing in a chain can be.
+
+### A deployment's rent rate is pinned, and prices have a ceiling
+
+Rent RECURS, which makes it different from the per-run price: a deployer agrees
+to a rate once, and then the operator can change it while their bytes are already
+on the disk. Billing at the live config value let an operator raise the price on
+modules already stored and either drain the deployer or evict them - a bill
+nobody agreed to, on data already handed over. **Measured against the old
+behaviour: raising the price a thousandfold billed 21,486 credits where 21 were
+agreed.**
+
+`Deployment.RentRate` fixes the rate when the clock starts and the sweep bills
+from the record. Same shape as the keystore reading the FILE's own KDF
+parameters. A price change applies only to deployments made after it;
+re-deploying an id keeps the agreed rate, because updating a module is not a new
+tenancy.
+
+`MaxRunPrice` and `MaxStoragePrice` exist too, and the comment is honest about
+what they are not. They are not the fee's ceiling, which exists because a fee is
+taken from a transfer the payer did not choose. An agent price is opted into -
+too high and nobody deploys, a refusal rather than a theft - and the real
+protection against re-pricing is the pinned rate. What the ceilings catch is a
+supply-cap-sized number pasted into a price field.
+
+### What the numbers actually are
+
+The CTO asked what it would take to get rich off this. Worth recording, because
+the answer is counterintuitive and the arithmetic is fixed in code.
+
+The composite maintainer take is `fee_bps x maintainer_bps`, both compile-time
+capped, so **0.5% of transferred value is the hard ceiling** and 0.2% is a
+realistic setting. Calibrated against the category (searched, not estimated):
+Akash did **$3.15M of lease revenue in all of 2025**; io.net peaked around $20M
+annualized and fell back; Render takes a 5% service fee - ten times this
+protocol's ceiling - and that yields about $110k/yr.
+
+**Capture 100% of the settled volume of the largest decentralised compute network
+that has ever existed, at the maximum rate the binary permits, and the maintainer
+earns roughly $100,000/year.** The fee path funds a maintainer. It does not make
+one rich, which is exactly what it was asked to do.
+
+Two corrections to what was said in the moment, kept because both were wrong in
+instructive ways. "Token price does not affect fee income" is false HERE: it
+holds only where prices are quoted in fiat and converted at settlement, and
+nothing in this code reprices a job - `price_per_unit` is quoted in MATRIX and
+static until a provider re-registers. And "stock beats flow by two orders of
+magnitude" was a units error, comparing a capitalized quantity (FDV) against one
+year of income; the token price cancels out of the comparison entirely.
+
+## The on-ramp, end to end
+
+It is connected now. It was not before, in a way the handoff had recorded
+incorrectly as "none of which is code".
+
+**Locking is consensus-ordered.** A lock is a signed transfer to
+`bridge/lock/<eth address>`, applied by every node from the committed block. This
+is simpler than the burn unlock, which needed a quorum because observing an
+Ethereum burn requires an Ethereum endpoint and consensus may only depend on
+committed state; a lock needs no outside observation, because the user's signed
+intent IS the transaction.
+
+The lock id is derived, not counted. `bridge.Lock` numbered locks with a per-node
+sequence - exactly the kind of state two nodes disagree about. The id now comes
+from the transaction (nonce, sender, recipient, amount), and a test pins it
+byte-identical to the bridge's own derivation, because an id that differed
+between the chain and the bridge would attest to a lock the contract could not
+match.
+
+It is the one reserved recipient besides a stake bond that carries value, and it
+pays no fee. **Load-bearing, not incidental**: escrow must receive the full
+amount, because the wrapped supply minted against it is computed from what the
+user locked, so a fee would mint more wrapped than the escrow holds and break the
+1:1 backing by exactly the fee. The amount is also kept out of `credited[]`,
+since escrow is collateral rather than earnings.
+
+A node with no bridge still escrows - it would otherwise diverge from every node
+that has one - and simply cannot attest afterwards.
+
+**The attestor key lives in the encrypted keystore.** See the money section above
+for the format guard; operationally: `matrix bridge attestor-new --out <path>`
+generates one and prints the address to register in the contract's attestor set,
+`bridge.attestor_keystore` points at it, and `MATRIX_ATTESTOR_PASSPHRASE` unlocks
+it. A configured key that will not unlock is a startup FAILURE, because a
+validator that looks like it is attesting and is not means mints silently stop
+reaching quorum with nothing pointing at the node responsible.
+
+**`GetLockAttestation` returns one signature.** Each validator holds its own key
+and the contract counts the threshold, so a client gathers m of them. It is a
+public read: it signs nothing new, and the mint it authorizes goes to the address
+the LOCKER chose, so an open endpoint lets anyone gather an authorization and
+nobody redirect one.
+
+So: lock -> gather a threshold -> `WrappedMatrix.mint` -> wMATRIX exists -> a pool
+can be seeded. What remains is genuinely not code: a mainnet deploy, an audit,
+the liquidity capital, and putting the attestor addresses in `ATTESTORS` at
+deploy time.
 
 ## Docs and website, brought in line
 
