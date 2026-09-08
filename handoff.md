@@ -515,9 +515,13 @@ the network with money they already hold. The path exists in full - a DEX
 purchase of wMATRIX, `WrappedMatrix.burn`, and the burn watcher in
 `node/bridge_watch.go` releasing native from escrow - and every piece is built.
 What is missing is a mainnet contract deploy, an audit, and DEX liquidity, none
-of which is code. Note also what that watcher's own comment says: the unlock is
-a per-node relayer and is NOT consensus-ordered, which is correct for a solo
-operator and not for a validator set.
+of which is code.
+
+(This paragraph used to end by repeating the watcher's own comment - that the
+unlock "is NOT consensus-ordered, which is correct for a solo operator and not
+for a validator set". Both the comment and this copy of it are gone: on a
+validator set the release is now ordered by quorum attestation. See "Docs and
+website, brought in line".)
 
 **Separate hosts and a NAT are now verified; two separate machines are not.**
 Two containers with distinct network namespaces, IPs and routing tables - one of
