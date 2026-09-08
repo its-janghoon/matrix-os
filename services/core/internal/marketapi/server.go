@@ -440,6 +440,21 @@ func (s *Server) Start(ctx context.Context) error {
 	return nil
 }
 
+// SetServingStatus overrides what the health endpoint reports.
+//
+// It exists because SERVING was a lie the node kept telling. Health was set
+// once at Start and once at Stop, so a node whose ledger had deadlocked - no
+// blocks, every balance read hanging - still answered SERVING to anything that
+// asked, which is the answer a supervisor and a load balancer both act on. A
+// component that knows the node cannot do its job needs a way to say so; see
+// ledgerStallWatch in internal/node.
+func (s *Server) SetServingStatus(status healthpb.HealthCheckResponse_ServingStatus) {
+	if s.healthSvc == nil {
+		return
+	}
+	s.healthSvc.SetServingStatus("", status)
+}
+
 // Stop gracefully stops the gRPC server, mirroring admin.Server.Stop.
 func (s *Server) Stop(ctx context.Context) error {
 	s.healthSvc.SetServingStatus("", healthpb.HealthCheckResponse_NOT_SERVING)

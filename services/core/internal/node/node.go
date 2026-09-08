@@ -1421,6 +1421,10 @@ func (n *Node) Start() error {
 	// provider's capacity until this process restarts, which is a free way to
 	// take a competitor off the market, so sweep expired ones.
 	go n.expireUnpaidInferenceJobs()
+	// Watch the ledger for a hold that never ends. It costs one atomic load
+	// every few seconds and is the difference between a wedged node that says
+	// so and one that keeps answering SERVING while it does nothing.
+	go n.watchLedgerStalls()
 
 	var inferenceAuth *admin.Authenticator
 	if n.config.Security.EnableACLs {
@@ -2061,6 +2065,20 @@ func (n *Node) startBootstrapDialer() {
 // It is a fraction of inference.DefaultUnpaidJobTTL so a released reservation is
 // back on the market promptly after it expires, without a tight loop.
 const unpaidInferenceSweepInterval = 30 * time.Second
+
+// watchLedgerStalls reports a ledger write lock that one holder never gives
+// back, and stops the node claiming to serve while it cannot. See
+// ledger_watch.go for what this is compensating for.
+func (n *Node) watchLedgerStalls() {
+	if n.market == nil || n.market.Ledger() == nil {
+		return
+	}
+	w := newLedgerStallWatch(n.market.Ledger(), os.Stdout)
+	if n.marketServer != nil {
+		w.setServing = n.marketServer.SetServingStatus
+	}
+	w.run(n.ctx)
+}
 
 // expireUnpaidInferenceJobs releases the reservations of jobs whose buyer never
 // signed. It runs until the node's context is cancelled.

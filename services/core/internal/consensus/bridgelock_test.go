@@ -3,6 +3,7 @@ package consensus
 import (
 	"encoding/hex"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
@@ -26,7 +27,12 @@ func ethAddr(b byte) [20]byte {
 	return a
 }
 
+// fakeLocker is guarded because a CLUSTER test hands one of these to every
+// node, and each node applies the block on its own goroutine. Unguarded
+// counters here are a data race that -race fails on, and that a plain run turns
+// into an occasional wrong count rather than an error.
 type fakeLocker struct {
+	mu      sync.Mutex
 	calls   int
 	lastID  [32]byte
 	lastAmt uint64
@@ -35,12 +41,31 @@ type fakeLocker struct {
 }
 
 func (f *fakeLocker) RecordLock(_ market.LedgerTx, id [32]byte, from string, to [20]byte, amount uint64) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls++
 	f.lastID = id
 	f.lastAmt = amount
 	return f.err
 }
-func (f *fakeLocker) EscrowAccount() string { return f.escrow }
+
+// EscrowAccount is read while the engine holds the ledger, and escrow is set
+// once before the cluster starts, but it is guarded anyway: an unguarded read
+// of a field another test writes is the kind of race that only shows up on the
+// run you cannot reproduce.
+func (f *fakeLocker) EscrowAccount() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.escrow
+}
+
+// snapshot reads the counters the way a test goroutine must: under the lock the
+// engine goroutines write them under.
+func (f *fakeLocker) snapshot() (calls int, lastID [32]byte, lastAmt uint64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls, f.lastID, f.lastAmt
+}
 
 // TestTheLockIdMatchesTheBridgesOwnDerivation. The chain derives the id and the
 // bridge attests to it. If the two disagreed, every attestation would name a
@@ -180,12 +205,13 @@ func TestApplyingALockMovesValueToEscrowAndRecordsIt(t *testing.T) {
 	if bal, _ := ledger.Balance(acct.AccountID()); bal != 6_000 {
 		t.Fatalf("sender holds %d, want 6000", bal)
 	}
-	if locker.calls != 1 || locker.lastAmt != 4_000 {
-		t.Fatalf("the lock was not recorded: %d calls, amount %d", locker.calls, locker.lastAmt)
+	calls, lastID, lastAmt := locker.snapshot()
+	if calls != 1 || lastAmt != 4_000 {
+		t.Fatalf("the lock was not recorded: %d calls, amount %d", calls, lastAmt)
 	}
 	want := DeriveLockID(3, acct.AccountID(), ethAddr(0x7e), 4_000)
-	if locker.lastID != want {
-		t.Fatalf("recorded id %x, want %x", locker.lastID, want)
+	if lastID != want {
+		t.Fatalf("recorded id %x, want %x", lastID, want)
 	}
 }
 
@@ -214,7 +240,7 @@ func TestAnUnaffordableLockIsSkippedNotWedged(t *testing.T) {
 	if ok {
 		t.Fatal("an unaffordable lock reported success")
 	}
-	if locker.calls != 0 {
+	if calls, _, _ := locker.snapshot(); calls != 0 {
 		t.Fatal("an unaffordable lock was recorded, so the bridge would attest to collateral " +
 			"that was never escrowed")
 	}

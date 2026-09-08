@@ -72,7 +72,7 @@ func lockCommitsOn(t *testing.T, size int) {
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		if bal, err := nodes[0].ledger.Balance(bridge.EscrowAccount); err == nil && bal == 4_000 {
-			if locker.calls == 0 {
+			if calls, _, _ := locker.snapshot(); calls == 0 {
 				t.Fatal("escrow moved but the lock was never recorded, so nothing could attest to it")
 			}
 			return
@@ -81,9 +81,10 @@ func lockCommitsOn(t *testing.T, size int) {
 	}
 
 	bal, _ := nodes[0].ledger.Balance(bridge.EscrowAccount)
+	calls, _, _ := locker.snapshot()
 	t.Fatalf("the lock never committed: escrow holds %d after 15s, recorded %d times. A lock "+
 		"that Submit accepts and no block ever carries is invisible - the proposer skips a "+
-		"reserved transaction its own verification refuses, silently", bal, locker.calls)
+		"reserved transaction its own verification refuses, silently", bal, calls)
 }
 
 // realLocker is the node's bridgeLockAdapter, rebuilt here so the cluster test

@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/cockroachdb/pebble"
 	"github.com/ecirlabs/matrix-core/internal/kv"
@@ -74,6 +76,23 @@ func BalanceKey(account string) []byte {
 type Ledger struct {
 	store *kv.Store
 	mu    sync.RWMutex
+
+	// heldSinceNS is the wall-clock nanosecond at which the CURRENT holder took
+	// the write lock, or zero when nobody holds it.
+	//
+	// It exists because a stalled ledger is otherwise silent. A goroutine that
+	// takes this lock and never gives it back stops every writer AND every
+	// reader (a pending writer blocks new RLocks), so the node keeps answering
+	// gRPC health with SERVING while every balance read hangs and no block is
+	// produced. That is not a hypothetical: it shipped, in a bridge lock that
+	// re-entered this mutex from inside its own critical section, and finding it
+	// took a SIGQUIT stack dump because nothing in any log said a word.
+	//
+	// A timestamp rather than a "locked" flag, because the question worth
+	// asking is not whether the lock is held - it is held constantly, that is
+	// its job - but whether THIS holder has had it for longer than any honest
+	// holder ever needs. See WriteLockHeldFor.
+	heldSinceNS atomic.Int64
 }
 
 // NewLedger creates a new Ledger backed by the given store.
@@ -108,6 +127,49 @@ func (t lockedLedger) Transfer(from, to string, amount uint64) error {
 	return t.l.transferLocked(from, to, amount)
 }
 
+// lockWrite takes the write lock and records when, so a holder that never
+// returns can be named by WriteLockHeldFor instead of being inferred from a
+// hung node. EVERY write-lock acquisition goes through this pair: a site that
+// took l.mu directly would be a stall the watchdog cannot see, which is the
+// same silence this is here to end.
+func (l *Ledger) lockWrite() {
+	l.mu.Lock()
+	l.heldSinceNS.Store(time.Now().UnixNano())
+}
+
+// unlockWrite clears the holder timestamp before releasing, so the window in
+// which the lock is free but still looks held is empty rather than merely
+// short.
+func (l *Ledger) unlockWrite() {
+	l.heldSinceNS.Store(0)
+	l.mu.Unlock()
+}
+
+// WriteLockHeldFor reports how long the current holder has held the write lock,
+// and whether anyone holds it at all. It takes no lock itself - it could not,
+// since the thing it reports on is the lock being unavailable - and is safe to
+// call from any goroutine at any time.
+//
+// now is a parameter so a watchdog can be tested against a stall it invents
+// rather than one it has to wait out.
+//
+// A false second return means the lock was free at the instant it was read,
+// which says nothing about the next instant; that is fine, because the caller
+// is looking for a hold that PERSISTS across samples, not a snapshot.
+func (l *Ledger) WriteLockHeldFor(now time.Time) (time.Duration, bool) {
+	since := l.heldSinceNS.Load()
+	if since == 0 {
+		return 0, false
+	}
+	held := now.Sub(time.Unix(0, since))
+	if held < 0 {
+		// The holder took the lock after the caller read the clock. Report zero
+		// rather than a negative age, which no threshold comparison expects.
+		return 0, true
+	}
+	return held, true
+}
+
 // Atomically runs fn as a single critical section under the ledger write lock,
 // passing a LedgerTx view whose Balance/Transfer operate without re-locking.
 // Because every mutating Ledger method (Credit, Debit, Transfer) takes the same
@@ -116,8 +178,8 @@ func (t lockedLedger) Transfer(from, to string, amount uint64) error {
 // concurrent writer draining the account in between. fn's error is returned
 // unchanged.
 func (l *Ledger) Atomically(fn func(tx LedgerTx) error) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockWrite()
+	defer l.unlockWrite()
 	return fn(lockedLedger{l})
 }
 
@@ -159,8 +221,8 @@ func (l *Ledger) Balance(account string) (uint64, error) {
 // (token.Treasury.ApplyGenesis / Issue) rather than calling Credit directly.
 // Credit remains for internal, non-issuing balance adjustments and tests.
 func (l *Ledger) Credit(account string, amount uint64) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockWrite()
+	defer l.unlockWrite()
 
 	current, err := l.readBalance(account)
 	if err != nil {
@@ -175,8 +237,8 @@ func (l *Ledger) Credit(account string, amount uint64) error {
 // Debit subtracts amount from an account balance. It returns ErrInsufficientFunds
 // (and leaves the balance unchanged) when the balance is less than amount.
 func (l *Ledger) Debit(account string, amount uint64) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockWrite()
+	defer l.unlockWrite()
 
 	current, err := l.readBalance(account)
 	if err != nil {
@@ -196,8 +258,8 @@ func (l *Ledger) Debit(account string, amount uint64) error {
 // balance changes. The two balance writes are applied through a single kv batch
 // so a partial application is impossible.
 func (l *Ledger) Transfer(from, to string, amount uint64) error {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+	l.lockWrite()
+	defer l.unlockWrite()
 	return l.transferLocked(from, to, amount)
 }
 
