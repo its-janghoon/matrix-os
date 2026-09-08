@@ -104,6 +104,39 @@ type Deployment struct {
 	// CreatedAtNS / LastRunAtNS are unix-nanosecond wall-clock timestamps.
 	CreatedAtNS int64 `json:"created_at_ns"`
 	LastRunAtNS int64 `json:"last_run_at_ns"`
+
+	// Deployer is the account that owns this deployment and pays for it.
+	//
+	// It used to exist only as an argument: Deploy took a deployer, charged the
+	// run to it, and dropped it. That was enough while the only charge was
+	// per-run and settled before the record was written, and it is not enough
+	// for anything recurring - storage rent needs to know, an hour later and
+	// after a restart, whose bytes these are. Empty on a record written before
+	// this field, which the rent sweep treats as unowned rather than guessing an
+	// owner to bill.
+	Deployer string `json:"deployer,omitempty"`
+	// RentPaidThroughNS is the instant through which storage rent has settled.
+	// Zero means rent has never been assessed; the first sweep sets it to now
+	// rather than back-charging to CreatedAtNS. See SweepRent.
+	RentPaidThroughNS int64 `json:"rent_paid_through_ns,omitempty"`
+	// RentPaid is the cumulative credits this deployment has paid in storage
+	// rent, so an operator can see what a deployment has earned them.
+	RentPaid uint64 `json:"rent_paid,omitempty"`
+	// DelinquentSinceNS is when a rent charge first failed, and zero while rent
+	// is current. It is the clock the grace period runs against, so it is
+	// persisted: a node restart must not reset a deployer's grace.
+	DelinquentSinceNS int64 `json:"delinquent_since_ns,omitempty"`
+}
+
+// marshalDeployment encodes a record for the store. It exists so the rent
+// sweep's record-only write and persist's record-plus-module write cannot
+// disagree about the encoding.
+func marshalDeployment(rec Deployment) ([]byte, error) {
+	payload, err := json.Marshal(rec)
+	if err != nil {
+		return nil, fmt.Errorf("agentapi: marshal deployment %q: %w", rec.ID, err)
+	}
+	return payload, nil
 }
 
 // MaxAllowedMemoryPages and MaxAllowedRunTime are the CEILINGS an untrusted
@@ -236,10 +269,29 @@ type MeterConfig struct {
 	// DefaultDeployer is the account charged when a DeployAgentRequest names no
 	// deployer. Optional; when empty a metered deploy must name a deployer.
 	DefaultDeployer string
+
+	// StoragePrice is the credits charged per MiB per day for a stored module.
+	// Zero disables rent, on the same reasoning as Price: what storage costs is
+	// monetary policy and is not baked into a default. See rent.go.
+	StoragePrice uint64
+	// RentInterval is how often rent is swept. Zero means DefaultRentInterval.
+	RentInterval time.Duration
+	// RentGrace is how long a deployment whose rent went unpaid survives before
+	// eviction. Zero means DefaultRentGrace.
+	RentGrace time.Duration
 }
 
-// Enabled reports whether metering charges anything.
+// Enabled reports whether metering charges anything per run.
 func (m MeterConfig) Enabled() bool { return m.Price > 0 }
+
+// RentEnabled reports whether stored bytes are charged for.
+func (m MeterConfig) RentEnabled() bool { return m.StoragePrice > 0 }
+
+// NeedsSettlement reports whether either charge is on, which is what decides
+// whether a recipient, settler and accounts resolver are required. Rent needs
+// exactly the same three as the per-run price, so a node cannot come up
+// charging rent it has no way to collect.
+func (m MeterConfig) NeedsSettlement() bool { return m.Enabled() || m.RentEnabled() }
 
 // ManagerConfig configures a Manager.
 type ManagerConfig struct {
@@ -308,15 +360,19 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxModuleBytes
 	}
-	if cfg.Meter.Enabled() {
+	if cfg.Meter.NeedsSettlement() {
+		what := "metering price"
+		if !cfg.Meter.Enabled() {
+			what = "storage price"
+		}
 		if cfg.Meter.Recipient == "" {
-			return nil, fmt.Errorf("agentapi: metering price is set but no recipient is configured")
+			return nil, fmt.Errorf("agentapi: %s is set but no recipient is configured", what)
 		}
 		if cfg.Settler == nil {
-			return nil, fmt.Errorf("agentapi: metering price is set but no consensus settler is configured")
+			return nil, fmt.Errorf("agentapi: %s is set but no consensus settler is configured", what)
 		}
 		if cfg.Accounts == nil {
-			return nil, fmt.Errorf("agentapi: metering price is set but no accounts resolver is configured")
+			return nil, fmt.Errorf("agentapi: %s is set but no accounts resolver is configured", what)
 		}
 	}
 	m := &Manager{
@@ -387,11 +443,28 @@ func (m *Manager) Deploy(ctx context.Context, id string, module []byte, limits a
 		return nil, fmt.Errorf("agentapi: %w", err)
 	}
 
+	// Resolve the paying account once, here, and record it. The per-run charge
+	// used to apply the DefaultDeployer fallback privately inside charge(), so
+	// the record could not say who had actually paid - fine for a charge that
+	// settles before the record is written, useless for rent, which has to find
+	// the payer again an hour later and after a restart.
+	payer := deployer
+	if payer == "" {
+		payer = m.meter.DefaultDeployer
+	}
+
 	// Meter first. A metered deploy the payer cannot cover is refused here,
 	// before any module runs, so a run never happens for free.
-	charged, err := m.charge(ctx, deployer)
+	charged, err := m.charge(ctx, payer)
 	if err != nil {
 		return nil, err
+	}
+	// Rent needs an owner. A deploy that would be stored with nobody to bill is
+	// refused rather than stored free forever, which is the whole failure this
+	// closes; with rent off, an unowned deploy is exactly as allowed as before.
+	if m.meter.RentEnabled() && payer == "" {
+		return nil, fmt.Errorf("%w: storage rent is charged but no deployer account was provided",
+			ErrNoSigningAccount)
 	}
 
 	now := time.Now()
@@ -405,11 +478,26 @@ func (m *Manager) Deploy(ctx context.Context, id string, module []byte, limits a
 		MaxRunTimeMS:   uint64(limits.MaxRunTime / time.Millisecond),
 		LastCharge:     charged,
 		CreatedAtNS:    now.UnixNano(),
+		Deployer:       payer,
 	}
-	// Preserve the original created-at across a re-deploy of the same id.
+	// Rent runs from the moment the bytes land, not from the first sweep, so a
+	// deployment made just after a sweep is not a free hour.
+	if m.meter.RentEnabled() {
+		rec.RentPaidThroughNS = now.UnixNano()
+	}
+	// Preserve the original created-at across a re-deploy of the same id, and
+	// with it the rent accounting: re-deploying must not reset the watermark,
+	// or a deployer could re-push the same module every hour and never pay.
 	m.mu.Lock()
-	if prev, ok := m.records[id]; ok && prev.CreatedAtNS != 0 {
-		rec.CreatedAtNS = prev.CreatedAtNS
+	if prev, ok := m.records[id]; ok {
+		if prev.CreatedAtNS != 0 {
+			rec.CreatedAtNS = prev.CreatedAtNS
+		}
+		if prev.RentPaidThroughNS != 0 {
+			rec.RentPaidThroughNS = prev.RentPaidThroughNS
+		}
+		rec.RentPaid = prev.RentPaid
+		rec.DelinquentSinceNS = prev.DelinquentSinceNS
 	}
 	m.mu.Unlock()
 
@@ -439,13 +527,9 @@ func (m *Manager) Deploy(ctx context.Context, id string, module []byte, limits a
 // disabled). It enforces the honest-refusal rule: a metered deploy whose payer
 // has no signing key, or whose charge commits but is skipped as unaffordable, is
 // refused rather than run for free.
-func (m *Manager) charge(ctx context.Context, deployer string) (uint64, error) {
+func (m *Manager) charge(ctx context.Context, payer string) (uint64, error) {
 	if !m.meter.Enabled() {
 		return 0, nil
-	}
-	payer := deployer
-	if payer == "" {
-		payer = m.meter.DefaultDeployer
 	}
 	if payer == "" {
 		return 0, fmt.Errorf("%w: metering is enabled but no deployer account was provided", ErrNoSigningAccount)
@@ -592,9 +676,9 @@ func copyMessages(msgs []agent.Message) []agent.Message {
 // persist writes a deployment record and its module bytes to the store in one
 // atomic batch, so a record is never visible without the module that backs it.
 func (m *Manager) persist(rec Deployment, module []byte) error {
-	payload, err := json.Marshal(rec)
+	payload, err := marshalDeployment(rec)
 	if err != nil {
-		return fmt.Errorf("agentapi: marshal deployment %q: %w", rec.ID, err)
+		return err
 	}
 	batch := m.store.NewBatch()
 	defer batch.Close()

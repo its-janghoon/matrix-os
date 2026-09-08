@@ -219,7 +219,7 @@ func TestServiceDeployAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
 	}
-	svc, err := NewService(mgr)
+	svc, err := NewService(mgr, nil)
 	if err != nil {
 		t.Fatalf("NewService: %v", err)
 	}

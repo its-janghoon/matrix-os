@@ -39,16 +39,62 @@ import (
 // stubs are built with require_unimplemented_servers disabled, so every RPC is
 // implemented explicitly.
 type Service struct {
-	mgr *Manager
+	mgr  *Manager
+	auth *admin.Authenticator
 }
 
 // NewService constructs a Service backed by the given manager, which is
-// required.
-func NewService(mgr *Manager) (*Service, error) {
+// required. auth is optional and, when supplied, is what binds the paying
+// account to the authenticated caller rather than to whatever the request
+// claims - see payerFor.
+func NewService(mgr *Manager, auth *admin.Authenticator) (*Service, error) {
 	if mgr == nil {
 		return nil, fmt.Errorf("agentapi: manager is required")
 	}
-	return &Service{mgr: mgr}, nil
+	return &Service{mgr: mgr, auth: auth}, nil
+}
+
+// payerFor decides which account a deploy is charged to.
+//
+// WHAT THIS FIXES. The payer was `req.deployer`, a string the CLIENT chooses,
+// and the auth interceptor only checks that the caller holds a valid key with
+// the deploy permission - not that the named account is theirs. So any caller
+// who could deploy could name any account the node holds a signing key for and
+// have it pay. That was survivable while every key belonged to the operator and
+// the only charge was one run. It is not survivable with storage rent, which
+// bills the named account every hour for as long as the bytes are stored: a
+// caller could park 32 MiB against someone else's balance and walk away.
+//
+// So when the node authenticates, the payer is the account on the caller's own
+// key - the same rule the OpenAI-compatible route already uses, where the key is
+// the proof of account ownership. A request naming a DIFFERENT account is
+// refused rather than quietly redirected, because a caller who asked to bill
+// someone else should be told no, not billed themselves for something they did
+// not intend.
+//
+// With no authenticator the node is unauthenticated by the operator's choice and
+// req.deployer stands, exactly as before.
+func (s *Service) payerFor(ctx context.Context, requested string) (string, error) {
+	if s.auth == nil {
+		return requested, nil
+	}
+	key, err := s.auth.AuthenticateKey(ctx)
+	if err != nil {
+		return "", status.Error(codes.Unauthenticated, "invalid api key")
+	}
+	if key.Account == "" {
+		if requested != "" {
+			return "", status.Error(codes.PermissionDenied,
+				"this api key is not tied to an account, so it cannot name a payer; "+
+					"set `account` on the key under security.api_keys")
+		}
+		return "", nil
+	}
+	if requested != "" && requested != key.Account {
+		return "", status.Errorf(codes.PermissionDenied,
+			"this api key spends from %s and cannot deploy against %s", key.Account, requested)
+	}
+	return key.Account, nil
 }
 
 // DeployAgent persists a submitted module, meters the run through consensus, and
@@ -61,7 +107,11 @@ func (s *Service) DeployAgent(ctx context.Context, req *agentv1.DeployAgentReque
 		return nil, status.Error(codes.InvalidArgument, ErrEmptyModule.Error())
 	}
 	limits := limitsFromProto(req.GetLimits())
-	res, err := s.mgr.Deploy(ctx, req.GetId(), req.GetWasmModule(), limits, req.GetDeployer())
+	payer, err := s.payerFor(ctx, req.GetDeployer())
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.mgr.Deploy(ctx, req.GetId(), req.GetWasmModule(), limits, payer)
 	if err != nil {
 		return nil, mapAgentError(err)
 	}
@@ -202,7 +252,7 @@ type Config struct {
 // interceptors when cfg.Auth is non-nil, registers the health service, and
 // registers the AgentService implementation.
 func NewServer(cfg Config) (*Server, error) {
-	svc, err := NewService(cfg.Manager)
+	svc, err := NewService(cfg.Manager, cfg.Auth)
 	if err != nil {
 		return nil, err
 	}

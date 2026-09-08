@@ -438,6 +438,24 @@ type AgentConfig struct {
 	// deployer. Optional; when empty a metered deploy must name a deployer whose
 	// signing key the node can resolve.
 	DefaultDeployer string `yaml:"default_deployer"`
+	// StoragePrice is the credits charged per MiB per day for a stored module,
+	// settled the same way as RunPrice and paid to the same recipient. Zero (the
+	// default) disables rent.
+	//
+	// It exists because RunPrice charges for a run and nothing charged for the
+	// bytes, so a stored module was the one resource a deployer took for free
+	// and kept indefinitely - up to 32 MiB each, on the operator's disk, forever.
+	// Rent is the market answer to that rather than a deployment cap: a cap
+	// refuses a paying customer to save disk, where rent sells the disk and only
+	// reclaims it from whoever will not pay for it.
+	StoragePrice uint64 `yaml:"storage_price"`
+	// StorageRentInterval is how often rent is swept. Zero means hourly.
+	StorageRentInterval time.Duration `yaml:"storage_rent_interval"`
+	// StorageRentGrace is how long a deployment whose rent went unpaid survives
+	// before its module bytes are EVICTED. Zero means 72 hours, which spans a
+	// weekend. Eviction is what makes rent a bound on disk rather than an
+	// unpayable debt, so it cannot be turned off - only lengthened.
+	StorageRentGrace time.Duration `yaml:"storage_rent_grace"`
 	// AllowSend turns the agent runtime's inter-agent send() primitive on. It is
 	// OFF by default: with AllowSend false (or SendAllowlist empty) every send()
 	// a running module makes is refused and reported to the guest's stderr,
@@ -1390,6 +1408,9 @@ func (n *Node) Start() error {
 			Price:           n.config.Agent.RunPrice,
 			Recipient:       n.config.Agent.RunPriceRecipient,
 			DefaultDeployer: n.config.Agent.DefaultDeployer,
+			StoragePrice:    n.config.Agent.StoragePrice,
+			RentInterval:    n.config.Agent.StorageRentInterval,
+			RentGrace:       n.config.Agent.StorageRentGrace,
 		},
 		// Inter-agent send is off unless the operator opts in with agent.allow_send
 		// AND names agent.send_allowlist; the zero SendPolicy refuses every send,
@@ -1415,6 +1436,14 @@ func (n *Node) Start() error {
 	n.agentServer = agentServer
 	if err := n.agentServer.Start(n.ctx); err != nil {
 		return fmt.Errorf("failed to start agent API server: %w", err)
+	}
+	// Rent is swept on a ticker bound to the node's context, so it stops with the
+	// node. A no-op when StoragePrice is zero, so this is unconditional.
+	agentManager.StartRentSweeper(n.ctx)
+	if n.config.Agent.StoragePrice > 0 {
+		fmt.Printf("Agent API: storage rent enabled, %d credits/MiB/day paid to %s through "+
+			"consensus; unpaid deployments are evicted after the grace period.\n",
+			n.config.Agent.StoragePrice, n.config.Agent.RunPriceRecipient)
 	}
 	if n.config.Agent.RunPrice > 0 {
 		fmt.Printf("Agent API: metering enabled, %d credits/run paid to %s through consensus.\n",

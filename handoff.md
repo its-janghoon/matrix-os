@@ -808,7 +808,56 @@ holds only the four host functions, so there is no file or socket to reach for.
 The run-time deadline is real (`WithCloseOnContextDone`, proven by `spin.rs`),
 and `MaxFuel` was already replaced by it - a counter nothing could spend.
 
-### Identified, not fixed: stored module bytes are never charged for
+### Storage rent, built
+
+Stored module bytes are now charged for. The manager charged for a RUN and
+nothing for STORAGE, so a deployed module was the one resource a deployer took
+for free and kept indefinitely - `agent/module/<id>`, raw wasm up to 32 MiB each,
+on a service served to the network.
+
+`MeterConfig.StoragePrice` is credits per MiB per day, zero by default, on the
+same reasoning as the per-run price: what storage costs is monetary policy. When
+set, an hourly sweep charges each deployment's owner through the same consensus
+settler the run charge uses, and evicts what goes unpaid past a grace period
+(72h default). Eviction is what makes rent a bound on disk rather than an
+unpayable debt that grows.
+
+**The rounding is the whole problem, and a naive version silently charges
+nothing.** Rent for one hour on a small module is a fraction of a credit.
+Truncating per sweep charges zero forever, and gets WORSE the more often the
+sweep runs - the opposite of what a shorter interval should mean. So the
+watermark advances only by the time the paid credits actually cover, and the
+sub-credit remainder keeps accruing until it crosses one credit. Measured
+against the naive version: **24 hourly sweeps charged 0 where one daily sweep
+charged 10**. Two tests pin it, and both fail against the truncating
+implementation. The accrual is `big.Int` because bytes x price x nanoseconds
+passes 2^64 well before any of the three is unreasonable, and a wrapped multiply
+produces a wrong bill rather than an error.
+
+**A second defect surfaced while building it: the payer was whoever the client
+said.** `deployer` was a request field, and the auth interceptor only checked
+that the caller held a valid key with the deploy permission - not that the named
+account was theirs. Any caller who could deploy could bill any account the node
+holds a signing key for. Survivable when every key was the operator's and the
+only charge was one run; not survivable with rent, which re-bills the named
+account every hour for as long as the bytes sit there. The payer is now the
+account on the caller's own key, the same rule the OpenAI route already uses,
+and naming a different account is refused rather than silently redirected. Four
+tests; the refusal test fails against the old behaviour.
+
+Other properties pinned: the deployer is persisted and survives a restart (rent
+has to find the payer an hour later); re-deploying the same id does NOT reset the
+rent clock (or the bill is avoidable by re-pushing before every sweep); a record
+written before rent existed starts its clock at the sweep rather than
+back-charging to CreatedAt; a record with no owner is skipped, never evicted, so
+an upgrade cannot delete an operator's own agents; and a node configured to
+charge rent it cannot collect refuses to start.
+
+Not done: `Deployment.Deployer` is not surfaced in the proto response, so a
+client cannot read back who it is billed as. The record has it and the CLI does
+not show it.
+
+### Superseded: the per-account deployment cap
 
 Nothing bounds how much wasm one deployer accumulates on a node.
 `agentapi.Manager` persists `agent/module/<id>` as raw bytes, up to
@@ -819,8 +868,9 @@ the moment keys are issued to paying deployers, which is what the metering
 exists for.
 
 **This was previously written up as "no cap on deployments per account", asking
-the CTO for a number. That framing was wrong on three counts, and the question
-should not have been asked in that shape.**
+the CTO for a number. That framing was wrong on three counts, the question
+should not have been asked in that shape, and rent above is what was built
+instead.**
 
 1. **Count is the wrong unit.** Disk is the resource and `Deployment.ModuleSize`
    already records it. A cap of 10 permits 320 MiB and a cap of 1000 permits
@@ -837,11 +887,10 @@ should not have been asked in that shape.**
    answer to heavy resource use is to price it, not to forbid it: a cap turns a
    paying customer into a refused one and bounds revenue at the same time.
 
-The recommendation is therefore **storage rent through the metering path that
-already exists**, not a number. Its one prerequisite is a code change rather
-than a business decision - put the deployer on the `Deployment` record, so
-stored bytes have an owner to bill. A hard byte quota, if one is wanted as a
-backstop, needs the same field first. Neither is built.
+The answer was therefore **storage rent through the metering path that already
+existed**, not a number, and it is built - see above. A hard byte quota, if one
+is ever wanted as a backstop, has its prerequisite in place now: the deployer is
+on the record.
 
 ## Adversarial pass: the p2p layer
 
