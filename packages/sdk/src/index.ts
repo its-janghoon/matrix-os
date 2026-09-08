@@ -248,6 +248,34 @@ export interface BridgeReconciliation {
  * LOCKER named when they locked, so collecting one gains nothing but the ability
  * to complete somebody's bridge transfer for them.
  */
+/**
+ * The reserved recipient that locks native MATRIX for an Ethereum address.
+ *
+ * Locking is an ordinary signed transfer whose RECIPIENT encodes the intent, so
+ * getting this string wrong does not produce an error - it produces a transfer
+ * to a different reserved namespace, or to an account id nobody holds. Build it
+ * with this rather than by hand.
+ *
+ * The lowercase is load-bearing: consensus refuses a mixed-case address, because
+ * two spellings of one address would be two different locks against one escrow.
+ *
+ * The amount is the transfer's value, not part of the recipient.
+ *
+ * This is a transcription of `@matrix-os/protocol`'s `bridgeLockRecipient`, kept
+ * here because this package is published and must stay dependency-free, and held
+ * byte-identical by the differential test in layout-parity.test.ts.
+ */
+export function bridgeLockRecipient(ethAddress: string): string {
+  const raw =
+    ethAddress.startsWith('0x') || ethAddress.startsWith('0X')
+      ? ethAddress.slice(2)
+      : ethAddress;
+  if (!/^[0-9a-fA-F]{40}$/.test(raw)) {
+    throw new Error(`bridgeLockRecipient: ${ethAddress} is not a 20-byte ethereum address`);
+  }
+  return `bridge/lock/${raw.toLowerCase()}`;
+}
+
 export interface LockAttestation {
   /** Ethereum address the wrapped tokens mint to, 0x hex. */
   recipient: string;

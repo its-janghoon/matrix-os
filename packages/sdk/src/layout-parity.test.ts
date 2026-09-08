@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import * as canonical from '@matrix-os/protocol';
 import {
+  bridgeLockRecipient,
   paymentSigningBytes,
   runAuthorizationSigningBytes,
   type ChatMessage,
@@ -223,6 +224,38 @@ describe('signing layouts match the canonical implementation', () => {
         messages: [{ role: WIRE_NAME[role], content: 'hello' }],
       });
       expect(Array.from(mine), `role ${role}`).toEqual(Array.from(theirs));
+    }
+  });
+});
+
+describe('bridgeLockRecipient against the canonical implementation', () => {
+  const HEX = '0123456789abcdefABCDEF'.split('');
+  const addr = (next: () => number): string => {
+    let out = '';
+    for (let i = 0; i < 40; i++) out += pick(next, HEX);
+    return out;
+  };
+
+  it('agrees on randomized addresses, in both 0x and bare form', () => {
+    const next = rng(0xb12d6e);
+    for (let i = 0; i < 200; i++) {
+      const bare = addr(next);
+      for (const input of [bare, `0x${bare}`, `0X${bare}`]) {
+        expect(bridgeLockRecipient(input)).toBe(canonical.bridgeLockRecipient(input));
+      }
+    }
+  });
+
+  it('lowercases, because consensus refuses a mixed-case address', () => {
+    const got = bridgeLockRecipient('0xAbCdEf0123456789AbCdEf0123456789AbCdEf01');
+    expect(got).toBe('bridge/lock/abcdef0123456789abcdef0123456789abcdef01');
+    expect(got).toBe(canonical.bridgeLockRecipient('0xAbCdEf0123456789AbCdEf0123456789AbCdEf01'));
+  });
+
+  it('refuses anything that is not a 20-byte address, in both implementations', () => {
+    for (const bad of ['', '0x', 'abc', `0x${'a'.repeat(39)}`, `0x${'a'.repeat(41)}`, `0x${'z'.repeat(40)}`]) {
+      expect(() => bridgeLockRecipient(bad)).toThrow();
+      expect(() => canonical.bridgeLockRecipient(bad)).toThrow();
     }
   });
 });

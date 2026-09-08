@@ -60,6 +60,24 @@ export default function ComputeMarketplaceDocs() {
                         once per event, keyed by transaction hash and log index.
                       </li>
                       <li>
+                        <strong>How a lock actually happens.</strong> It is a signed transfer to the reserved
+                        recipient <code>bridge/lock/&lt;ethereum address&gt;</code> - <code>matrix bridge lock</code>
+                        builds it - so it is ordered by consensus like any other transfer and every node applies
+                        the same escrow move from the same committed block. The lock id is derived from the
+                        transaction itself (nonce, sender, recipient, amount) rather than from a per-node counter,
+                        which is the kind of state two nodes disagree about. A lock pays no protocol fee, and that
+                        is load-bearing: the escrow must receive the full amount, because the wrapped supply minted
+                        against it is computed from what was locked, so a fee would mint more wrapped than the
+                        escrow holds.
+                      </li>
+                      <li>
+                        <strong>Then a threshold of signatures.</strong> Each validator holds its own secp256k1
+                        attestor key, in an encrypted keystore, and answers <code>GetLockAttestation</code> with
+                        ONE signature. A client collects m of them and passes the set to
+                        <code> WrappedMatrix.mint</code>, which does the counting. Gossiping partial signatures
+                        would be a second consensus for something the contract already verifies.
+                      </li>
+                      <li>
                         <strong>Both directions are quorum-gated.</strong> Minting always required a threshold of
                         validator signatures; the unlock did not, and a per-node release on a validator set would
                         move collateral on one ledger and nowhere else, splitting the 1:1 backing invariant across

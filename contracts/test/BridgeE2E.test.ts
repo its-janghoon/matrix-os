@@ -178,4 +178,48 @@ describe("Bridge end-to-end (Go attestation -> Solidity mint)", function () {
       wmatrix.mint(att.recipient, wrappedAmount, att.lockId, att.signatures)
     ).to.be.revertedWithCustomError(wmatrix, "LockAlreadyMinted");
   });
+
+  // The CONSENSUS lock path, end to end.
+  //
+  // Everything above drives bridge.Lock: a direct ledger write with a per-node
+  // counter, which has no production caller. A real node locks through a
+  // committed transaction and derives the id from it (nonce, sender, recipient,
+  // amount). That derivation and the attestation it produces had never been fed
+  // to WrappedMatrix.mint - the on-ramp was built and never shown to mint.
+  //
+  // This is that proof. Same contract, same threshold, same verification; only
+  // the lock half differs.
+  it("mints from an attestation produced by the consensus lock path", async function () {
+    if (!goAvailable()) this.skip();
+
+    const chainId = (await ethers.provider.getNetwork()).chainId;
+    const contract = await wmatrix.getAddress();
+    const att = runGoBridge({
+      recipient: recipient.address,
+      native: String(NATIVE_AMOUNT),
+      "chain-id": String(chainId),
+      contract,
+      threshold: String(THRESHOLD),
+      validators: String(VALIDATORS),
+      seed: SEED,
+      consensus: "true",
+      nonce: "7",
+    });
+
+    const wrappedAmount = BigInt(att.wrappedAmount);
+    const before = await wmatrix.balanceOf(recipient.address);
+
+    await expect(wmatrix.mint(att.recipient, wrappedAmount, att.lockId, att.signatures))
+      .to.emit(wmatrix, "Minted");
+
+    expect(await wmatrix.balanceOf(recipient.address)).to.equal(before + wrappedAmount);
+    // Backing holds: wrapped supply tracks what the Go side says is escrowed.
+    expect(BigInt(att.outstandingWrapped)).to.equal(wrappedAmount);
+
+    // And the lock id is consumed, so a committed lock cannot mint twice even
+    // though its id now comes from a transaction rather than a counter.
+    await expect(
+      wmatrix.mint(att.recipient, wrappedAmount, att.lockId, att.signatures)
+    ).to.be.reverted;
+  });
 });

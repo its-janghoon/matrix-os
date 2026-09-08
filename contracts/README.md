@@ -101,6 +101,42 @@ wrapped burn -> unlock native               (wMATRIX -> native MATRIX)
   verifies that a quorum of the set says so, which is the same trust assumption
   the mint half has always had.
 
+### Locking, and getting the attestations to mint with
+
+A lock is a signed transfer to the reserved recipient
+`bridge/lock/<ethereum address>`, so it is ordered by consensus and every node
+applies the same escrow move from the same committed block. Build it with:
+
+```sh
+matrix bridge lock --to 0xYourEthAddress --amount 4000000000
+```
+
+It prints the LOCK ID, derived from the transaction (nonce, sender, recipient,
+amount). Then ask each validator for its signature:
+
+```
+POST /matrix.market.v1.MarketService/GetLockAttestation  {"lockId": "0x..."}
+```
+
+Each node returns ONE signature, because each holds its own attestor key and the
+contract counts the threshold. Collect m of them and call
+`WrappedMatrix.mint(recipient, amount, lockId, signatures)`.
+
+Each validator generates its attestor key with:
+
+```sh
+matrix bridge attestor-new --out ~/.matrix/attestor.json
+```
+
+That prints the address to put in `ATTESTORS` at deploy time. Point
+`bridge.attestor_keystore` at the file and export
+`MATRIX_ATTESTOR_PASSPHRASE`; a node that cannot unlock a configured key refuses
+to start, because a validator that looks like it is attesting and is not means
+mints silently stop reaching quorum.
+
+`test/BridgeE2E.test.ts` drives this exact path - consensus-derived lock id,
+real signatures, real mint - alongside the legacy one.
+
 ### Running the burn watcher in `matrixd`
 
 Add a `bridge` section to the node config (`~/.matrix/config.yaml`) with the

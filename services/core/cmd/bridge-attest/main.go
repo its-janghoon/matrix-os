@@ -34,6 +34,7 @@ import (
 	"path/filepath"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
+	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
 )
@@ -46,6 +47,9 @@ func main() {
 	threshold := flag.Int("threshold", 2, "signatures required to mint")
 	validators := flag.Int("validators", 3, "number of validator attestors")
 	seed := flag.String("seed", "matrix-local-test", "deterministic local test-key seed (NOT a secret)")
+	consensusPath := flag.Bool("consensus", false,
+		"derive the lock the way a committed block does (transaction nonce, not a per-node counter)")
+	nonce := flag.Uint64("nonce", 1, "transaction nonce the lock id is derived from, with -consensus")
 	flag.Parse()
 
 	if *recipientHex == "" || *contractHex == "" || *native == 0 {
@@ -89,8 +93,32 @@ func main() {
 	params := bridge.AttestationParams{ChainID: big.NewInt(*chainID), BridgeContract: contract}
 	b := bridge.New(ledger, store, params)
 
-	ev, err := b.Lock("local-user", recipient, *native)
-	must(err)
+	// Which lock path this exercises. -consensus is the one a real node uses:
+	// consensus applies the escrow move from a committed block, derives the lock
+	// id from the TRANSACTION (nonce, sender, recipient, amount) rather than from
+	// a per-node counter, and hands the bridge a RecordLock. Without the flag
+	// this drives the legacy bridge.Lock, which is a direct ledger write with its
+	// own sequence and has no production caller.
+	//
+	// The flag exists so the Go<->Solidity end-to-end test can prove the path
+	// that actually ships mints on-chain. It could not before: the e2e drove the
+	// legacy path, so the derivation and the attestation a real node produces had
+	// never been fed to WrappedMatrix.mint.
+	var ev *bridge.LockEvent
+	if *consensusPath {
+		// Exactly what internal/consensus does when a lock transaction commits:
+		// move the value into escrow, derive the id, record it.
+		must(ledger.Atomically(func(ltx market.LedgerTx) error {
+			return ltx.Transfer("local-user", bridge.EscrowAccount, *native)
+		}))
+		id := consensus.DeriveLockID(*nonce, "local-user", recipient, *native)
+		must(b.RecordLock(id, "local-user", recipient, *native))
+		ev, err = b.GetLock(id)
+		must(err)
+	} else {
+		ev, err = b.Lock("local-user", recipient, *native)
+		must(err)
+	}
 
 	att, err := b.Attest(ev, signers[:*threshold])
 	must(err)

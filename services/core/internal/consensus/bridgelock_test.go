@@ -251,3 +251,34 @@ func TestANodeWithNoBridgeStillEscrows(t *testing.T) {
 			"from every node that has a bridge", bal)
 	}
 }
+
+// TestTheRecipientFormatMatchesWhatClientsBuild pins the Go format against the
+// literal every TypeScript client produces.
+//
+// The recipient IS the instruction. A client that builds the string wrongly does
+// not get an error - it makes a transfer to a different reserved namespace, or
+// to an account id nobody holds, and the money is gone somewhere quiet. The
+// format therefore lives in packages/protocol (and, transcribed, in the SDK),
+// and this is the third corner of that triangle: if Go ever changes the prefix
+// or the case, this fails here rather than in someone's wallet.
+func TestTheRecipientFormatMatchesWhatClientsBuild(t *testing.T) {
+	// The exact string `bridgeLockRecipient('0x70997970C51812dc3A010C7d01b50e0d17dc79C8')`
+	// returns in packages/protocol and packages/sdk.
+	const fromTypeScript = "bridge/lock/70997970c51812dc3a010c7d01b50e0d17dc79c8"
+
+	var addr [20]byte
+	raw, err := hex.DecodeString("70997970c51812dc3a010c7d01b50e0d17dc79c8")
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	copy(addr[:], raw)
+
+	if got := BridgeLockRecipient(addr); got != fromTypeScript {
+		t.Fatalf("Go builds %q, TypeScript builds %q; a client following one of them sends "+
+			"money the other cannot find", got, fromTypeScript)
+	}
+	// And the chain accepts what the clients produce.
+	if _, err := ParseBridgeLock(fromTypeScript); err != nil {
+		t.Fatalf("consensus refuses the recipient every client builds: %v", err)
+	}
+}

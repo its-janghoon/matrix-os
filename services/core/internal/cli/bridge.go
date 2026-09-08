@@ -4,10 +4,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
+	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -23,7 +26,7 @@ func newBridgeCommand(opts *globalOptions) *cobra.Command {
 		Use:   "bridge",
 		Short: "Operator commands for the lock-and-mint bridge",
 	}
-	cmd.AddCommand(newAttestorNewCommand(opts))
+	cmd.AddCommand(newAttestorNewCommand(opts), newBridgeLockCommand(opts))
 	return cmd
 }
 
@@ -93,5 +96,114 @@ the prompt. There is no way to recover this key: back up the file.`,
 		},
 	}
 	cmd.Flags().StringVar(&out, "out", "", "path to write the encrypted attestor keystore to")
+	return cmd
+}
+
+// newBridgeLockCommand builds `matrix bridge lock`.
+//
+// It exists because locking had no front door. The operation is an ordinary
+// signed transfer whose RECIPIENT encodes the intent, so without a command an
+// operator has to hand-assemble `bridge/lock/<address>` - and getting that
+// string wrong does not produce an error, it produces a transfer to a different
+// reserved namespace or to an account id nobody holds.
+//
+// It prints the LOCK ID, which is the thing the next step needs: the id is
+// derived from this transaction (nonce, sender, recipient, amount), and a client
+// that recomputes it differently asks every validator about a lock that does not
+// exist.
+func newBridgeLockCommand(opts *globalOptions) *cobra.Command {
+	var (
+		walletPath string
+		toHex      string
+		amount     uint64
+	)
+	cmd := &cobra.Command{
+		Use:   "lock",
+		Short: "Lock native MATRIX for an Ethereum address, to be minted as wMATRIX",
+		Long: `lock moves native MATRIX into the bridge escrow so wMATRIX can be minted
+against it on Ethereum.
+
+It is a signed transfer to a reserved recipient, so it is ordered by consensus
+like any other: every node applies the same escrow move from the same committed
+block. The escrow receives the FULL amount - a lock pays no protocol fee, because
+the wrapped supply minted against it is computed from what was locked, and a fee
+would mint more wrapped than the escrow holds.
+
+The printed lock id is what the next step needs. Ask a threshold of validators
+for their signatures over it (each node's GetLockAttestation returns one), then
+pass the collected set to WrappedMatrix.mint.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			addr, err := bridge.ParseAddress(toHex)
+			if err != nil {
+				return fmt.Errorf("--to must be a 0x ethereum address: %w", err)
+			}
+			if amount == 0 {
+				return fmt.Errorf("--amount must be greater than zero; a zero lock would mint " +
+					"nothing and still consume a lock id")
+			}
+			path, err := resolveWalletPath(walletPath)
+			if err != nil {
+				return err
+			}
+			acct, err := loadWallet(path, passphrasePrompt(cmd.ErrOrStderr(), "Passphrase for "+path))
+			if err != nil {
+				return err
+			}
+
+			cc, err := dial(opts)
+			if err != nil {
+				return err
+			}
+			defer cc.Close()
+			ctx, cancel := callContext(cmd.Context(), opts)
+			defer cancel()
+
+			nonce, err := deriveNonce(ctx, cc.market, acct.AccountID())
+			if err != nil {
+				return mapErr(opts.Addr, err)
+			}
+
+			tx := &token.Transaction{
+				From:      acct.PublicKey,
+				To:        consensus.BridgeLockRecipient(addr),
+				Amount:    amount,
+				Nonce:     nonce,
+				Timestamp: time.Now().UnixNano(),
+				PrevHash:  make([]byte, chainHashSize),
+			}
+			if err := tx.Sign(acct.PrivateKey); err != nil {
+				return fmt.Errorf("failed to sign lock: %w", err)
+			}
+			if _, err := cc.market.SubmitSignedTransfer(ctx, &marketv1.SubmitSignedTransferRequest{
+				FromPublicKey: token.MarshalPublicKey(acct.PublicKey),
+				To:            tx.To,
+				Amount:        tx.Amount,
+				Nonce:         tx.Nonce,
+				PrevHash:      tx.PrevHash,
+				Signature:     tx.Signature,
+				Timestamp:     tx.Timestamp,
+			}); err != nil {
+				return transferSubmitError(opts, tx, err)
+			}
+
+			// Derived locally from the same fields the chain uses, so the operator
+			// has the id without a second round trip - and if the two ever
+			// disagreed, the attestation request would fail loudly rather than
+			// silently attesting to nothing.
+			id := consensus.DeriveLockID(tx.Nonce, acct.AccountID(), addr, amount)
+
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "Locked %d native base units for %s\n", amount, addr.Hex())
+			fmt.Fprintf(w, "  lock id: 0x%x\n", id)
+			fmt.Fprintf(w, "\nNext: collect a threshold of attestations, one per validator, then mint.\n")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&walletPath, "wallet", "", "wallet keystore path (default ~/.matrix/wallet.json)")
+	cmd.Flags().StringVar(&toHex, "to", "", "ethereum address to mint the wrapped tokens to")
+	cmd.Flags().Uint64Var(&amount, "amount", 0, "native base units to lock (9 decimals)")
+	_ = cmd.MarkFlagRequired("to")
+	_ = cmd.MarkFlagRequired("amount")
 	return cmd
 }

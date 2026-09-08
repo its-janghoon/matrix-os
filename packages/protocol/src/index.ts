@@ -169,3 +169,35 @@ export async function messagesDigest(messages: Message[]): Promise<Uint8Array> {
   const hash = await crypto.subtle.digest('SHA-256', concat(parts) as BufferSource);
   return new Uint8Array(hash);
 }
+
+/**
+ * The reserved recipient that locks native MATRIX for an Ethereum address.
+ *
+ * Locking is an ordinary signed transfer whose RECIPIENT encodes the intent, so
+ * a client that gets this string wrong does not get an error - it makes a
+ * transfer to a different reserved namespace, or to an account id that does not
+ * exist. That is the class of bug this package exists to prevent, which is why
+ * the format lives here rather than being spelled out in each client.
+ *
+ * It must match Go's `consensus.BridgeLockRecipient` byte for byte, including
+ * the LOWERCASE hex: consensus refuses a mixed-case address, because two
+ * spellings of one address would be two different locks against one escrow.
+ *
+ * The amount is the transfer's value, not part of the recipient. This is the one
+ * reserved recipient besides a stake bond that legitimately carries money.
+ */
+export function bridgeLockRecipient(ethAddress: string): string {
+  const raw = ethAddress.startsWith('0x') || ethAddress.startsWith('0X')
+    ? ethAddress.slice(2)
+    : ethAddress;
+  if (!/^[0-9a-fA-F]{40}$/.test(raw)) {
+    throw new Error(
+      `bridgeLockRecipient: ${ethAddress} is not a 20-byte ethereum address`,
+    );
+  }
+  return `bridge/lock/${raw.toLowerCase()}`;
+}
+
+/** The prefix `bridgeLockRecipient` produces. Exported so a client can classify
+ *  a recipient it reads back without re-implementing the check. */
+export const BRIDGE_LOCK_PREFIX = 'bridge/lock/';
