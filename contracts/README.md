@@ -318,7 +318,10 @@ Ethereum representation.
 ### Environment variables
 
 Copy `.env.example` to `.env` and fill in your values (see that file for the
-full annotated list):
+full annotated list). `hardhat.config.ts` loads `.env` at startup, so a
+gitignored file is the intended way to supply these - and a better one than an
+inline `PRIVATE_KEY=0x... npx hardhat run ...`, which puts the key in your shell
+history verbatim.
 
 | Var                   | Purpose                                              | Required for            |
 | --------------------- | ---------------------------------------------------- | ----------------------- |
@@ -375,6 +378,12 @@ Do **all** of these before a real deploy:
 - [ ] **Double-check the network.** `--network mainnet` vs `sepolia` is correct.
 - [ ] **Dry-run passed.** `npx hardhat test` (and, ideally, the mainnet-fork
       simulation) is green on the exact commit you are deploying.
+- [ ] **The RPC URL points where the network name says.** `mainnet` and
+      `sepolia` declare their chain ids in `hardhat.config.ts`, so hardhat
+      refuses an endpoint whose chain disagrees. This used to be an eyeball
+      check: with no chain id declared, `--network sepolia` meant nothing more
+      than "whatever `SEPOLIA_RPC_URL` points at", and a mainnet URL in the
+      wrong variable would have broadcast to mainnet.
 - [ ] **No secrets committed.** `git check-ignore .env` succeeds; no key or
       credential-bearing URL is in tracked files.
 
