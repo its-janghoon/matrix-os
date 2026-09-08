@@ -558,3 +558,113 @@ func TestWithNoAuthenticatorTheRequestStands(t *testing.T) {
 			"own choice and behaves as it did before", got)
 	}
 }
+
+// The rate is pinned at deploy time. Rent RECURS, so unlike the per-run price a
+// deployer agrees to it once and then the operator can change it while their
+// bytes are already on the disk. Billing at the live config value would let an
+// operator raise the price on modules already stored and either drain the
+// deployer or evict them.
+
+func TestRaisingThePriceDoesNotRepriceStoredModules(t *testing.T) {
+	mgr, settler, acct := rentManager(t, 1000, 0)
+	res, err := mgr.Deploy(context.Background(), "pinned", guestWasm(t), guestLimits(), acct.AccountID())
+	if err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	if res.Deployment.RentRate != 1000 {
+		t.Fatalf("RentRate = %d at deploy, want 1000", res.Deployment.RentRate)
+	}
+	start := time.Unix(0, res.Deployment.RentPaidThroughNS)
+	size := res.Deployment.ModuleSize
+
+	// The operator raises the price a thousandfold.
+	mgr.meter.StoragePrice = 1_000_000
+
+	out, err := mgr.SweepRent(context.Background(), start.Add(30*day))
+	if err != nil {
+		t.Fatalf("SweepRent: %v", err)
+	}
+	atAgreed, _ := rentOwed(size, 1000, 30*day)
+	atRaised, _ := rentOwed(size, 1_000_000, 30*day)
+	if atAgreed == atRaised {
+		t.Fatal("test is vacuous: the two rates bill the same")
+	}
+	if out.Charged != atAgreed {
+		t.Fatalf("charged %d, want %d (the rate agreed at deploy); billing at the raised "+
+			"rate would be a bill on data already handed over", out.Charged, atAgreed)
+	}
+	_ = settler
+}
+
+func TestANewDeploymentTakesTheNewPrice(t *testing.T) {
+	mgr, _, acct := rentManager(t, 1000, 0)
+	if _, err := mgr.Deploy(context.Background(), "old", guestWasm(t), guestLimits(), acct.AccountID()); err != nil {
+		t.Fatalf("Deploy old: %v", err)
+	}
+	mgr.meter.StoragePrice = 5000
+	res, err := mgr.Deploy(context.Background(), "new", guestWasm(t), guestLimits(), acct.AccountID())
+	if err != nil {
+		t.Fatalf("Deploy new: %v", err)
+	}
+	if res.Deployment.RentRate != 5000 {
+		t.Fatalf("a deployment made after the change is billed at %d, want the new 5000",
+			res.Deployment.RentRate)
+	}
+	old, _ := mgr.Get("old")
+	if old.RentRate != 1000 {
+		t.Fatalf("the existing deployment moved to %d", old.RentRate)
+	}
+}
+
+func TestRedeployingKeepsTheAgreedRate(t *testing.T) {
+	mgr, _, acct := rentManager(t, 1000, 0)
+	if _, err := mgr.Deploy(context.Background(), "again", guestWasm(t), guestLimits(), acct.AccountID()); err != nil {
+		t.Fatalf("Deploy: %v", err)
+	}
+	mgr.meter.StoragePrice = 9000
+	if _, err := mgr.Deploy(context.Background(), "again", guestWasm(t), guestLimits(), acct.AccountID()); err != nil {
+		t.Fatalf("re-Deploy: %v", err)
+	}
+	got, _ := mgr.Get("again")
+	if got.RentRate != 1000 {
+		t.Fatalf("RentRate = %d after a re-deploy; updating a module is not a new tenancy "+
+			"and must not silently move the deployer onto a higher price", got.RentRate)
+	}
+}
+
+// TestAPastedSupplyCapIsRefusedAsAPrice. Neither ceiling prevents abuse - a
+// price is opted into, and the pinned rate is what stops re-pricing - but a
+// supply-cap-sized number in a price field is a typo, and it should fail at
+// startup rather than on someone's first deploy.
+func TestAPastedSupplyCapIsRefusedAsAPrice(t *testing.T) {
+	base := func() ManagerConfig {
+		acct, _ := token.GenerateAccount()
+		return ManagerConfig{
+			Store:    newTestStore(t),
+			Meter:    MeterConfig{Recipient: "operator"},
+			Settler:  &fakeSettler{applied: true},
+			Accounts: fakeAccounts{acct.AccountID(): acct},
+		}
+	}
+	const supplyCap = uint64(1e18)
+
+	cfg := base()
+	cfg.Meter.Price = supplyCap
+	if _, err := NewManager(cfg); err == nil {
+		t.Fatal("a run price of the whole supply cap was accepted")
+	}
+	cfg = base()
+	cfg.Meter.StoragePrice = supplyCap
+	if _, err := NewManager(cfg); err == nil {
+		t.Fatal("a storage price of the whole supply cap was accepted")
+	}
+
+	// And the ceilings themselves are allowed, so the bound is inclusive and a
+	// real operator is not surprised one unit early.
+	cfg = base()
+	cfg.Meter.Price = MaxRunPrice
+	cfg.Meter.StoragePrice = MaxStoragePrice
+	if _, err := NewManager(cfg); err != nil {
+		t.Fatalf("the ceilings themselves were refused: %v", err)
+	}
+}

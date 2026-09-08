@@ -70,6 +70,8 @@ consensus:
     unbonding_period: 0                  # 0 = 1000 blocks after leaving before withdrawal
     bond: 0                              # what THIS node keeps bonded from its own account
   fee_basis_points: 0                    # cut of each transfer to validators; capped at 100 in code
+  maintainer_account: ""                 # paid a standing cut of the fee; empty pays nobody
+  maintainer_fee_share_basis_points: 0   # that cut, in hundredths of a percent OF THE FEE; capped at 5000
   rewards:
     per_block: 0                         # pool payout per block, shared by the providers it paid
     half_life: 0                         # 0 = halve every 1,000,000 blocks
@@ -260,6 +262,16 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         note: 'The protocol fee taken from every value transfer a committed block carries, in hundredths of a percent, paid to the validator set pro rata by voting power. It is what makes a bond worth posting: without it stake is a pure cost. Taken OUT of the amount, so a 10,000 transfer at 1% credits the recipient 9,900 - adding it to the sender would make a transfer that was affordable at proposal time unaffordable at apply time. Capped at 100 IN CODE, so a mistyped 1000 fails at startup instead of taking ten times the cut. A generated config sets it to 100 (1%), the code cap; set it to 0 for a fee-free network. Every node must agree on the rate. It reaches ALL consensus-settled value: marketplace settlement AND a plain `matrix wallet transfer` are signed transfers that settle through consensus, so both pay it - there is no path that escapes the fee.',
       },
       {
+        name: 'maintainer_account',
+        def: '""',
+        note: 'An account paid a standing cut of the protocol fee, taken before the rest is split among validators. Empty pays nobody, which is the default. It exists for whoever starts a network and then keeps operating and developing it, because neither alternative covers that: a validator share DILUTES as the set grows, so it shrinks exactly as the project succeeds, and a genesis allocation funds a moment rather than an ongoing obligation. It must be a real account id (64 lowercase hex), not a reserved name - the node refuses to start on anything else, because a typo would pay the fee into an account nobody holds a key for, every block, forever, and look exactly like it was working.',
+      },
+      {
+        name: 'maintainer_fee_share_basis_points',
+        def: '0',
+        note: 'That cut, in hundredths of a percent OF THE FEE rather than of the transfer. 2000 is a fifth of the fee; at the 1% fee that is 0.2% of transferred value. Capped at 5000 (half the fee) IN CODE, because the fee is what makes a bond worth posting by a third party and a maintainer taking most of it would be spending the budget that buys the network its security. Every node must agree on it exactly as with the rate - which is also why an operator cannot quietly set it to zero and keep the network: a node using a different share computes different balances from the same block and forks itself off. It is a tax on users, so the node prints it at startup with both the share of the fee and the share of transferred value.',
+      },
+      {
         name: 'rewards.per_block',
         def: '0',
         note: 'What the genesis reward pool pays out per committed block, shared among the REGISTERED providers that block paid, pro rata by how much. A fixed budget rather than a percentage of what a provider earned, because consensus cannot see work: a percentage of a transfer is a money pump, since anyone can send coins to an account they also control and collect it. A fixed budget means faked volume moves a share and cannot increase the total, so the pool empties on schedule. Zero leaves the pool untouched.',
@@ -291,6 +303,34 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
         def: '1e18 (the whole cap)',
         note: 'Held in the reserved account native/reward-pool. `matrix fund` moves coins out of it; it never mints. On a validator SET, `fund` refuses: reward-pool funding is not consensus-ordered, so it would move value on one node and nowhere else, diverging each node\'s pool and forking the provider emission. Set the allocation in every node\'s genesis instead, or move value with a signed transfer.',
       },
+    ],
+  },
+  {
+    title: 'agent',
+    blurb: 'The WebAssembly agent runtime and what it charges. Every price defaults to zero, so a node runs agents for free until an operator decides otherwise.',
+    fields: [
+      { name: 'addr', def: '0.0.0.0:9094', note: 'Listen address for matrix.agent.v1.AgentService, distinct from the admin (9090), market (9091), inference (9092) and connect (9093) ports.' },
+      { name: 'max_module_bytes', def: '0 (32 MiB)', note: 'Largest wasm module accepted. A larger one is refused before it is stored or run.' },
+      {
+        name: 'run_price',
+        def: '0',
+        note: 'Credits charged per agent run, settled from the deploying account to run_price_recipient through consensus rather than by a per-node ledger write. Zero disables metering: nothing is charged and no signing key is needed. A deploy whose payer cannot afford the charge, or has no signing key, is refused rather than run for free.',
+      },
+      { name: 'run_price_recipient', def: '""', note: 'The account both the run price and the storage rent are paid to. Required when either price is set.' },
+      {
+        name: 'storage_price',
+        def: '0',
+        note: 'Credits per MiB per day for a stored module. Zero disables rent. It exists because run_price charged for a run and nothing charged for the BYTES, so a stored module was the one resource a deployer took for free and kept indefinitely - up to 32 MiB each, on the operator\'s disk, forever. Rent is the market answer to that rather than a deployment cap: a cap refuses a paying customer to save disk, where rent sells the disk and only reclaims it from whoever will not pay. The rate a deployment is billed at is FIXED when it is deployed, so raising this price never re-prices modules that are already stored.',
+      },
+      { name: 'storage_rent_interval', def: '0 (1h)', note: 'How often rent is swept. The interval does not change the price: a sub-credit sweep charges nothing and advances no clock, so the remainder keeps accruing until it crosses one credit.' },
+      {
+        name: 'storage_rent_grace',
+        def: '0 (72h)',
+        note: 'How long a deployment whose rent went unpaid survives before its module bytes are EVICTED. Eviction is what makes rent a bound on disk rather than an unpayable debt that grows, so it cannot be turned off - only lengthened. Paying again clears the clock. A deployment with no recorded owner is skipped and never evicted, so an upgrade cannot delete an operator\'s own agents.',
+      },
+      { name: 'default_deployer', def: '""', note: 'The account charged when a deploy names none. On an authenticated node the payer is the account on the CALLER\'s own api key and a request naming a different account is refused, so this is the unauthenticated fallback.' },
+      { name: 'allow_send', def: 'false', note: 'Turns on the runtime\'s inter-agent send(). Off by default: every send is refused and reported to the guest\'s stderr. It does nothing alone - send_allowlist must also name who may be addressed.' },
+      { name: 'send_allowlist', def: '[]', note: 'Deployment ids on this node a running module may address. Empty refuses every send even with allow_send true. There is deliberately no wildcard.' },
     ],
   },
   {

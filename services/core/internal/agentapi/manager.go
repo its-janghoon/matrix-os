@@ -70,6 +70,27 @@ var (
 	ErrMeterNotApplied = errors.New("agentapi: metering charge did not apply (deployer could not afford it)")
 )
 
+const (
+	// MaxRunPrice and MaxStoragePrice are ceilings on what a node may charge,
+	// refused at construction rather than clamped.
+	//
+	// BE HONEST ABOUT WHAT THESE DO. They are not the protocol fee's ceiling,
+	// which exists because a fee is taken from a transfer the payer did not
+	// choose, so abuse there looks like normal operation. An agent price is one
+	// a deployer opts into: too high and nobody deploys, which is a refusal
+	// rather than a theft. The real protection against a price change is
+	// Deployment.RentRate, which pins the rate at deploy time so an operator
+	// cannot re-price bytes already stored.
+	//
+	// What these catch is the fat finger: a supply-cap-sized number pasted into
+	// a price field. Native MATRIX has 9 decimals, so 1e12 base units is a
+	// thousand whole MATRIX per run, or per MiB per day - far above any
+	// plausible price and six orders of magnitude below the 1e18 supply cap.
+	MaxRunPrice uint64 = 1e12
+	// MaxStoragePrice is the same ceiling for the per-MiB-per-day rent.
+	MaxStoragePrice uint64 = 1e12
+)
+
 // DefaultMaxModuleBytes bounds the size of a submitted wasm module. It is
 // generous relative to the trivial guest modules the runtime runs while keeping
 // a hostile caller from making the node store an arbitrarily large blob. An
@@ -126,6 +147,19 @@ type Deployment struct {
 	// is current. It is the clock the grace period runs against, so it is
 	// persisted: a node restart must not reset a deployer's grace.
 	DelinquentSinceNS int64 `json:"delinquent_since_ns,omitempty"`
+	// RentRate is the storage price this deployment is billed at, in credits per
+	// MiB per day, fixed when the rent clock started.
+	//
+	// WHY IT IS PINNED. Rent RECURS, which makes it different from the per-run
+	// price: a deployer agrees to the price once, and then the operator can
+	// change it while their bytes are already sitting on the disk. Billing at
+	// the live config value would mean an operator could raise the price on
+	// modules that are already stored and either drain the deployer or evict
+	// them - a bill nobody agreed to, on data already handed over. Reading the
+	// rate from the record instead means a price change only ever applies to
+	// deployments made after it. Same shape as the keystore reading the FILE's
+	// own KDF parameters rather than this build's.
+	RentRate uint64 `json:"rent_rate,omitempty"`
 }
 
 // marshalDeployment encodes a record for the store. It exists so the rent
@@ -360,6 +394,16 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxModuleBytes
 	}
+	if cfg.Meter.Price > MaxRunPrice {
+		return nil, fmt.Errorf("agentapi: run price of %d exceeds the %d ceiling this build allows "+
+			"(a thousand whole MATRIX per run); a number this large is a pasted supply cap, not a price",
+			cfg.Meter.Price, MaxRunPrice)
+	}
+	if cfg.Meter.StoragePrice > MaxStoragePrice {
+		return nil, fmt.Errorf("agentapi: storage price of %d exceeds the %d ceiling this build allows "+
+			"(a thousand whole MATRIX per MiB per day); a number this large is a pasted supply cap, "+
+			"not a price", cfg.Meter.StoragePrice, MaxStoragePrice)
+	}
 	if cfg.Meter.NeedsSettlement() {
 		what := "metering price"
 		if !cfg.Meter.Enabled() {
@@ -481,9 +525,11 @@ func (m *Manager) Deploy(ctx context.Context, id string, module []byte, limits a
 		Deployer:       payer,
 	}
 	// Rent runs from the moment the bytes land, not from the first sweep, so a
-	// deployment made just after a sweep is not a free hour.
+	// deployment made just after a sweep is not a free hour, and it is billed at
+	// the rate in force NOW for as long as it is stored.
 	if m.meter.RentEnabled() {
 		rec.RentPaidThroughNS = now.UnixNano()
+		rec.RentRate = m.meter.StoragePrice
 	}
 	// Preserve the original created-at across a re-deploy of the same id, and
 	// with it the rent accounting: re-deploying must not reset the watermark,
@@ -498,6 +544,11 @@ func (m *Manager) Deploy(ctx context.Context, id string, module []byte, limits a
 		}
 		rec.RentPaid = prev.RentPaid
 		rec.DelinquentSinceNS = prev.DelinquentSinceNS
+		if prev.RentRate != 0 {
+			// Keep the rate the deployer originally agreed to. Re-deploying an id
+			// is an update, not a new tenancy.
+			rec.RentRate = prev.RentRate
+		}
 	}
 	m.mu.Unlock()
 

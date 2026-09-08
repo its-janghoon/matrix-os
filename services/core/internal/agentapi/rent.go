@@ -160,6 +160,27 @@ func (m *Manager) SweepRent(ctx context.Context, now time.Time) (SweepOutcome, e
 		}
 
 		if rec.RentPaidThroughNS == 0 {
+			// The clock starts now, at the rate in force now. A record from before
+			// rent existed adopts today's price rather than being billed at a rate
+			// that did not exist when it was deployed.
+			rec.RentPaidThroughNS = now.UnixNano()
+			rec.RentRate = m.meter.StoragePrice
+			if err := m.saveRecord(rec); err != nil {
+				return out, err
+			}
+			continue
+		}
+
+		// The RECORD's rate, not the config's. See Deployment.RentRate: rent
+		// recurs, so billing at the live value would let an operator re-price
+		// bytes a deployer already handed over.
+		rate := rec.RentRate
+		if rate == 0 {
+			// A record whose clock is running but whose rate was never pinned
+			// predates this field. Adopt the current price from here rather than
+			// billing it retroactively at a rate it never agreed to.
+			rate = m.meter.StoragePrice
+			rec.RentRate = rate
 			rec.RentPaidThroughNS = now.UnixNano()
 			if err := m.saveRecord(rec); err != nil {
 				return out, err
@@ -168,7 +189,7 @@ func (m *Manager) SweepRent(ctx context.Context, now time.Time) (SweepOutcome, e
 		}
 
 		elapsed := time.Duration(now.UnixNano() - rec.RentPaidThroughNS)
-		credits, covered := rentOwed(rec.ModuleSize, m.meter.StoragePrice, elapsed)
+		credits, covered := rentOwed(rec.ModuleSize, rate, elapsed)
 		if credits == 0 {
 			continue
 		}
