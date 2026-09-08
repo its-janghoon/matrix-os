@@ -180,8 +180,20 @@ npx hardhat run scripts/deploy-bridge.ts --network localhost   # WrappedMatrix
 ```
 
 `scripts/deploy.ts` reads the minter set from `MINTERS` (comma-separated `0x`
-addresses), the threshold from `THRESHOLD`, and the initial-supply holder from
-`INITIAL_HOLDER` (defaults to the deployer). On a local chain, with none set, it
+addresses), the threshold from `THRESHOLD`, the initial-supply holder from
+`INITIAL_HOLDER` (defaults to the deployer), and the initial supply from
+`INITIAL_SUPPLY` in whole MATRIX.
+
+**`INITIAL_SUPPLY` defaults to zero and it used to be a hardcoded
+100,000,000 minted to the deploying key.** `MatrixToken` is the standalone
+mirror and is backed by NOTHING - only `WrappedMatrix` is backed by escrowed
+native - while this project describes its asset as 1:1 backed. A default that
+hands the deployer a hundred million unbacked tokens named MATRIX is a thing
+nobody asked for and everybody would ask about. Zero is also the honest genesis
+for a mirror: the only supply that should exist is the supply something was
+locked for. Minting a real float on mainnet or sepolia still works, but it has
+to be typed by someone who meant it, and the script prints a warning saying the
+tokens exist against nothing. On a local chain, with none set, it
 uses a published 2-of-3 development key set and says so. On `mainnet` or
 `sepolia` it **requires** `MINTERS` and refuses any threshold below 2 or a set
 smaller than 2: a 1-of-1 set satisfies the contract's m-of-n code and is exactly

@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { parseMinters } from "../scripts/deploy";
+import { parseMinters, parseInitialSupply } from "../scripts/deploy";
 
 /**
  * Guards on the MatrixToken deploy script.
@@ -76,5 +76,45 @@ describe("deploy.ts minter guards", () => {
     expect(() => parseMinters("localhost", { MINTERS: [a, a].join(","), THRESHOLD: "2" })).to.throw(
       /duplicate address/
     );
+  });
+});
+
+// The initial supply used to be a hardcoded 100,000,000 minted to the deploying
+// key. MatrixToken is the STANDALONE mirror and is backed by nothing - only
+// WrappedMatrix is backed by escrowed native - while the project describes its
+// asset as 1:1 backed. A default that hands the deployer a hundred million
+// unbacked tokens under the name MATRIX is the kind of thing nobody asked for
+// and everybody would ask about.
+describe("parseInitialSupply", () => {
+  it("mints nothing unless someone types a number", () => {
+    for (const net of ["localhost", "sepolia", "mainnet"]) {
+      const { supply, explicit } = parseInitialSupply(net, {});
+      expect(supply).to.equal(0n);
+      expect(explicit).to.equal(false);
+    }
+  });
+
+  it("treats an empty or whitespace value as unset rather than as zero-by-accident", () => {
+    expect(parseInitialSupply("mainnet", { INITIAL_SUPPLY: "   " }).explicit).to.equal(false);
+  });
+
+  it("mints exactly what was asked for, in whole MATRIX at 18 decimals", () => {
+    const { supply, explicit } = parseInitialSupply("localhost", { INITIAL_SUPPLY: "100" });
+    expect(supply).to.equal(100n * 10n ** 18n);
+    expect(explicit).to.equal(true);
+  });
+
+  it("refuses a value that is not a number, rather than minting something unintended", () => {
+    for (const bad of ["1e8", "-5", "100_000", "abc", "0x64"]) {
+      expect(() => parseInitialSupply("mainnet", { INITIAL_SUPPLY: bad })).to.throw(
+        /INITIAL_SUPPLY must be/
+      );
+    }
+  });
+
+  it("accepts an explicit zero", () => {
+    const { supply, explicit } = parseInitialSupply("mainnet", { INITIAL_SUPPLY: "0" });
+    expect(supply).to.equal(0n);
+    expect(explicit).to.equal(true);
   });
 });

@@ -86,9 +86,47 @@ export function parseMinters(
   return { minters, threshold, local: false };
 }
 
+// parseInitialSupply decides how many tokens the constructor mints, and to whom.
+//
+// WHAT THIS CHANGED, and why. It used to be a hardcoded 100,000,000 minted to
+// the deploying key. MatrixToken is ERC20("Matrix Compute Token", "MATRIX") and
+// is backed by NOTHING - it is the standalone mirror, not the bridge token -
+// while the project describes its asset as 1:1 backed by native MATRIX locked in
+// L1 escrow. Shipping a script whose default hands the deployer a hundred
+// million unbacked tokens under that name is a thing that ends badly whatever
+// the intent was, and nothing in the repo asked for it.
+//
+// The default is now ZERO. A real supply has to be typed, by someone who meant
+// it, into INITIAL_SUPPLY. Zero is also the honest genesis for a mirror: the
+// only supply that should exist is the supply that was locked for it.
+export function parseInitialSupply(
+  networkName: string,
+  env: { INITIAL_SUPPLY?: string } = process.env
+): { supply: bigint; explicit: boolean } {
+  const isReal = REAL_NETWORKS.has(networkName);
+  const raw = (env.INITIAL_SUPPLY ?? "").trim();
+
+  if (raw === "") {
+    return { supply: 0n, explicit: false };
+  }
+  if (!/^\d+(\.\d+)?$/.test(raw)) {
+    throw new Error(`INITIAL_SUPPLY must be a non-negative decimal number of whole MATRIX (got "${raw}")`);
+  }
+  const supply = ethers.parseUnits(raw, 18);
+  if (isReal && supply > 0n) {
+    // Not refused - an operator may have a reason - but it must be a decision
+    // taken in the open rather than a default nobody looked at.
+    console.warn(
+      `  WARNING: minting ${raw} unbacked MATRIX on "${networkName}". MatrixToken is the ` +
+        `standalone mirror and is NOT backed by locked native MATRIX; only WrappedMatrix is. ` +
+        `Anything minted here exists against nothing.`
+    );
+  }
+  return { supply, explicit: true };
+}
+
 async function main() {
-  // Initial supply minted at genesis: 100,000,000 MATRIX (18 decimals).
-  const initialSupply = ethers.parseUnits("100000000", 18);
+  const { supply: initialSupply, explicit } = parseInitialSupply(network.name);
 
   const [deployer] = await ethers.getSigners();
   const { minters, threshold, local } = parseMinters(network.name);
@@ -102,6 +140,12 @@ async function main() {
   console.log("  minters:       ", minters.join(", "));
   console.log("  threshold:     ", `${threshold}-of-${minters.length}`);
   console.log("  initialHolder: ", initialHolder);
+  console.log(
+    "  initialSupply: ",
+    explicit
+      ? `${ethers.formatUnits(initialSupply, 18)} MATRIX (from INITIAL_SUPPLY)`
+      : "0 (default; set INITIAL_SUPPLY to mint an unbacked initial float)"
+  );
   if (local) {
     console.log(
       "  NOTE: using the published local development minter keys. They are not secrets " +
