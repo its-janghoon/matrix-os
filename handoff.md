@@ -514,8 +514,33 @@ would encode one way in our code and the other way in the wallet.
 the network with money they already hold. The path exists in full - a DEX
 purchase of wMATRIX, `WrappedMatrix.burn`, and the burn watcher in
 `node/bridge_watch.go` releasing native from escrow - and every piece is built.
-What is missing is a mainnet contract deploy, an audit, and DEX liquidity, none
-of which is code.
+What is missing is a mainnet contract deploy, an audit, and DEX liquidity.
+
+**"None of which is code" was wrong, and this is the correction.** The INBOUND
+direction is indeed complete: buy wMATRIX, `WrappedMatrix.burn`, watcher,
+quorum-attested unlock, native released. But nothing can create the wMATRIX
+there is to buy. Minting requires a native LOCK, and `bridge.Lock` has exactly
+one caller in the tree - `cmd/bridge-attest`, which runs against a throwaway
+ledger it seeds itself. `MarketService` exposes thirteen RPCs and the only
+bridge one among them is `GetBridgeReconciliation`, a READ. There is no CLI
+command either.
+
+So a user on a running node cannot bridge native out, no wMATRIX supply can come
+into existence, and therefore the DEX liquidity the on-ramp depends on cannot be
+seeded. The missing piece is a lock RPC - request, escrow the native, return the
+validator-signed attestation - and that IS code. It is the smallest remaining
+thing standing between this repo and the token existing anywhere at all.
+
+Worth noting while we are here: `Bridge.Lock` writes the ledger directly through
+`ledger.Atomically`, not as a committed transaction, so a lock pays no protocol
+fee and the 1:1 backing invariant is exact. That is correct today only because
+nothing can call it over the network. Whoever adds the lock RPC has to make it
+consensus-ordered first, for the same reason the unlock had to be: a direct
+ledger write moves collateral on one node and nowhere else. `bridge/escrow` is
+also NOT in `IsReservedRecipient`, so if a lock ever does become a committed
+transfer it will start paying the fee, and minting the full pre-fee amount
+against a post-fee escrow balance would break the backing invariant by exactly
+the fee.
 
 (This paragraph used to end by repeating the watcher's own comment - that the
 unlock "is NOT consensus-ordered, which is correct for a solo operator and not
