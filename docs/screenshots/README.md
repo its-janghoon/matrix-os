@@ -36,6 +36,14 @@ nothing points at it to notice. `web-cli` was removed on that reasoning, came ba
 unreferenced, and has been removed again. Add a capture here only together with the README
 change that embeds it.
 
+The capture is deterministic in everything that matters. Re-running it against
+unchanged pages reproduces `web-inference.png` and `console-app.png` BYTE for
+byte; the other three come back within a few hundred bytes of ~380 KB, because
+the hero's looping background gradient lands on a different frame each time. So
+a diff of a few hundred bytes on one of those is the backdrop, not the page - do
+not commit it. A real content change moves the file by far more than that, and
+the byte-identical pair is the control that tells you which kind you have.
+
 Two things a capture script has to get right, both learned by getting them wrong:
 
 - **Wait for the entry animation to finish, not for a guessed delay.** The hero uses a
