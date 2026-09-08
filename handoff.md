@@ -1256,6 +1256,82 @@ static until a provider re-registers. And "stock beats flow by two orders of
 magnitude" was a units error, comparing a capitalized quantity (FDV) against one
 year of income; the token price cancels out of the comparison entirely.
 
+## What the bridge costs in ETH
+
+Measured, not quoted. Identical under the cancun, prague and osaka EVM rules,
+so these transfer to mainnet as gas UNITS and the only unknown is the gwei.
+`contracts/test/GasBudget.test.ts` holds ceilings so the figures fail a build
+when they stop being true.
+
+| | gas | at 10 gwei |
+| --- | --- | --- |
+| WrappedMatrix deploy, 2-of-3 | 1,519,899 | 0.0152 ETH |
+| the contract's first mint ever | 109,757 | 0.0011 ETH |
+| **each new user's first mint** | **92,657** | **0.00093 ETH** |
+| a repeat mint to an existing holder | 75,589 | 0.00076 ETH |
+| burn, with a 64-character account id | 38,097 | 0.00038 ETH |
+
+Per additional attestor the deploy costs ~23,112 more; per additional signature
+a mint costs ~7,671 more. `MatrixToken` (1,595,066 gas) is a separate unbacked
+mirror token and is NOT part of the bridge.
+
+**MINT HAS THREE TIERS AND THE MIDDLE ONE IS THE ONE THAT MATTERS.** It was
+missed at first, by a test that minted twice to the same address and so saw only
+the outer two. The 34,200 gap between them is two cold zero-to-nonzero SSTORE
+premiums and they are different kinds of event: OpenZeppelin's `_totalSupply`
+slot, which is cold exactly once in the contract's life, and the RECIPIENT's
+balance slot, which is cold once per distinct person who ever bridges in. That
+middle tier, 92,657, is the per-user number, and a bridge pays it far more often
+than either neighbour.
+
+Burn is a range rather than a constant, for the same reason a docblock is easy
+to get wrong: the native recipient is an unbounded string in both the calldata
+and the `Burned` event, about 24 gas per character. 36,975 for a 3-character
+recipient, 38,097 for the 64-character account id a real user has, 42,741 for
+256.
+
+**Standing the bridge up is a rounding error; the mints are the cost.** The
+whole mainnet deploy costs the same as 16 new-user mints. One on-chain
+transaction stands it up, and Etherscan verification is an API call with no gas.
+
+### Who pays, and the hole under it
+
+There is no browser mint path. A grep for `mint(` across `apps/` and `packages/`
+finds nothing: the only caller is `contracts/scripts/bridge-mint.ts`, an
+operator-side script. So as the code stands the OPERATOR pays every bridge-in.
+
+| users bridging in | 3 gwei | 10 gwei | 20 gwei | 50 gwei |
+| --- | --- | --- | --- | --- |
+| 100 | 0.028 | 0.093 | 0.186 | 0.464 ETH |
+| 1,000 | 0.278 | 0.927 | 1.853 | 4.634 ETH |
+| 10,000 | 2.780 | 9.266 | 18.532 | 46.329 ETH |
+
+**And there is no minimum lock amount.** `verifyBridgeLockLocked` refuses only
+zero, and a lock pays no protocol fee - which is deliberate, because a fee would
+mint more wrapped than the escrow holds. So a one-base-unit lock is valid and
+produces a mintable attestation, and the locked value comes back to its sender
+as wMATRIX. The attacker's net cost is nothing; the operator's is a mint.
+
+Today that is latent, because mints are broadcast by hand. It goes live the
+moment relaying is automated, which is the obvious next step for usability. Two
+things close it, and they are worth doing together:
+
+- **A browser mint,** so the user pays their own gas. Standard for a bridge, and
+  it takes the operator's per-user cost to zero. The wrinkle is that a user
+  needs ETH before they can receive wMATRIX.
+- **A minimum lock amount,** so spamming is not free. Required before any
+  automatic relaying, not after.
+
+A relay fee is the third option, but it must be charged separately in native
+rather than taken out of the escrowed amount: taking it from the lock breaks the
+1:1 backing by exactly the fee.
+
+The unlock direction costs the operator no Ethereum gas at all - the node
+WATCHES for `Burned` with `eth_getLogs` and releases escrow on its own L1. What
+it does cost is RPC calls: at the default 2s poll that is ~1.5M requests a
+month, and at the 12s the runbook recommends (matching Ethereum's block time)
+~432k. The default wastes six requests for every one that can see a new block.
+
 ## The on-ramp, end to end
 
 It is connected now. It was not before, in a way the handoff had recorded
