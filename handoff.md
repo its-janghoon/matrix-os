@@ -1299,6 +1299,25 @@ public read: it signs nothing new, and the mint it authorizes goes to the addres
 the LOCKER chose, so an open endpoint lets anyone gather an authorization and
 nobody redirect one.
 
+**And it has been shown to mint.** `BridgeE2E.test.ts` used to drive only the
+legacy `bridge.Lock` - a direct ledger write with a per-node counter and no
+production caller - so the derivation and the attestation a real node produces
+had never been fed to `WrappedMatrix.mint`. The on-ramp was built and never
+demonstrated. A third e2e case now drives the consensus path end to end:
+consensus-derived lock id, real signatures, real mint, and a replay of the same
+id reverted. `cmd/bridge-attest -consensus -nonce N` exercises it.
+
+`matrix bridge lock --to <address> --amount N` is the front door and prints the
+lock id the attestation step needs; `matrix bridge attestor-new` generates a
+validator's key.
+
+The recipient format now lives in `packages/protocol` (`bridgeLockRecipient`),
+transcribed into the published SDK and held identical by the differential test,
+with a Go test pinning the same literal. That closes a drift surface of the worst
+kind: the recipient IS the instruction, so a client that builds the string
+wrongly gets no error - it makes a transfer to a different reserved namespace or
+to an account id nobody holds, and the money goes somewhere quiet.
+
 So: lock -> gather a threshold -> `WrappedMatrix.mint` -> wMATRIX exists -> a pool
 can be seeded. What remains is genuinely not code: a mainnet deploy, an audit,
 the liquidity capital, and putting the attestor addresses in `ATTESTORS` at
