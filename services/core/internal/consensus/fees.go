@@ -337,7 +337,7 @@ func FeeAccrualAccount() string { return feeAccrualAccount }
 // It is exported because a fee nobody can see is not a fee anyone agreed to: a
 // client can read what it is paying and to whom.
 func (e *Engine) MaintainerShare() (account string, basisPoints uint32) {
-	return e.maintainerAccount, e.maintainerShareBPS
+	return e.MaintainerAccountInForce(), e.maintainerShareBPS
 }
 
 // assert the reserved accounts this package names do not collide with a real

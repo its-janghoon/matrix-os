@@ -293,7 +293,12 @@ type Engine struct {
 	feeBasisPoints uint32
 	// maintainerAccount / maintainerShareBPS are the standing cut of the fee
 	// paid before validators are; see Config.MaintainerAccount.
-	maintainerAccount  string
+	//
+	// The account is atomic because it is written by the block-apply path (a
+	// committed rotation) and read from the same ledger critical section that
+	// distributes fees, and taking e.mu under the ledger lock would establish a
+	// second lock order. The validator set is atomic for the same reason.
+	maintainerAccount  atomic.Pointer[string]
 	maintainerShareBPS uint32
 	// providers, emission settings and the operator's provider allow-list.
 	providers          *ProviderRegistry
@@ -550,7 +555,6 @@ func New(cfg Config) (*Engine, error) {
 		unbondingPeriod:    orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
 		targetBond:         cfg.TargetBond,
 		feeBasisPoints:     cfg.FeeBasisPoints,
-		maintainerAccount:  cfg.MaintainerAccount,
 		maintainerShareBPS: cfg.MaintainerFeeShareBasisPoints,
 		providers:          cfg.Providers,
 		emissionPerBlock:   cfg.ProviderEmissionPerBlock,
@@ -607,6 +611,7 @@ func New(cfg Config) (*Engine, error) {
 		e.approvedProviders[strings.ToLower(change.String())] = struct{}{}
 		e.approvedProvSpecs = append(e.approvedProvSpecs, change)
 	}
+	e.setMaintainerAccount(cfg.MaintainerAccount)
 	e.validatorSet.Store(cfg.Validators)
 	if cfg.Self != nil {
 		e.selfID = cfg.Self.AccountID()
@@ -710,6 +715,12 @@ func (e *Engine) Start(ctx context.Context) error {
 			}
 			if IsBurnUnlockRecipient(b.Txs[i].To) {
 				e.recordBurnAttestationLocked(b.Txs[i].To, b.Txs[i].SenderID())
+			}
+			// Rebuild the account in force from the chain rather than from a
+			// second persisted copy. Blocks replay in height order, so the last
+			// committed rotation wins, which is what "in force" means.
+			if IsMaintainerRotateRecipient(b.Txs[i].To) {
+				e.replayMaintainerRotate(&b.Txs[i])
 			}
 		}
 		e.mu.Unlock()
@@ -1576,6 +1587,8 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyProviderChangeLocked(tx)
 	case IsBurnUnlockRecipient(tx.To):
 		return e.verifyBurnUnlockLocked(tx)
+	case IsMaintainerRotateRecipient(tx.To):
+		return e.verifyMaintainerRotateLocked(tx)
 	}
 	return nil
 }
@@ -1623,6 +1636,14 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		}
 	case IsBurnUnlockRecipient(tx.To):
 		if _, err := ParseBurnUnlock(tx.To); err != nil {
+			return err
+		}
+	case IsMaintainerRotateRecipient(tx.To):
+		// A malformed successor never becomes well formed, so refuse it at Submit
+		// rather than letting it sit in a mempool. This is also where a rotation
+		// to a non-account id is stopped: the same shape check New applies to the
+		// configured account, for the same reason.
+		if _, err := ParseMaintainerRotate(tx.To); err != nil {
 			return err
 		}
 	}
@@ -2665,6 +2686,17 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = true
 				continue
 			}
+			if IsMaintainerRotateRecipient(tx.To) {
+				// A rotation carries no value; block validation enforced that the
+				// sender is the account currently being paid. Applying it here,
+				// inside the same critical section that distributes this block's
+				// fees, is what makes every node switch at the same height.
+				if err := e.applyMaintainerRotate(tx); err != nil {
+					return err
+				}
+				applied[mempoolKey(tx)] = true
+				continue
+			}
 			if IsBurnUnlockRecipient(tx.To) {
 				// An attestation carries no value either. Tallying it may cross
 				// quorum, in which case escrow is released HERE, inside the same
@@ -2737,7 +2769,7 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 		// honest behaviour: the alternative is reading a balance every block
 		// forever in case a rate that is off left something behind.
 		if feesTaken > 0 || e.feeBasisPoints > 0 {
-			if err := distributeFeesLocked(ltx, e.vset(), e.maintainerAccount, e.maintainerShareBPS); err != nil {
+			if err := distributeFeesLocked(ltx, e.vset(), e.MaintainerAccountInForce(), e.maintainerShareBPS); err != nil {
 				return err
 			}
 		}
@@ -3471,7 +3503,8 @@ func IsReservedRecipient(to string) bool {
 	return IsStakeRecipient(to) ||
 		IsSetChangeRecipient(to) ||
 		IsProviderChangeRecipient(to) ||
-		IsBurnUnlockRecipient(to)
+		IsBurnUnlockRecipient(to) ||
+		IsMaintainerRotateRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value

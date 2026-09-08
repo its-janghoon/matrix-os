@@ -267,3 +267,166 @@ func TestIsAccountIDAcceptsOnlyLowercaseHex64(t *testing.T) {
 		}
 	}
 }
+
+// Rotating the maintainer account.
+//
+// maintainer_account used to be startup config and nothing else, so moving to a
+// fresh key meant editing YAML on every validator and restarting them - and
+// because the share is consensus arithmetic, a network part-way through that
+// edit computes different balances from the same block, which is a fork. The
+// operation most likely to be needed was the one most likely to break the chain.
+
+func rotateEngine(t *testing.T, maintainer string) *Engine {
+	t.Helper()
+	return &Engine{maintainerShareBPS: 2000}
+}
+
+func TestOnlyTheCurrentMaintainerMayRotate(t *testing.T) {
+	current, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	stranger, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	successor := newAccountID(t)
+
+	e := rotateEngine(t, current.AccountID())
+	e.setMaintainerAccount(current.AccountID())
+
+	// The account being paid may name its successor.
+	ok := &token.Transaction{To: MaintainerRotateRecipient(successor), From: current.PublicKey}
+	if err := e.verifyMaintainerRotateLocked(ok); err != nil {
+		t.Fatalf("the current maintainer was refused its own rotation: %v", err)
+	}
+
+	// Nobody else may. This is the whole authorization: the signature over the
+	// transaction is verified before this runs, so proving the sender is the
+	// maintainer proves the maintainer authorized it.
+	bad := &token.Transaction{To: MaintainerRotateRecipient(successor), From: stranger.PublicKey}
+	if err := e.verifyMaintainerRotateLocked(bad); err == nil {
+		t.Fatal("a stranger redirected the maintainer fee to an account of their choosing")
+	}
+}
+
+func TestRotationRefusesAnUnspendableSuccessor(t *testing.T) {
+	current, _ := token.GenerateAccount()
+	e := rotateEngine(t, current.AccountID())
+	e.setMaintainerAccount(current.AccountID())
+
+	for _, bad := range []string{"", "my-wallet", strings.ToUpper(newAccountID(t)), newAccountID(t)[:63]} {
+		tx := &token.Transaction{To: maintainerRotatePrefix + bad, From: current.PublicKey}
+		if err := e.verifyMaintainerRotateLocked(tx); err == nil {
+			t.Fatalf("accepted a rotation to %q; the fee would be paid there every block, "+
+				"forever, and look exactly like it worked", bad)
+		}
+		// And Submit refuses it outright, so it cannot sit in a mempool.
+		if err := isPermanentlyInvalidReserved(tx); err == nil {
+			t.Fatalf("isPermanentlyInvalidReserved accepted a rotation to %q", bad)
+		}
+	}
+}
+
+func TestRotationCarriesNoValue(t *testing.T) {
+	current, _ := token.GenerateAccount()
+	tx := &token.Transaction{
+		To:     MaintainerRotateRecipient(newAccountID(t)),
+		From:   current.PublicKey,
+		Amount: 1,
+	}
+	if err := isPermanentlyInvalidReserved(tx); err == nil {
+		t.Fatal("value sent to a rotation recipient was allowed; it would be stranded at an " +
+			"id nobody holds a key for")
+	}
+}
+
+func TestRotationToTheSameAccountIsRefused(t *testing.T) {
+	current, _ := token.GenerateAccount()
+	e := rotateEngine(t, current.AccountID())
+	e.setMaintainerAccount(current.AccountID())
+	tx := &token.Transaction{
+		To:   MaintainerRotateRecipient(current.AccountID()),
+		From: current.PublicKey,
+	}
+	if err := e.verifyMaintainerRotateLocked(tx); err == nil {
+		t.Fatal("a no-op rotation was accepted")
+	}
+}
+
+func TestNothingToRotateWhenNoMaintainerIsSet(t *testing.T) {
+	sender, _ := token.GenerateAccount()
+	e := rotateEngine(t, "")
+	e.setMaintainerAccount("")
+	tx := &token.Transaction{To: MaintainerRotateRecipient(newAccountID(t)), From: sender.PublicKey}
+	if err := e.verifyMaintainerRotateLocked(tx); err == nil {
+		t.Fatal("a rotation was accepted on a network that pays no maintainer share, which " +
+			"would let anyone appoint themselves")
+	}
+}
+
+// TestApplyingARotationChangesWhoIsPaid ties the recipient to the money: after
+// the rotation applies, the fee distribution pays the successor.
+func TestApplyingARotationChangesWhoIsPaid(t *testing.T) {
+	current, _ := token.GenerateAccount()
+	successor := newAccountID(t)
+	e := rotateEngine(t, current.AccountID())
+	e.setMaintainerAccount(current.AccountID())
+
+	tx := &token.Transaction{To: MaintainerRotateRecipient(successor), From: current.PublicKey}
+	if err := e.applyMaintainerRotate(tx); err != nil {
+		t.Fatalf("applyMaintainerRotate: %v", err)
+	}
+	if got := e.MaintainerAccountInForce(); got != successor {
+		t.Fatalf("account in force = %q, want %q", got, successor)
+	}
+
+	accts, pubs := testKeys(t, 2)
+	vs, _ := NewValidatorSet(pubs)
+	ledger, done := feeLedger(t)
+	defer done()
+	if err := ledger.Credit(FeeAccrualAccount(), 1000); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
+		return distributeFeesLocked(ltx, vs, e.MaintainerAccountInForce(), e.maintainerShareBPS)
+	}); err != nil {
+		t.Fatalf("distributeFeesLocked: %v", err)
+	}
+	if bal, _ := ledger.Balance(successor); bal != 200 {
+		t.Fatalf("the successor was paid %d, want 200", bal)
+	}
+	if bal, _ := ledger.Balance(current.AccountID()); bal != 0 {
+		t.Fatalf("the previous maintainer was still paid %d after rotating away", bal)
+	}
+	_ = accts
+}
+
+// TestAMalformedRotationInACommittedBlockDoesNotWedge. Block validation refuses
+// these, so one arriving here means a block was committed that should not have
+// been. A node must not rotate to it and must not stop.
+func TestAMalformedRotationInACommittedBlockDoesNotWedge(t *testing.T) {
+	current, _ := token.GenerateAccount()
+	e := rotateEngine(t, current.AccountID())
+	e.setMaintainerAccount(current.AccountID())
+
+	tx := &token.Transaction{To: maintainerRotatePrefix + "not-an-account", From: current.PublicKey}
+	if err := e.applyMaintainerRotate(tx); err != nil {
+		t.Fatalf("a malformed rotation wedged the node: %v", err)
+	}
+	if got := e.MaintainerAccountInForce(); got != current.AccountID() {
+		t.Fatalf("account in force = %q; a malformed rotation moved the money", got)
+	}
+}
+
+func TestARotationIsAReservedRecipientAndPaysNoFee(t *testing.T) {
+	to := MaintainerRotateRecipient(newAccountID(t))
+	if !IsReservedRecipient(to) {
+		t.Fatal("a rotation is not a reserved recipient, so it would appear in transaction " +
+			"history as an ordinary transfer")
+	}
+	if paysFee(to) {
+		t.Fatal("a rotation pays the protocol fee; it carries no value and the fee would be zero, " +
+			"but a list that is right by accident is one edit away from being wrong")
+	}
+}
