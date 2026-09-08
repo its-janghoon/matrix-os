@@ -174,6 +174,25 @@ type Config struct {
 	// Every node in a network must agree on it. A node charging a different rate
 	// would compute different balances from the same block, which is a fork.
 	FeeBasisPoints uint32
+
+	// MaintainerAccount is paid a standing cut of the protocol fee, before the
+	// rest is split among validators. Empty pays nobody.
+	//
+	// It is for the person who starts a network and then keeps operating and
+	// developing it. Validator earnings dilute as the set grows, so funding
+	// maintenance out of them shrinks exactly as the project succeeds; a genesis
+	// allocation funds a moment rather than an ongoing obligation. This is
+	// neither: a fixed fraction of the fee that does not dilute.
+	MaintainerAccount string
+	// MaintainerFeeShareBasisPoints is that cut, in hundredths of a percent OF
+	// THE FEE - not of the transfer. At the 1% fee ceiling and this share's own
+	// ceiling of half, a maintainer takes at most 0.5% of transferred value.
+	//
+	// Zero is the default and pays nothing. Like FeeBasisPoints, every node must
+	// agree on it: a node using a different share computes different balances
+	// from the same block and forks itself off, which is also why an operator
+	// cannot quietly set it to zero and keep the network.
+	MaintainerFeeShareBasisPoints uint32
 	// Providers, when non-nil, is the registry of accounts that earn provider
 	// rewards from the genesis pool. Without it no emission is paid.
 	Providers *ProviderRegistry
@@ -272,6 +291,10 @@ type Engine struct {
 	unbondingPeriod uint64
 	// feeBasisPoints is the protocol fee rate; see Config.FeeBasisPoints.
 	feeBasisPoints uint32
+	// maintainerAccount / maintainerShareBPS are the standing cut of the fee
+	// paid before validators are; see Config.MaintainerAccount.
+	maintainerAccount  string
+	maintainerShareBPS uint32
 	// providers, emission settings and the operator's provider allow-list.
 	providers          *ProviderRegistry
 	emissionPerBlock   uint64
@@ -498,6 +521,9 @@ func New(cfg Config) (*Engine, error) {
 		return nil, fmt.Errorf("consensus: fee of %d basis points exceeds the %d-basis-point ceiling this build allows",
 			cfg.FeeBasisPoints, MaxFeeBasisPoints)
 	}
+	if err := checkMaintainerConfig(cfg.MaintainerAccount, cfg.MaintainerFeeShareBasisPoints); err != nil {
+		return nil, err
+	}
 	e := &Engine{
 		transport:            cfg.Transport,
 		chain:                cfg.Chain,
@@ -524,6 +550,8 @@ func New(cfg Config) (*Engine, error) {
 		unbondingPeriod:    orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
 		targetBond:         cfg.TargetBond,
 		feeBasisPoints:     cfg.FeeBasisPoints,
+		maintainerAccount:  cfg.MaintainerAccount,
+		maintainerShareBPS: cfg.MaintainerFeeShareBasisPoints,
 		providers:          cfg.Providers,
 		emissionPerBlock:   cfg.ProviderEmissionPerBlock,
 		emissionHalfLife:   orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
@@ -2709,7 +2737,7 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 		// honest behaviour: the alternative is reading a balance every block
 		// forever in case a rate that is off left something behind.
 		if feesTaken > 0 || e.feeBasisPoints > 0 {
-			if err := distributeFeesLocked(ltx, e.vset()); err != nil {
+			if err := distributeFeesLocked(ltx, e.vset(), e.maintainerAccount, e.maintainerShareBPS); err != nil {
 				return err
 			}
 		}

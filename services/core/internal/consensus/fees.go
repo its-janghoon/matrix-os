@@ -57,6 +57,19 @@ const (
 	// basisPointDivisor is 100%, in basis points.
 	basisPointDivisor uint64 = 10_000
 
+	// MaxMaintainerShareBasisPoints caps the maintainer's cut of the fee at half
+	// of it, in hundredths of a percent.
+	//
+	// The ceiling exists for the same reason MaxFeeBasisPoints does, and it is
+	// set here rather than left to config because of what the fee is FOR. The fee
+	// exists to pay for validating - it is what makes a bond worth posting by a
+	// third party. A maintainer who took most of it would be funding themselves
+	// out of the budget that buys the network its security, and every validator
+	// would see their earnings fall without anything in the protocol saying why.
+	// Half means the people doing the work always keep at least half of what the
+	// work is paid.
+	MaxMaintainerShareBasisPoints uint32 = 5_000
+
 	// feeAccrualAccount holds fees taken but not yet distributed.
 	//
 	// It exists so the remainder of an uneven split is not lost and not given to
@@ -122,16 +135,127 @@ func paysFee(to string) bool {
 // feeNamespace is the reserved prefix for fee state.
 const feeNamespace = "consensus/fees/"
 
-// distributeFeesLocked pays out everything in the fee accrual account to the
-// validator set, pro rata by voting power, and leaves the indivisible remainder
-// for the next block. It runs inside the ledger critical section that applied
-// the block's transfers, so a block's fees and its transfers land together or
-// not at all.
+// isAccountID reports whether id has the shape of an ed25519-derived account:
+// exactly 64 lowercase hex characters. It is a shape check, not proof that
+// anyone holds the key - but it is what separates a real account from a typo,
+// and a fee paid every block into a typo is unrecoverable.
+func isAccountID(id string) bool {
+	if len(id) != 64 {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// The maintainer share: a standing cut of the fee for whoever keeps the network
+// running.
+//
+// WHAT IT IS FOR. A network has a person who starts it and then keeps operating
+// and developing it, and that work does not stop at launch. The protocol fee
+// already pays validators for validating. It pays nothing for maintenance, so
+// the only ways a maintainer could fund themselves were to run validators (a
+// share that DILUTES as the set grows, which is to say it shrinks exactly as the
+// project succeeds) or to take a one-off genesis allocation (which funds a
+// moment, not an ongoing obligation). This is the third: a fixed fraction of the
+// fee, paid to one named account, that does not dilute.
+//
+// WHY IT IS A SHARE OF THE FEE AND NOT OF THE TRANSFER. Bounding it inside the
+// fee means it inherits the fee's ceiling: at the maximum fee of 1% and the
+// maximum share of half, a maintainer takes 0.5% of transferred value and can
+// never take more, whatever anyone configures. A cut quoted against the transfer
+// would need its own ceiling and a second place to reason about the worst case.
+//
+// WHY AN OPERATOR CANNOT QUIETLY ZERO IT. It is read from config, like the fee
+// rate itself, and like the fee rate every node must agree on it: a node that
+// set a different share would compute different balances from the same block and
+// fork itself off the network. That is not an enforcement mechanism anyone
+// built, it is a consequence of the fee being consensus arithmetic - but it is a
+// real one, and it is stronger than a promise. The cost of not paying it is
+// leaving.
+//
+// WHAT IT IS, PLAINLY. A tax on the people using the network, taken to fund the
+// person maintaining it. That is a legitimate thing for a network to do and a
+// dishonest thing to hide, so it defaults to zero, it is bounded in code, the
+// node prints it at startup, and MaintainerShare exposes it for a client to
+// read. Anyone can see what they are paying and to whom.
+
+// checkMaintainerConfig validates the maintainer account and share before a node
+// starts, rather than letting a bad one become a fee taken every block.
+//
+// Every failure here is silent in production if it is not caught here: an
+// over-ceiling share quietly outbids the validators, a share with no account
+// charges users and pays nobody, and a mistyped account pays into something
+// nobody holds a key for - forever, with nothing to notice it by, because a fee
+// arriving somewhere unspendable looks exactly like a fee arriving.
+func checkMaintainerConfig(account string, bps uint32) error {
+	if bps > MaxMaintainerShareBasisPoints {
+		return fmt.Errorf("consensus: maintainer share of %d basis points exceeds the %d-basis-point "+
+			"ceiling this build allows, which keeps at least half the fee with the validators earning it",
+			bps, MaxMaintainerShareBasisPoints)
+	}
+	if bps == 0 {
+		return nil
+	}
+	if account == "" {
+		return fmt.Errorf("consensus: a maintainer share of %d basis points is configured but no "+
+			"maintainer account is set, so there is nobody to pay it to", bps)
+	}
+	// A reserved id is a namespace this package spends FROM, not an account
+	// anyone holds a key for.
+	if IsReservedRecipient(account) || strings.HasPrefix(account, feeNamespace) ||
+		account == rewardPoolAccount {
+		return fmt.Errorf("consensus: maintainer account %q is a reserved id, not an account anyone "+
+			"holds a key for", account)
+	}
+	if !isAccountID(account) {
+		return fmt.Errorf("consensus: maintainer account %q is not an account id (64 lowercase hex "+
+			"characters); a typo here pays the fee to an account nobody can spend from, every block, "+
+			"with nothing to notice it by", account)
+	}
+	return nil
+}
+
+// takeMaintainerShareLocked moves the maintainer's cut out of the accrual
+// account before validators are paid, returning what was taken.
+//
+// Determinism: accrued is committed state and the share is exact integer
+// arithmetic, so every node takes the same amount at the same height. The
+// remainder is what the pro-rata split then divides, so the maintainer's cut
+// cannot be affected by how the validator split rounds.
+func takeMaintainerShareLocked(ltx market.LedgerTx, accrued uint64, account string, bps uint32) (uint64, error) {
+	if account == "" || bps == 0 || accrued == 0 {
+		return 0, nil
+	}
+	// accrued <= the supply cap and bps <= 5000, so the product is at most
+	// 5e21 - past a uint64. Divide first, exactly as FeeFor does, and carry the
+	// remainder term separately so no ordering can overflow.
+	whole := accrued / basisPointDivisor
+	rest := accrued % basisPointDivisor
+	share := whole*uint64(bps) + rest*uint64(bps)/basisPointDivisor
+	if share == 0 {
+		return 0, nil
+	}
+	if err := ltx.Transfer(feeAccrualAccount, account, share); err != nil {
+		return 0, fmt.Errorf("consensus: pay maintainer share to %s: %w", account, err)
+	}
+	return share, nil
+}
+
+// distributeFeesLocked pays the maintainer share, then pays out the rest of the
+// fee accrual account to the validator set pro rata by voting power, leaving the
+// indivisible remainder for the next block. It runs inside the ledger critical
+// section that applied the block's transfers, so a block's fees and its
+// transfers land together or not at all.
 //
 // Determinism: the accrued balance, the set and every member's power are all
 // committed state, and the shares are computed with exact integer arithmetic in
 // a fixed (sorted) order. Every node computes the same payout.
-func distributeFeesLocked(ltx market.LedgerTx, vs *ValidatorSet) error {
+func distributeFeesLocked(ltx market.LedgerTx, vs *ValidatorSet, maintainer string, maintainerBPS uint32) error {
 	if vs == nil || vs.Len() == 0 {
 		return nil
 	}
@@ -142,6 +266,18 @@ func distributeFeesLocked(ltx market.LedgerTx, vs *ValidatorSet) error {
 	if accrued == 0 {
 		return nil
 	}
+
+	// The maintainer is paid first, out of the whole accrual, so their share does
+	// not depend on the validator split's rounding.
+	taken, err := takeMaintainerShareLocked(ltx, accrued, maintainer, maintainerBPS)
+	if err != nil {
+		return err
+	}
+	accrued -= taken
+	if accrued == 0 {
+		return nil
+	}
+
 	total := vs.TotalPower()
 	if total == 0 {
 		return nil
@@ -193,6 +329,16 @@ func (e *Engine) FeeBasisPoints() uint32 { return e.feeBasisPoints }
 // FeeAccrualAccount is the reserved account holding undistributed fees. It is
 // exported so an operator can read its balance like any other.
 func FeeAccrualAccount() string { return feeAccrualAccount }
+
+// MaintainerShare returns the account paid a standing cut of the protocol fee
+// and that cut in basis points OF THE FEE. An empty account or a zero share
+// means nobody is paid one.
+//
+// It is exported because a fee nobody can see is not a fee anyone agreed to: a
+// client can read what it is paying and to whom.
+func (e *Engine) MaintainerShare() (account string, basisPoints uint32) {
+	return e.maintainerAccount, e.maintainerShareBPS
+}
 
 // assert the reserved accounts this package names do not collide with a real
 // ed25519-derived account id, which is 64 lowercase hex characters.

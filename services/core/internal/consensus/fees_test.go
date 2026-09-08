@@ -133,7 +133,7 @@ func TestFeeSplitLeavesNoDustBehindAndLosesNothing(t *testing.T) {
 		t.Fatalf("credit: %v", err)
 	}
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		return distributeFeesLocked(ltx, vs)
+		return distributeFeesLocked(ltx, vs, "", 0)
 	}); err != nil {
 		t.Fatalf("distributeFeesLocked: %v", err)
 	}
@@ -160,7 +160,7 @@ func TestFeeSplitLeavesNoDustBehindAndLosesNothing(t *testing.T) {
 		t.Fatalf("credit: %v", err)
 	}
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		return distributeFeesLocked(ltx, vs)
+		return distributeFeesLocked(ltx, vs, "", 0)
 	}); err != nil {
 		t.Fatalf("distributeFeesLocked: %v", err)
 	}
@@ -193,7 +193,7 @@ func TestFeeSplitIsProRataByVotingPower(t *testing.T) {
 		t.Fatalf("credit: %v", err)
 	}
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		return distributeFeesLocked(ltx, vs)
+		return distributeFeesLocked(ltx, vs, "", 0)
 	}); err != nil {
 		t.Fatalf("distributeFeesLocked: %v", err)
 	}
@@ -232,7 +232,7 @@ func TestFeeSplitSurvivesSupplyScaleNumbers(t *testing.T) {
 		t.Fatalf("credit: %v", err)
 	}
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		return distributeFeesLocked(ltx, vs)
+		return distributeFeesLocked(ltx, vs, "", 0)
 	}); err != nil {
 		t.Fatalf("distributeFeesLocked: %v", err)
 	}

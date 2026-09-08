@@ -808,6 +808,50 @@ holds only the four host functions, so there is no file or socket to reach for.
 The run-time deadline is real (`WithCloseOnContextDone`, proven by `spin.rs`),
 and `MaxFuel` was already replaced by it - a counter nothing could spend.
 
+### The maintainer share: how the person running the network gets paid
+
+The protocol fee pays validators for validating. It paid nothing for
+MAINTENANCE, and the two alternatives available to a founder both fail at
+exactly the wrong moment: a validator share **dilutes as the set grows**, so it
+shrinks precisely as the project succeeds, and a genesis allocation funds a
+moment rather than an ongoing obligation.
+
+`consensus.maintainer_account` is now paid a fixed cut of the fee, taken before
+the rest is split pro rata. Zero by default.
+
+- **It is a share OF THE FEE, not of the transfer**, so it inherits the fee's
+  1% ceiling. At the maximum fee and this share's own ceiling, a maintainer
+  takes 0.5% of transferred value and can never take more, whatever anyone
+  configures. A cut quoted against the transfer would need its own ceiling and a
+  second worst case to reason about.
+- **Capped at half the fee** (`MaxMaintainerShareBasisPoints = 5000`), in code
+  rather than config, for the reason the fee itself is capped: the fee is what
+  makes a bond worth posting by a third party, and a maintainer funding
+  themselves out of most of it would be spending the budget that buys the
+  network its security.
+- **An operator cannot quietly zero it.** It is read from config like the fee
+  rate, and like the fee rate every node must agree: a node using a different
+  share computes different balances from the same block and forks itself off.
+  Nobody built that as enforcement, it falls out of the fee being consensus
+  arithmetic - but it is stronger than a promise, because the cost of not paying
+  is leaving the network.
+- **It is a tax on users, and it is disclosed rather than hidden.** Default
+  zero, bounded in code, printed at startup with both the share of the fee and
+  the share of transferred value, and readable through `Engine.MaintainerShare`.
+- **A misconfiguration refuses to start.** A share over the ceiling, a share
+  with no account, a reserved id, or anything that is not 64 lowercase hex.
+  That last one matters most: a mistyped account is a fee paid every block into
+  something nobody holds a key for, forever, and it looks exactly like it is
+  working.
+
+The arithmetic divides before multiplying, as `FeeFor` does, because the accrual
+can reach the supply cap and `accrued * 5000` wraps a uint64 - a wrapped share
+is a wrong balance on every node rather than an error anywhere. Pinned at seven
+scales from one base unit to the whole cap.
+
+What is still only the CTO's to decide is the number. The mechanism defaults to
+paying nobody.
+
 ### Storage rent, built
 
 Stored module bytes are now charged for. The manager charged for a RUN and

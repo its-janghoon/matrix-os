@@ -203,6 +203,34 @@ type Config struct {
 		// node in a network must agree on the rate: a node charging differently
 		// would compute different balances from the same block, which is a fork.
 		FeeBasisPoints uint32 `yaml:"fee_basis_points"`
+		// MaintainerAccount is paid a standing cut of the protocol fee, taken
+		// before the rest is split among validators. Empty pays nobody, which is
+		// the default.
+		//
+		// It is for the person who starts a network and then keeps operating and
+		// developing it. The alternatives do not cover that: a validator share
+		// DILUTES as the set grows, so it shrinks exactly as the project
+		// succeeds, and a genesis allocation funds a moment rather than an
+		// ongoing obligation.
+		//
+		// It must be a real account id (64 lowercase hex), not a reserved name.
+		// A typo here would pay the fee into something nobody holds a key for,
+		// every block, forever, and look exactly like it was working - so the
+		// node refuses to start rather than accept one.
+		MaintainerAccount string `yaml:"maintainer_account"`
+		// MaintainerFeeShareBasisPoints is that cut, in hundredths of a percent
+		// OF THE FEE rather than of the transfer. 2000 is a fifth of the fee; at
+		// the 1% fee that is 0.2% of transferred value.
+		//
+		// The build refuses more than 5000 (half the fee), because the fee exists
+		// to pay for validating and a maintainer taking most of it would be
+		// spending the budget that buys the network its security.
+		//
+		// EVERY node must agree on it, exactly as with the rate. That is also why
+		// an operator cannot quietly zero it: a node using a different share
+		// computes different balances from the same block and forks itself off
+		// the network.
+		MaintainerFeeShareBasisPoints uint32 `yaml:"maintainer_fee_share_basis_points"`
 		// Rewards configures the provider emission: what the genesis pool pays
 		// out per block to the accounts that supply compute.
 		Rewards RewardsConfig `yaml:"rewards"`
@@ -1004,6 +1032,15 @@ func (n *Node) Start() error {
 			"and paid to the validator set pro rata by voting power.\n",
 			n.config.Consensus.FeeBasisPoints, float64(n.config.Consensus.FeeBasisPoints)/100)
 	}
+	if n.config.Consensus.MaintainerFeeShareBasisPoints > 0 {
+		// Printed unconditionally when set, because a cut nobody can see is not
+		// one anyone agreed to.
+		share := float64(n.config.Consensus.MaintainerFeeShareBasisPoints) / 100
+		ofValue := share * float64(n.config.Consensus.FeeBasisPoints) / 10000
+		fmt.Printf("Consensus: %.2f%% of that fee (%.4f%% of transferred value) goes to the maintainer "+
+			"account %s before the rest is split among validators.\n",
+			share, ofValue, n.config.Consensus.MaintainerAccount)
+	}
 	if n.config.Consensus.Rewards.PerBlock > 0 {
 		fmt.Printf("Consensus: provider rewards are ON. The genesis pool pays up to %d base units per block, "+
 			"halving every %d blocks, shared among the registered providers a block pays.\n",
@@ -1073,12 +1110,14 @@ func (n *Node) Start() error {
 		// in a reserved account on the SAME ledger everything else settles on, so
 		// bonding conserves supply and bonded coins leave the spendable balance
 		// without any second accounting system.
-		Stake:           stakeLedger,
-		MinBond:         minBond,
-		ZeroMinBond:     zeroMinBond,
-		UnbondingPeriod: n.config.Consensus.Stake.UnbondingPeriod,
-		TargetBond:      n.config.Consensus.Stake.Bond,
-		FeeBasisPoints:  n.config.Consensus.FeeBasisPoints,
+		Stake:                         stakeLedger,
+		MinBond:                       minBond,
+		ZeroMinBond:                   zeroMinBond,
+		UnbondingPeriod:               n.config.Consensus.Stake.UnbondingPeriod,
+		TargetBond:                    n.config.Consensus.Stake.Bond,
+		FeeBasisPoints:                n.config.Consensus.FeeBasisPoints,
+		MaintainerAccount:             n.config.Consensus.MaintainerAccount,
+		MaintainerFeeShareBasisPoints: n.config.Consensus.MaintainerFeeShareBasisPoints,
 		// The provider emission and the registry that decides who earns it.
 		Providers:                consensus.NewProviderRegistry(n.kvStore),
 		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
