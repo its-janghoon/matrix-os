@@ -112,15 +112,40 @@ matrix bridge lock --to 0xYourEthAddress --amount 4000000000
 ```
 
 It prints the LOCK ID, derived from the transaction (nonce, sender, recipient,
-amount). Then ask each validator for its signature:
+amount). Then collect the validators' signatures for it:
 
-```
-POST /matrix.market.v1.MarketService/GetLockAttestation  {"lockId": "0x..."}
+```sh
+matrix bridge attestation --lock-id 0x5b5a... \
+  --validator node1:9091 --validator node2:9091 --validator node3:9091 \
+  > atts.json
 ```
 
 Each node returns ONE signature, because each holds its own attestor key and the
-contract counts the threshold. Collect m of them and call
-`WrappedMatrix.mint(recipient, amount, lockId, signatures)`.
+contract counts the threshold; there is no gossip of partial signatures, since
+that would be a second consensus for something the contract already checks. With
+no `--validator` it asks the single node `--addr` points at, which is a 1-of-1
+bridge or a rehearsal. The underlying RPC is
+`GetLockAttestation {"lockId": "0x..."}`, a public read.
+
+Then mint:
+
+```sh
+CONTRACT=0xYourWrappedMatrix ATTESTATIONS=./atts.json \
+  npx hardhat run scripts/bridge-mint.ts --network <network>
+```
+
+**Both steps refuse a set that cannot mint, before any gas is spent.** The
+collector rejects validators that disagree about the lock (a fork, not a
+signature problem) and the same attestor answering twice, which is one signature
+dressed as two. The mint script checks every recovered signer against the
+contract's registered set, sorts the signatures by ascending signer - the
+contract requires that ordering to count distinct signers, so an m-of-n mint
+submitted in the order the nodes answered reverts `InvalidSignature` - and
+simulates the call before broadcasting.
+
+The account that broadcasts the mint pays gas and nothing else. `mint` is
+permissionless and the recipient is fixed inside the signed digest, so whoever
+sends it cannot redirect the tokens.
 
 Each validator generates its attestor key with:
 
