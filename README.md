@@ -50,7 +50,8 @@ private per-node number.*
 
 ![Matrix Console desktop app](docs/screenshots/console-app.png)
 *Matrix Console: providers, jobs, native MATRIX wallet, consensus and inference tabs in one
-window - the whole thing running.*
+window, here on the Providers tab showing local and remote capacity with the peer ids they
+were discovered from - the whole thing running.*
 
 ## Repository tooling
 
