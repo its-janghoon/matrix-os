@@ -404,8 +404,8 @@ func bridgeLockerFor(b *bridge.Bridge) consensus.BridgeLocker {
 // package - the same split the burn unlock uses in the other direction.
 type bridgeLockAdapter struct{ bridge *bridge.Bridge }
 
-func (a bridgeLockAdapter) RecordLock(lockID [32]byte, from string, recipient [20]byte, nativeAmount uint64) error {
-	return a.bridge.RecordLock(lockID, from, bridge.Address(recipient), nativeAmount)
+func (a bridgeLockAdapter) RecordLock(ltx market.LedgerTx, lockID [32]byte, from string, recipient [20]byte, nativeAmount uint64) error {
+	return a.bridge.RecordLock(ltx, lockID, from, bridge.Address(recipient), nativeAmount)
 }
 
 func (a bridgeLockAdapter) EscrowAccount() string { return a.bridge.EscrowAccount() }

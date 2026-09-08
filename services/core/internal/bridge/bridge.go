@@ -473,27 +473,35 @@ type Reconciliation struct {
 // contract should report if it is correctly backed 1:1. It returns an error if
 // the escrow balance and the accounting disagree, which would signal a bug or
 // out-of-band tampering.
+//
+// THE WHOLE SNAPSHOT IS TAKEN IN ONE LEDGER CRITICAL SECTION, because the two
+// halves it compares are written by one. A commit moves value into escrow and
+// bumps the locked total inside a single Atomically block; reading the counters
+// outside it and the escrow balance inside it can straddle that commit and
+// report a mismatch that never existed on any node. An operator alarm that fires
+// because a lock happened to land mid-read is worse than no alarm.
 func (b *Bridge) Reconcile() (*Reconciliation, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	locked, err := b.readUint64(lockedTTLKey)
-	if err != nil {
-		return nil, err
-	}
-	unlocked, err := b.readUint64(unlockedTTLKey)
-	if err != nil {
+	var locked, unlocked, escrow uint64
+	if err := b.ledger.Atomically(func(ltx market.LedgerTx) error {
+		var err error
+		if locked, err = b.readUint64(lockedTTLKey); err != nil {
+			return err
+		}
+		if unlocked, err = b.readUint64(unlockedTTLKey); err != nil {
+			return err
+		}
+		escrow, err = ltx.Balance(EscrowAccount)
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	if unlocked > locked {
 		return nil, fmt.Errorf("bridge: unlocked %d exceeds locked %d", unlocked, locked)
 	}
 	outstanding := locked - unlocked
-
-	escrow, err := b.ledger.Balance(EscrowAccount)
-	if err != nil {
-		return nil, err
-	}
 	if escrow != outstanding {
 		return nil, fmt.Errorf("bridge: reconciliation mismatch: escrow balance %d != outstanding %d", escrow, outstanding)
 	}
@@ -519,56 +527,72 @@ func (b *Bridge) Reconcile() (*Reconciliation, error) {
 // double count, moving the value twice out of an account the engine has already
 // debited.
 //
+// IT MUST NOT TAKE A LOCK, AND ltx IS THE PROOF THAT IT NEED NOT. Like
+// ApplyAttestedUnlock, this runs from inside the consensus apply path, which
+// already holds the ledger critical section; opening a second one re-enters a
+// non-reentrant mutex and wedges the node's consensus driver forever, and taking
+// b.mu here would invert the order Reconcile and ProcessBurn use (b.mu, then the
+// ledger) into a textbook AB-BA deadlock. Demanding the caller's ledger
+// transaction is how the contract is stated in the type rather than in a comment
+// nobody reads: you cannot call this without already being inside the section.
+// The parameter is deliberately unused - the bridge counters live in the kv
+// store, not the ledger - and the caller's section is what serializes the
+// check-then-write below.
+//
 // IDEMPOTENT PER LOCK ID, which is what makes a replay safe. A node that
 // re-applies a committed block - a crash before the cursor advanced, a resync -
 // calls this again with the same id, and the running locked total must not
-// climb twice for one lock. The check and the write are inside the same ledger
-// critical section, so two callers cannot both see "absent" and both add.
-func (b *Bridge) RecordLock(lockID [LockIDLen]byte, from string, recipient Address, nativeAmount uint64) error {
+// climb twice for one lock.
+//
+// IT IS NOT GATED ON consensusOrdered, unlike ApplyAttestedUnlock, because the
+// two halves are not symmetric. The unlock half has a mode: a solo node's
+// watcher may release escrow itself, a validator set's may not. The lock half
+// has none - since locking became a transaction, EVERY lock on every node
+// arrives through the engine - so a solo node runs a direct bridge and still
+// records consensus locks through here. Gating this would leave such a node
+// escrowing value it never recorded, with nothing to attest to and a
+// reconciliation that fails.
+func (b *Bridge) RecordLock(ltx market.LedgerTx, lockID [LockIDLen]byte, from string, recipient Address, nativeAmount uint64) error {
+	_ = ltx // held for the contract above, not written through
 	if nativeAmount == 0 {
 		return ErrZeroAmount
 	}
-	b.mu.Lock()
-	defer b.mu.Unlock()
-
-	return b.ledger.Atomically(func(market.LedgerTx) error {
-		key := lockPrefix + hex.EncodeToString(lockID[:])
-		if existing, err := b.store.Get([]byte(key)); err == nil && len(existing) > 0 {
-			// Already recorded. Not an error: replaying a committed block is
-			// ordinary, and the whole point of keying by lock id is that doing so
-			// is free.
-			return nil
-		}
-		locked, err := b.readUint64(lockedTTLKey)
-		if err != nil {
-			return err
-		}
-		if locked > (^uint64(0))-nativeAmount {
-			return fmt.Errorf("bridge: locked total overflow")
-		}
-		event := &LockEvent{
-			LockID:       lockID,
-			FromAccount:  from,
-			Recipient:    recipient,
-			NativeAmount: nativeAmount,
-		}
-		payload, err := json.Marshal(event)
-		if err != nil {
-			return fmt.Errorf("bridge: marshal lock event: %w", err)
-		}
-		batch := b.store.NewBatch()
-		defer batch.Close()
-		if err := batch.Set([]byte(key), payload, nil); err != nil {
-			return fmt.Errorf("bridge: stage lock event: %w", err)
-		}
-		if err := batch.Set([]byte(lockedTTLKey), encodeU64(locked+nativeAmount), nil); err != nil {
-			return fmt.Errorf("bridge: stage locked total: %w", err)
-		}
-		if err := batch.Commit(pebble.Sync); err != nil {
-			return fmt.Errorf("bridge: commit recorded lock: %w", err)
-		}
+	key := lockPrefix + hex.EncodeToString(lockID[:])
+	if existing, err := b.store.Get([]byte(key)); err == nil && len(existing) > 0 {
+		// Already recorded. Not an error: replaying a committed block is
+		// ordinary, and the whole point of keying by lock id is that doing so
+		// is free.
 		return nil
-	})
+	}
+	locked, err := b.readUint64(lockedTTLKey)
+	if err != nil {
+		return err
+	}
+	if locked > (^uint64(0))-nativeAmount {
+		return fmt.Errorf("bridge: locked total overflow")
+	}
+	event := &LockEvent{
+		LockID:       lockID,
+		FromAccount:  from,
+		Recipient:    recipient,
+		NativeAmount: nativeAmount,
+	}
+	payload, err := json.Marshal(event)
+	if err != nil {
+		return fmt.Errorf("bridge: marshal lock event: %w", err)
+	}
+	batch := b.store.NewBatch()
+	defer batch.Close()
+	if err := batch.Set([]byte(key), payload, nil); err != nil {
+		return fmt.Errorf("bridge: stage lock event: %w", err)
+	}
+	if err := batch.Set([]byte(lockedTTLKey), encodeU64(locked+nativeAmount), nil); err != nil {
+		return fmt.Errorf("bridge: stage locked total: %w", err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("bridge: commit recorded lock: %w", err)
+	}
+	return nil
 }
 
 // EscrowAccount reports where locked collateral is held. It is a method as well

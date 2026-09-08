@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/big"
 	"testing"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -175,5 +176,91 @@ func TestAttestedUnlockRejectsNonsense(t *testing.T) {
 	}
 	if bal != 1000 {
 		t.Fatalf("escrow = %d, want 1000 unchanged", bal)
+	}
+}
+
+// TestADirectBridgeStillRecordsAConsensusLock pins the ASYMMETRY between the two
+// halves, which is easy to get backwards. The unlock half has a mode - a solo
+// node may release escrow itself, a set may not - so a direct bridge refuses
+// ApplyAttestedUnlock, as the test above requires. The lock half has no mode:
+// locking is a transaction, so every lock on every node arrives through the
+// engine, and a solo node runs a direct bridge. Gating RecordLock the same way
+// would leave exactly that node escrowing value it never recorded - the lock
+// invisible to attestation, and Reconcile failing on the gap it left.
+func TestADirectBridgeStillRecordsAConsensusLock(t *testing.T) {
+	b, ledger := orderHarness(t, false)
+	if err := ledger.Credit(orderTestAccount, 1000); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	id := [LockIDLen]byte{0x01}
+	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
+		if err := ltx.Transfer(orderTestAccount, EscrowAccount, 500); err != nil {
+			return err
+		}
+		return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500)
+	}); err != nil {
+		t.Fatalf("a solo node could not record a committed lock: %v", err)
+	}
+	if _, err := b.GetLock(id); err != nil {
+		t.Fatalf("GetLock after recording: %v", err)
+	}
+	rec, err := b.Reconcile()
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec.OutstandingNative != 500 || rec.EscrowBalance != 500 {
+		t.Fatalf("outstanding %d escrow %d, want 500/500", rec.OutstandingNative, rec.EscrowBalance)
+	}
+}
+
+// TestRecordLockRunsInsideTheCallersSection pins the contract that the engine
+// depends on: RecordLock is callable with the ledger write lock already held, it
+// records the lock, and it is idempotent per id so a replayed block does not
+// double count. Calling it twice inside ONE section is the strongest form of the
+// check - a second lock acquisition anywhere in it would never return.
+func TestRecordLockRunsInsideTheCallersSection(t *testing.T) {
+	b, ledger := orderHarness(t, true)
+	if err := ledger.Credit(orderTestAccount, 1000); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	id := [LockIDLen]byte{0x07}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- ledger.Atomically(func(ltx market.LedgerTx) error {
+			if err := ltx.Transfer(orderTestAccount, EscrowAccount, 500); err != nil {
+				return err
+			}
+			if err := b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500); err != nil {
+				return err
+			}
+			// Twice, in the same section: this is what block replay looks like.
+			return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500)
+		})
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("record inside the caller's section: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RecordLock did not return inside the caller's ledger section: it is taking a " +
+			"lock the caller already holds, which deadlocks a node's consensus driver")
+	}
+
+	ev, err := b.GetLock(id)
+	if err != nil {
+		t.Fatalf("GetLock: %v", err)
+	}
+	if ev.NativeAmount != 500 {
+		t.Fatalf("recorded %d native, want 500", ev.NativeAmount)
+	}
+	rec, err := b.Reconcile()
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+	if rec.OutstandingNative != 500 {
+		t.Fatalf("outstanding = %d, want 500: recording the same lock twice double counted it",
+			rec.OutstandingNative)
 	}
 }

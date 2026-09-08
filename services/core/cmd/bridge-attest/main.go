@@ -107,12 +107,18 @@ func main() {
 	var ev *bridge.LockEvent
 	if *consensusPath {
 		// Exactly what internal/consensus does when a lock transaction commits:
-		// move the value into escrow, derive the id, record it.
-		must(ledger.Atomically(func(ltx market.LedgerTx) error {
-			return ltx.Transfer("local-user", bridge.EscrowAccount, *native)
-		}))
+		// move the value into escrow, derive the id, record it - all in ONE ledger
+		// critical section, because that is the shape the engine has. Splitting it
+		// into two Atomically calls is what let a re-entrant RecordLock ship: this
+		// tool proved the derivation and the attestation, and proved nothing about
+		// the locking, because it never held the section across the record.
 		id := consensus.DeriveLockID(*nonce, "local-user", recipient, *native)
-		must(b.RecordLock(id, "local-user", recipient, *native))
+		must(ledger.Atomically(func(ltx market.LedgerTx) error {
+			if err := ltx.Transfer("local-user", bridge.EscrowAccount, *native); err != nil {
+				return err
+			}
+			return b.RecordLock(ltx, id, "local-user", recipient, *native)
+		}))
 		ev, err = b.GetLock(id)
 		must(err)
 	} else {

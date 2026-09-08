@@ -34,7 +34,7 @@ type fakeLocker struct {
 	err     error
 }
 
-func (f *fakeLocker) RecordLock(id [32]byte, from string, to [20]byte, amount uint64) error {
+func (f *fakeLocker) RecordLock(_ market.LedgerTx, id [32]byte, from string, to [20]byte, amount uint64) error {
 	f.calls++
 	f.lastID = id
 	f.lastAmt = amount

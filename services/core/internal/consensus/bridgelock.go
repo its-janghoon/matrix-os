@@ -103,7 +103,13 @@ type BridgeLocker interface {
 	// RecordLock persists a committed lock so the bridge can attest to it later
 	// and so Reconcile can account for it. It must be idempotent per lockID: a
 	// node replaying a block must not double count the locked total.
-	RecordLock(lockID [32]byte, from string, recipient [20]byte, nativeAmount uint64) error
+	//
+	// It takes ltx for the same reason ApplyAttestedUnlock does: it is called
+	// with the ledger critical section already held, so it must not open its own
+	// and must not take a lock that another path takes before the ledger. An
+	// implementation that did either deadlocks the consensus driver on the first
+	// lock the chain commits, and a deadlocked driver stops the node.
+	RecordLock(ltx market.LedgerTx, lockID [32]byte, from string, recipient [20]byte, nativeAmount uint64) error
 	// EscrowAccount is where the consensus critical section moves the value. It
 	// comes from the bridge rather than being duplicated here, so the two halves
 	// cannot disagree about which account holds the collateral.
@@ -181,7 +187,7 @@ func (e *Engine) applyBridgeLock(ltx market.LedgerTx, tx *token.Transaction) (bo
 		return moved, err
 	}
 	lockID := DeriveLockID(tx.Nonce, tx.SenderID(), recipient, tx.Amount)
-	if err := e.bridgeLocker.RecordLock(lockID, tx.SenderID(), recipient, tx.Amount); err != nil {
+	if err := e.bridgeLocker.RecordLock(ltx, lockID, tx.SenderID(), recipient, tx.Amount); err != nil {
 		// The value is already in escrow and the block is already committed.
 		// Failing here would wedge this node against a chain its peers accepted,
 		// so report and continue: Reconcile will show the discrepancy.
