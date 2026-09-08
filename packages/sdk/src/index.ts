@@ -236,6 +236,33 @@ export interface BridgeReconciliation {
   blockHeight: bigint;
 }
 
+/**
+ * One validator's signature authorizing the wrapped mint for a committed lock.
+ *
+ * A mint needs a THRESHOLD of these, and each node holds only its own attestor
+ * key, so a caller collects them by asking several validators and passes the
+ * set to `WrappedMatrix.mint`. The contract does the counting; gathering them is
+ * the client's job.
+ *
+ * The authorization is not a bearer token. It mints to the Ethereum address the
+ * LOCKER named when they locked, so collecting one gains nothing but the ability
+ * to complete somebody's bridge transfer for them.
+ */
+export interface LockAttestation {
+  /** Ethereum address the wrapped tokens mint to, 0x hex. */
+  recipient: string;
+  /** Wrapped amount in ERC-20 base units (18 decimals); a bigint because it exceeds 2^64. */
+  erc20Amount: bigint;
+  /** The lock this authorizes, 32 bytes of hex. */
+  lockId: string;
+  /** This node's 65-byte r||s||v signature, hex. */
+  signature: string;
+  /** The attestor address the signature recovers to, 0x hex. */
+  attestor: string;
+  /** Native base units locked, so the conversion is checkable without another call. */
+  nativeAmount: bigint;
+}
+
 export interface ChatMessage {
   role: ChatRole;
   content: string;
@@ -845,6 +872,34 @@ export class MatrixClient {
       escrowBalance: big(out.escrowBalance),
       outstandingErc20: big(out.outstandingErc20),
       blockHeight: big(out.blockHeight),
+    };
+  }
+
+  /**
+   * Fetch this node's signature authorizing the wrapped mint for a committed
+   * lock.
+   *
+   * Call it against SEVERAL validators and collect a threshold of signatures;
+   * `WrappedMatrix.mint` verifies the set. One node's answer is one signature by
+   * design - gossiping partial signatures would be a second consensus for
+   * something the contract already checks.
+   *
+   * The lock must be committed first: locking is a signed transfer to the
+   * reserved `bridge/lock/<address>` recipient, and only once a block carries it
+   * is there anything to attest to. Asking earlier gives a `not_found`
+   * MatrixError, which is the honest answer - signing for value that is not yet
+   * escrowed is what the 1:1 backing forbids. A node with no bridge or no
+   * attestor key refuses with `failed_precondition`.
+   */
+  async lockAttestation(lockId: string): Promise<LockAttestation> {
+    const out = await this.call(MARKET, 'GetLockAttestation', { lockId });
+    return {
+      recipient: str(out.recipient),
+      erc20Amount: big(out.erc20Amount),
+      lockId: str(out.lockId),
+      signature: str(out.signature),
+      attestor: str(out.attestor),
+      nativeAmount: big(out.nativeAmount),
     };
   }
 

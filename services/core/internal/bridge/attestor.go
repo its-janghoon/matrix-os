@@ -1,15 +1,20 @@
 package bridge
 
 import (
+	"crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
+	"os"
+	"strings"
 
 	secp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/decred/dcrd/dcrec/secp256k1/v4/ecdsa"
 
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // Errors related to attestation signing and verification.
@@ -177,3 +182,82 @@ func leftPad32(b []byte) []byte {
 func bigTo32(v *big.Int) []byte {
 	return leftPad32(v.Bytes())
 }
+
+// AttestorKeystoreID is the plaintext label an attestor keystore carries, given
+// its Ethereum address. It is the file's authenticated additional data, so a
+// ciphertext cannot be moved into a file advertising a different attestor.
+func AttestorKeystoreID(addr Address) string {
+	return "attestor:" + strings.ToLower(hexAddress(addr))
+}
+
+// NewAttestorKeystore encrypts a fresh secp256k1 attestor key under a
+// passphrase, returning the keystore and the address it attests as.
+//
+// It uses the account keystore's construction - scrypt, AES-256-GCM, the file
+// carrying its own KDF parameters - rather than anything invented here. A
+// validator's attestor key is unilateral authority to mint wrapped tokens
+// against escrow, so it deserves at least what a wallet key gets, and a second
+// bespoke format would be a second thing to get right.
+func NewAttestorKeystore(passphrase string) (*token.Keystore, *Attestor, error) {
+	if passphrase == "" {
+		return nil, nil, errors.New("bridge: a passphrase is required for an attestor keystore")
+	}
+	secret := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+		return nil, nil, fmt.Errorf("bridge: read attestor key: %w", err)
+	}
+	att, err := NewAttestorFromBytes(secret)
+	if err != nil {
+		return nil, nil, err
+	}
+	addr := att.Address()
+	ks, err := token.EncryptSecretKeystore(
+		secret, token.KeyTypeSecp256k1, AttestorKeystoreID(addr), hexAddress(addr), passphrase)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ks, att, nil
+}
+
+// LoadAttestorKeystore reads and unlocks an attestor keystore from disk.
+//
+// It checks the recovered key against the ADDRESS the file advertises. That is
+// not redundant with the authenticated decryption: the id is authenticated, but
+// a file that decrypted to a key for a different address would be a file whose
+// plaintext label lies, and an operator reading the label to decide which
+// attestor a node is would be reading the wrong thing. The registered attestor
+// set on-chain is matched by address, so a mismatch here means every signature
+// this node produces is rejected on-chain for no visible reason.
+func LoadAttestorKeystore(path, passphrase string) (*Attestor, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("bridge: read attestor keystore: %w", err)
+	}
+	ks, ok := token.UnmarshalKeystore(data)
+	if !ok {
+		return nil, fmt.Errorf("bridge: %s is not a keystore file", path)
+	}
+	secret, err := token.DecryptSecretKeystore(ks, token.KeyTypeSecp256k1, passphrase)
+	if err != nil {
+		return nil, err
+	}
+	att, err := NewAttestorFromBytes(secret)
+	if err != nil {
+		return nil, err
+	}
+	if want := strings.ToLower(ks.PublicKey); want != "" && want != strings.ToLower(hexAddress(att.Address())) {
+		return nil, fmt.Errorf("bridge: attestor keystore advertises %s but unlocks %s; the "+
+			"file's label does not match its key", ks.PublicKey, hexAddress(att.Address()))
+	}
+	return att, nil
+}
+
+// hexAddress renders an address as lowercase 0x hex.
+func hexAddress(a Address) string {
+	return "0x" + hex.EncodeToString(a[:])
+}
+
+// AddressHex renders this attestor's Ethereum address as lowercase 0x hex. It is
+// what goes in the contract's registered attestor set, so it is worth printing
+// rather than making an operator derive it.
+func (a *Attestor) AddressHex() string { return hexAddress(a.addr) }

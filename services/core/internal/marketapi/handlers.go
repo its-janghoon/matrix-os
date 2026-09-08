@@ -2,7 +2,9 @@ package marketapi
 
 import (
 	"context"
+	"encoding/hex"
 	"sort"
+	"strings"
 	"time"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
@@ -479,5 +481,47 @@ func (s *Service) GetBridgeReconciliation(ctx context.Context, req *marketv1.Get
 		EscrowBalance:     snap.EscrowBalance,
 		OutstandingErc20:  outstandingERC20,
 		BlockHeight:       snap.BlockHeight,
+	}, nil
+}
+
+// GetLockAttestation returns this node's signature authorizing the wrapped mint
+// for a lock the chain has already committed.
+//
+// It is the half of the bridge that had no network surface at all. Locking is a
+// consensus-ordered transaction now, but nothing could sign the mint
+// authorization, so no wMATRIX could come into existence and the DEX liquidity
+// the whole on-ramp depends on could not be seeded.
+//
+// ONE signature, deliberately. Each validator holds its own attestor key and the
+// contract counts the threshold, so a client gathers m of these by asking each
+// validator's node and feeds the set to WrappedMatrix.mint.
+func (s *Service) GetLockAttestation(ctx context.Context, req *marketv1.GetLockAttestationRequest) (*marketv1.GetLockAttestationResponse, error) {
+	if s.lockAttestor == nil {
+		return nil, status.Error(codes.FailedPrecondition,
+			"this node cannot attest: it has no bridge configured (bridge.contract) or no "+
+				"attestor key (bridge.attestor_keystore). Ask a validator that has both.")
+	}
+	raw := strings.TrimPrefix(strings.TrimSpace(req.GetLockId()), "0x")
+	lockID, err := hex.DecodeString(raw)
+	if err != nil || len(lockID) != 32 {
+		return nil, status.Error(codes.InvalidArgument,
+			"lock_id must be 32 bytes of hex, as derived from the committed lock transaction")
+	}
+
+	att, err := s.lockAttestor.AttestLock(lockID)
+	if err != nil {
+		// A lock id nobody committed is the ordinary client error here - a caller
+		// that derived the id differently, or asked before the block committed -
+		// so it is NotFound rather than Internal.
+		return nil, status.Errorf(codes.NotFound,
+			"no committed lock with id %s on this node: %v", raw, err)
+	}
+	return &marketv1.GetLockAttestationResponse{
+		Recipient:    att.Recipient,
+		Erc20Amount:  att.ERC20Amount.String(),
+		LockId:       raw,
+		Signature:    hex.EncodeToString(att.Signature),
+		Attestor:     att.Attestor,
+		NativeAmount: att.NativeAmount,
 	}, nil
 }

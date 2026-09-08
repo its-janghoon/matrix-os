@@ -107,6 +107,36 @@ type Keystore struct {
 	// shown. It is not a secret and it is not a security control; it exists so a
 	// tool can warn about a key that has no recovery phrase at all.
 	MnemonicBackedUp bool `json:"mnemonic_backed_up"`
+	// KeyType names what the ciphertext holds. Absent means ed25519, so every
+	// file written before this field reads correctly and nothing needs
+	// migrating.
+	//
+	// It exists because the bridge attestor key is secp256k1, and a validator's
+	// attestor key is unilateral authority to mint wrapped tokens against
+	// escrow - which is to say it deserves the same scrypt-and-GCM treatment as
+	// an account key rather than a hex string in a config file. Same format, one
+	// set of security properties, one thing to get right.
+	//
+	// It is also a GUARD. Both secrets are 32 bytes, so without a recorded type
+	// an attestor file could be unlocked as an account and produce a live
+	// ed25519 key nobody meant to exist. The type is checked before the bytes
+	// are used for anything.
+	KeyType string `json:"key_type,omitempty"`
+}
+
+// Key types a keystore may hold. Ed25519 is the zero value on purpose: a file
+// written before KeyType existed holds an account key.
+const (
+	KeyTypeEd25519   = "ed25519"
+	KeyTypeSecp256k1 = "secp256k1"
+)
+
+// keyTypeOf reports a keystore's key type, treating an absent one as ed25519.
+func keyTypeOf(ks *Keystore) string {
+	if ks.KeyType == "" {
+		return KeyTypeEd25519
+	}
+	return ks.KeyType
 }
 
 type scryptParams struct {
@@ -249,6 +279,15 @@ func DecryptKeystore(ks *Keystore, passphrase string) (*Account, error) {
 	if ks == nil {
 		return nil, errors.New("token: no keystore supplied")
 	}
+	// Refuse a file that holds something else. Both secrets are 32 bytes, so
+	// without this an attestor keystore would decrypt here and be turned into a
+	// live ed25519 account nobody meant to exist - it would fail the public-key
+	// check below, but only after the key material had been expanded, and with a
+	// message about the wrong thing.
+	if got := keyTypeOf(ks); got != KeyTypeEd25519 {
+		return nil, fmt.Errorf("%w: this keystore holds a %s key, not an account key",
+			ErrUnsupportedKeystore, got)
+	}
 	if ks.Version != keystoreVersion {
 		return nil, fmt.Errorf("%w: version %d, this build reads %d",
 			ErrUnsupportedKeystore, ks.Version, keystoreVersion)
@@ -331,4 +370,130 @@ func UnmarshalKeystore(data []byte) (*Keystore, bool) {
 		return nil, false
 	}
 	return &ks, true
+}
+
+// EncryptSecretKeystore encrypts an arbitrary 32-byte secret under a passphrase,
+// using the same scrypt-and-GCM construction as an account keystore.
+//
+// It exists so a key that is NOT an ed25519 account - today the bridge's
+// secp256k1 attestor key - gets the same protection rather than a weaker one
+// invented for it. One format, one KDF, one set of properties to reason about,
+// and the same "raise the cost later without locking anyone out" behaviour,
+// because the file records the parameters it was written with.
+//
+// id is the plaintext label a caller reads before unlocking, and it is
+// AUTHENTICATED ADDITIONAL DATA for exactly the reason the account id is: a
+// ciphertext must not be movable into a file claiming to be a different key.
+// For an attestor that id is its Ethereum address, so a file cannot advertise
+// one attestor and unlock another.
+func EncryptSecretKeystore(secret []byte, keyType, id, publicHex, passphrase string) (*Keystore, error) {
+	if len(secret) != scryptKeyLen {
+		return nil, fmt.Errorf("token: secret is %d bytes, want %d", len(secret), scryptKeyLen)
+	}
+	if keyType == "" || keyType == KeyTypeEd25519 {
+		return nil, errors.New("token: use EncryptKeystore for an ed25519 account key")
+	}
+	if id == "" {
+		return nil, errors.New("token: a keystore id is required; it is the authenticated label")
+	}
+	if passphrase == "" {
+		return nil, errors.New("token: a passphrase is required; an empty one would not encrypt anything")
+	}
+
+	params := scryptParams{N: scryptN, R: scryptR, P: scryptP}
+	salt := make([]byte, saltLen)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, fmt.Errorf("token: read salt: %w", err)
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, params.N, params.R, params.P, scryptKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("token: derive key: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("token: new cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("token: new gcm: %w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, fmt.Errorf("token: read nonce: %w", err)
+	}
+	ciphertext := gcm.Seal(nil, nonce, secret, []byte(id))
+
+	return &Keystore{
+		Version:    keystoreVersion,
+		AccountID:  id,
+		PublicKey:  publicHex,
+		Cipher:     "aes-256-gcm",
+		KDF:        "scrypt",
+		KDFParams:  params,
+		Salt:       hex.EncodeToString(salt),
+		Nonce:      hex.EncodeToString(nonce),
+		Ciphertext: hex.EncodeToString(ciphertext),
+		KeyType:    keyType,
+	}, nil
+}
+
+// DecryptSecretKeystore recovers a non-ed25519 secret, refusing a file whose
+// recorded type is not the one asked for.
+//
+// The type check is the point. Both secrets are 32 bytes, so without it an
+// account keystore could be unlocked as an attestor - producing a live minting
+// key derived from someone's wallet seed, silently, with everything appearing to
+// work.
+func DecryptSecretKeystore(ks *Keystore, wantType, passphrase string) ([]byte, error) {
+	if ks == nil {
+		return nil, errors.New("token: no keystore supplied")
+	}
+	if got := keyTypeOf(ks); got != wantType {
+		return nil, fmt.Errorf("%w: this keystore holds a %s key, not a %s key",
+			ErrUnsupportedKeystore, got, wantType)
+	}
+	if ks.Version != keystoreVersion {
+		return nil, fmt.Errorf("%w: version %d, this build reads %d",
+			ErrUnsupportedKeystore, ks.Version, keystoreVersion)
+	}
+	if ks.KDF != "scrypt" || ks.Cipher != "aes-256-gcm" {
+		return nil, fmt.Errorf("%w: kdf %q with cipher %q", ErrUnsupportedKeystore, ks.KDF, ks.Cipher)
+	}
+	salt, err := hex.DecodeString(ks.Salt)
+	if err != nil {
+		return nil, fmt.Errorf("%w: salt is not hex", ErrUnsupportedKeystore)
+	}
+	nonce, err := hex.DecodeString(ks.Nonce)
+	if err != nil {
+		return nil, fmt.Errorf("%w: nonce is not hex", ErrUnsupportedKeystore)
+	}
+	ciphertext, err := hex.DecodeString(ks.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("%w: ciphertext is not hex", ErrUnsupportedKeystore)
+	}
+	params := ks.KDFParams
+	if params.N == 0 || params.R == 0 || params.P == 0 {
+		return nil, fmt.Errorf("%w: kdf parameters are missing", ErrUnsupportedKeystore)
+	}
+	key, err := scrypt.Key([]byte(passphrase), salt, params.N, params.R, params.P, scryptKeyLen)
+	if err != nil {
+		return nil, fmt.Errorf("token: derive key: %w", err)
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, fmt.Errorf("token: new cipher: %w", err)
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, fmt.Errorf("token: new gcm: %w", err)
+	}
+	secret, err := gcm.Open(nil, nonce, ciphertext, []byte(ks.AccountID))
+	if err != nil {
+		return nil, ErrWrongPassphrase
+	}
+	if len(secret) != scryptKeyLen {
+		return nil, fmt.Errorf("%w: decrypted secret is %d bytes, want %d",
+			ErrUnsupportedKeystore, len(secret), scryptKeyLen)
+	}
+	return secret, nil
 }

@@ -2,9 +2,11 @@ package node
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math/big"
+	"os"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
@@ -75,7 +77,28 @@ type BridgeConfig struct {
 	ChainID int64 `yaml:"chain_id"`
 	// Watch configures the always-on burn->unlock watcher.
 	Watch BridgeWatchConfig `yaml:"watch"`
+
+	// AttestorKeystore is the path to this validator's encrypted secp256k1
+	// attestor key. Empty means this node cannot attest: it still applies locks
+	// and unlocks like any other node, it just produces no mint authorizations.
+	//
+	// It is a KEYSTORE rather than a hex string in this file because the key is
+	// unilateral authority to mint wrapped tokens against escrow. The same
+	// scrypt-and-GCM format an account key gets, for the same reason, and the
+	// repo's standing rule holds: no real key is committed and the passphrase
+	// comes from the environment.
+	//
+	// Generate one with `matrix bridge attestor-new`. Its ADDRESS is what goes
+	// in the contract's registered attestor set; a node whose key is not
+	// registered signs attestations the contract rejects.
+	AttestorKeystore string `yaml:"attestor_keystore"`
 }
+
+// AttestorPassphraseEnv is where the attestor keystore's passphrase is read
+// from. It is env-only and never a config field, matching how the wallet
+// passphrase is handled: a secret in the file is a secret in every backup of the
+// file.
+const AttestorPassphraseEnv = "MATRIX_ATTESTOR_PASSPHRASE"
 
 // BridgeWatchConfig configures the in-node burn->unlock watcher: an always-on
 // poller that pulls WrappedMatrix `Burned` events off an Ethereum JSON-RPC
@@ -339,6 +362,29 @@ func runBridgeWatcher(ctx context.Context, w *bridge.Watcher, onExit func(error)
 	return done
 }
 
+// loadAttestor unlocks this node's attestor key, if one is configured.
+//
+// A configured-but-unusable key is a STARTUP failure rather than a warning. The
+// alternative is a validator that looks like it is attesting and is not, which
+// on a threshold bridge means mints silently stop reaching quorum with nothing
+// pointing at the node responsible.
+func loadAttestor(cfg BridgeConfig) (*bridge.Attestor, error) {
+	if cfg.AttestorKeystore == "" {
+		return nil, nil
+	}
+	pass := os.Getenv(AttestorPassphraseEnv)
+	if pass == "" {
+		return nil, fmt.Errorf("bridge.attestor_keystore is set but %s is empty; the passphrase "+
+			"is read from the environment so it is not in the config file or its backups",
+			AttestorPassphraseEnv)
+	}
+	att, err := bridge.LoadAttestorKeystore(cfg.AttestorKeystore, pass)
+	if err != nil {
+		return nil, fmt.Errorf("unlock attestor keystore: %w", err)
+	}
+	return att, nil
+}
+
 // bridgeLockerFor adapts the bridge to the consensus engine's BridgeLocker, and
 // returns a nil INTERFACE when there is no bridge.
 //
@@ -363,3 +409,58 @@ func (a bridgeLockAdapter) RecordLock(lockID [32]byte, from string, recipient [2
 }
 
 func (a bridgeLockAdapter) EscrowAccount() string { return a.bridge.EscrowAccount() }
+
+// lockAttestorAdapter signs mint authorizations for committed locks. It is the
+// marketapi.LockAttestor half of the split that keeps the market API free of an
+// internal/bridge import, the same shape bridgeReconciler uses.
+type lockAttestorAdapter struct {
+	bridge   *bridge.Bridge
+	attestor *bridge.Attestor
+}
+
+// AttestLock looks the lock up in the bridge's own records and signs the
+// canonical digest with this node's attestor key.
+//
+// The lock has to be COMMITTED for this to find it: consensus applies the escrow
+// move and records the event, and only then is there anything to attest to. A
+// client that asks too early gets a not-found, which is the honest answer -
+// signing an authorization for value that is not yet in escrow is precisely what
+// the 1:1 backing forbids.
+func (a lockAttestorAdapter) AttestLock(lockID []byte) (*marketapi.LockAttestation, error) {
+	var id [bridge.LockIDLen]byte
+	if len(lockID) != len(id) {
+		return nil, fmt.Errorf("bridge: lock id is %d bytes, want %d", len(lockID), len(id))
+	}
+	copy(id[:], lockID)
+
+	ev, err := a.bridge.GetLock(id)
+	if err != nil {
+		return nil, err
+	}
+	att, err := a.bridge.Attest(ev, []bridge.ValidatorSigner{{Label: "self", Attestor: a.attestor}})
+	if err != nil {
+		return nil, err
+	}
+	if len(att.Signatures) != 1 {
+		return nil, fmt.Errorf("bridge: expected one signature from this node, got %d",
+			len(att.Signatures))
+	}
+	return &marketapi.LockAttestation{
+		Recipient:    "0x" + hex.EncodeToString(ev.Recipient[:]),
+		ERC20Amount:  ev.ERC20Amount(),
+		NativeAmount: ev.NativeAmount,
+		Signature:    att.Signatures[0],
+		Attestor:     a.attestor.AddressHex(),
+	}, nil
+}
+
+// lockAttestorFor returns the signer for GetLockAttestation, or a nil INTERFACE
+// when this node cannot attest. Both halves are required: the bridge holds the
+// lock records and the attestor holds the key, and a node with one but not the
+// other must refuse rather than half-answer.
+func lockAttestorFor(b *bridge.Bridge, att *bridge.Attestor) marketapi.LockAttestor {
+	if b == nil || att == nil {
+		return nil
+	}
+	return lockAttestorAdapter{bridge: b, attestor: att}
+}

@@ -526,15 +526,40 @@ escrow must receive the full amount or the wrapped supply minted against it
 exceeds the collateral by exactly the fee. A node with no bridge still escrows,
 or its balances would diverge from every node that has one.
 
-What is still missing is the ATTESTATION RPC, and the blocker is not the RPC. The
-node holds no secp256k1 attestor key - there is no `Attestor` anywhere in
-`internal/node`, and `cmd/bridge-attest` signs with a deterministic test seed
-that must never touch real funds. So no running node can sign a mint
-authorization. Wiring one up is a custody decision before it is code: a
-validator's attestor key is unilateral authority to mint wMATRIX against escrow,
-and the repo's standing rule is that no real key is committed and secrets come
-from the environment. The ed25519 keystore machinery exists and is the obvious
-place, but choosing that is the operator's call.
+**The attestation path is now built too, with the key in the keystore.** The node
+held no secp256k1 attestor at all, so nothing could sign a mint authorization.
+The CTO chose the encrypted keystore over a hex config field, which is the right
+answer for a key that is unilateral authority to mint against escrow.
+
+- `token.Keystore` gained a `KeyType`. Absent means ed25519, so every file
+  written before it reads unchanged and nothing migrates. It is also a GUARD:
+  both secrets are 32 bytes, so without a recorded type an attestor file could be
+  unlocked as an account - producing a live ed25519 key nobody meant to exist -
+  and a wallet file could become a minting key derived from someone's seed. Both
+  directions are refused and both are tested.
+- `EncryptSecretKeystore` / `DecryptSecretKeystore` reuse the account
+  construction exactly: scrypt, AES-256-GCM, the file carrying its own KDF
+  parameters. The attestor's Ethereum address is the authenticated additional
+  data, so a ciphertext cannot be moved into a file advertising a different
+  attestor - pinned by a test that swaps the label and expects the decryption to
+  fail.
+- `matrix bridge attestor-new --out <path>` generates one, refuses to overwrite
+  an existing key, writes 0600, and prints the address to register in the
+  contract's attestor set. Driven end to end, not just built.
+- The node unlocks it at startup from `bridge.attestor_keystore` with the
+  passphrase in `MATRIX_ATTESTOR_PASSPHRASE`, env-only. A configured key that
+  will not unlock is a startup FAILURE, not a warning: a validator that looks
+  like it is attesting and is not means mints silently stop reaching quorum with
+  nothing pointing at the node responsible.
+- `GetLockAttestation` returns this node's single signature. One, deliberately:
+  each validator holds its own key and the contract counts the threshold, so a
+  client gathers m of them. Gossiping partial signatures would be a second
+  consensus for something the contract already verifies.
+
+Three checked-in guards caught this change and all three were right: the read
+classification pin (the new RPC joins the public surface, so the reasoning is now
+written next to it), the RPC manifest, and the SDK's every-served-method-is-
+wrapped test.
 
 The paragraph below is what the entry said before any of this, kept because the
 reasoning still applies to the half that remains.

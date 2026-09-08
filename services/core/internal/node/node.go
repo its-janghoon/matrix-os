@@ -614,17 +614,21 @@ type Node struct {
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
 	agentServer      *agentapi.Server
-	connectServer    *connectapi.Server
-	signingAccts     *walletAccounts
-	bridge           *bridge.Bridge
-	bridgeWatcher    *bridge.Watcher
-	bridgeWatchDone  chan struct{}
-	agents           map[string]*agent.Agent
-	agentsMu         sync.RWMutex
-	souls            map[string]*soul.Soul
-	soulsMu          sync.RWMutex
-	matrices         map[string]*matrix.Matrix
-	matricesMu       sync.RWMutex
+	// attestor is this validator's secp256k1 bridge key, nil when none is
+	// configured. A node with no attestor still applies every lock and unlock;
+	// it just signs no mint authorizations.
+	attestor        *bridge.Attestor
+	connectServer   *connectapi.Server
+	signingAccts    *walletAccounts
+	bridge          *bridge.Bridge
+	bridgeWatcher   *bridge.Watcher
+	bridgeWatchDone chan struct{}
+	agents          map[string]*agent.Agent
+	agentsMu        sync.RWMutex
+	souls           map[string]*soul.Soul
+	soulsMu         sync.RWMutex
+	matrices        map[string]*matrix.Matrix
+	matricesMu      sync.RWMutex
 }
 
 // The market listing the demo inference provider is registered with. It exists
@@ -1075,6 +1079,20 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to initialize bridge: %w", err)
 	}
 	n.bridge = nodeBridge
+	// Unlock the attestor key before anything can ask for a signature. A
+	// configured key that will not unlock stops the node here rather than at the
+	// first mint request, because a validator that looks like it is attesting and
+	// is not means mints silently stop reaching quorum with nothing pointing at
+	// the node responsible.
+	attestor, err := loadAttestor(n.config.Bridge)
+	if err != nil {
+		return fmt.Errorf("failed to load bridge attestor: %w", err)
+	}
+	n.attestor = attestor
+	if attestor != nil {
+		fmt.Printf("Bridge: attesting as %s. Register that address in the contract's attestor "+
+			"set, or this node's signatures are rejected on-chain.\n", attestor.AddressHex())
+	}
 	if nodeBridge != nil {
 		how := "this node applies unlocks directly (single-node network)"
 		if nodeBridge.IsConsensusOrdered() {
@@ -1303,6 +1321,10 @@ func (n *Node) Start() error {
 			}
 			return bridgeReconciler
 		}(),
+		// Same typed-nil trap: lockAttestorFor returns a nil interface when the
+		// node lacks either the bridge or the key, so the RPC refuses instead of
+		// panicking on a non-nil-looking value.
+		LockAttestor: lockAttestorFor(n.bridge, n.attestor),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create market API server: %w", err)

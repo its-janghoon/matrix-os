@@ -74,6 +74,9 @@ type Service struct {
 	// lock-and-mint bridge. When nil (no bridge configured, the default), the RPC
 	// returns codes.FailedPrecondition rather than panicking.
 	reconciler Reconciler
+	// lockAttestor signs mint authorizations; nil when the node has no bridge or
+	// no attestor key.
+	lockAttestor LockAttestor
 	// authEnforced reports whether the server in front of this Service requires
 	// authentication on every mutating RPC. FundAccount refuses to run when it is
 	// false: unlike SubmitSignedTransfer, a funding request carries no per-request
@@ -237,6 +240,38 @@ type Reconciler interface {
 	Reconcile() (*BridgeSnapshot, error)
 }
 
+// LockAttestation is this node's signature authorizing the wrapped mint for one
+// committed lock. Declared here (consumer side) for the reason BridgeSnapshot is:
+// the market API must not import internal/bridge.
+type LockAttestation struct {
+	// Recipient is the Ethereum address the wrapped tokens mint to, 0x hex.
+	Recipient string
+	// ERC20Amount is the wrapped amount, which exceeds a uint64 at scale.
+	ERC20Amount *big.Int
+	// NativeAmount is what was locked, in native base units.
+	NativeAmount uint64
+	// Signature is this node's 65-byte r||s||v over the canonical digest.
+	Signature []byte
+	// Attestor is the address that signature recovers to, 0x hex, so a caller can
+	// check it against the contract's registered set before spending gas.
+	Attestor string
+}
+
+// LockAttestor signs the mint authorization for a committed lock.
+//
+// It is deliberately ONE signature. Each validator holds its own attestor key
+// and the contract counts the threshold, so gathering m of them is the client's
+// job: ask each validator's node. Gossiping partial signatures would be a second
+// consensus for something the contract already verifies.
+//
+// A nil LockAttestor means the node has no bridge or no attestor key, in which
+// case the RPC returns FailedPrecondition rather than pretending.
+type LockAttestor interface {
+	// AttestLock returns this node's authorization for lockID, or an error
+	// wrapping ErrLockNotFound when no such lock is committed.
+	AttestLock(lockID []byte) (*LockAttestation, error)
+}
+
 // JobSettler settles a compute job through consensus and finalizes it.
 //
 // It exists because CompleteJob used to charge the buyer with a direct
@@ -275,6 +310,11 @@ func (s *Service) SetTransferSettler(settler TransferSettler) { s.transferSettle
 // bridge configured, the default) GetBridgeReconciliation returns
 // FailedPrecondition.
 func (s *Service) SetReconciler(reconciler Reconciler) { s.reconciler = reconciler }
+
+// SetLockAttestor installs the mint-authorization signer for GetLockAttestation,
+// on the same single-threaded startup path SetReconciler uses. Nil leaves the
+// RPC refusing, which is what a node with no attestor key should do.
+func (s *Service) SetLockAttestor(a LockAttestor) { s.lockAttestor = a }
 
 // SetAuthEnforced records whether the server hosting this Service requires
 // authentication on every mutating RPC. It is set by NewServer from cfg.Auth and
@@ -338,6 +378,9 @@ type Config struct {
 	// lock-and-mint bridge. When nil (no bridge configured), that RPC returns
 	// FailedPrecondition. See the Reconciler doc.
 	Reconciler Reconciler
+	// LockAttestor signs mint authorizations. Nil leaves GetLockAttestation
+	// refusing, which is correct for a node with no attestor key.
+	LockAttestor LockAttestor
 }
 
 // NewServer builds a market gRPC server. It installs the admin auth
@@ -354,6 +397,7 @@ func NewServer(cfg Config) (*Server, error) {
 	svc.SetJobSettler(cfg.Settler)
 	svc.SetTransferSettler(cfg.TransferSettler)
 	svc.SetReconciler(cfg.Reconciler)
+	svc.SetLockAttestor(cfg.LockAttestor)
 
 	var opts []grpc.ServerOption
 	if cfg.Auth != nil {

@@ -293,6 +293,7 @@ describe('coverage against the served surface', () => {
       'SubmitSignedTransfer',
       'FundAccount',
       'GetBridgeReconciliation',
+      'GetLockAttestation',
     ],
     'matrix.inference.v1.InferenceService': [
       'SubmitInferenceJob',

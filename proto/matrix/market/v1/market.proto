@@ -340,6 +340,41 @@ message FundAccountResponse {
     uint64 balance = 2;
 }
 
+// GetLockAttestationRequest asks a node to sign the mint authorization for a
+// lock the chain has already committed.
+message GetLockAttestationRequest {
+    // Hex-encoded 32-byte lock id, as derived from the committed lock
+    // transaction (nonce, sender, ethereum recipient, amount). A client that
+    // derives it differently is asking about a lock that does not exist.
+    string lock_id = 1;
+}
+
+// GetLockAttestationResponse carries THIS node's single signature over the
+// canonical mint digest.
+//
+// One signature, not a threshold. Each validator holds its own attestor key, and
+// gathering m of them is the client's job: ask each validator's node and feed
+// the collected set to WrappedMatrix.mint, which does the counting. Gossiping
+// partial signatures would be a second consensus for something the contract
+// already verifies.
+message GetLockAttestationResponse {
+    // The Ethereum address the wrapped tokens will be minted to, 0x hex.
+    string recipient = 1;
+    // The wrapped amount to mint, in ERC-20 base units (18 decimals), decimal
+    // string because it exceeds a uint64.
+    string erc20_amount = 2;
+    // Echo of the lock id this authorizes, hex.
+    string lock_id = 3;
+    // This node's 65-byte r||s||v signature, hex.
+    string signature = 4;
+    // The attestor address that signature recovers to, 0x hex. A client can
+    // check it against the contract's registered set before spending gas.
+    string attestor = 5;
+    // The native base units locked, so a caller can verify the conversion
+    // without a second round trip.
+    uint64 native_amount = 6;
+}
+
 // GetBridgeReconciliationRequest asks the node for the current lock-and-mint
 // bridge backing snapshot. It takes no arguments: the snapshot is a read of the
 // node's own escrow accounting at the moment it is served.
@@ -464,4 +499,14 @@ service MarketService {
     // balance disagrees with the (locked - unlocked) accounting, which signals a
     // backing-invariant violation. Gated behind the same auth as other surfaces.
     rpc GetBridgeReconciliation(GetBridgeReconciliationRequest) returns (GetBridgeReconciliationResponse) {}
+
+    // GetLockAttestation returns this node's signature authorizing the wrapped
+    // mint for a committed lock.
+    //
+    // It is the half of the bridge that had no network surface at all: locking
+    // is now a consensus-ordered transaction, but nothing could sign the mint
+    // authorization, so no wMATRIX could come into existence. Returns
+    // FailedPrecondition when the node has no bridge or no attestor key
+    // configured, and NotFound when the lock id names no committed lock.
+    rpc GetLockAttestation(GetLockAttestationRequest) returns (GetLockAttestationResponse) {}
 }

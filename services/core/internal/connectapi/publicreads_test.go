@@ -28,6 +28,18 @@ func TestReadClassificationIsPinned(t *testing.T) {
 		"GetBridgeReconciliation",
 		"GetInferenceJob",
 		"GetJob",
+		// GetLockAttestation is a read and is deliberately on the public side.
+		// It signs nothing new: it returns this node's signature over a lock the
+		// chain has ALREADY committed, and the mint that signature authorizes
+		// goes to the Ethereum address the locker chose, not to whoever asked.
+		// So an open endpoint lets anyone GATHER an authorization and nobody
+		// redirect one - and a browser doing the bridge flow needs exactly that,
+		// since it must collect a threshold from several validators.
+		//
+		// What it does cost is an ECDSA signature per call, which is why it sits
+		// behind the same rate limiter as every other public read and why
+		// public_reads is off by default.
+		"GetLockAttestation",
 		"GetTransaction",
 		"ListAgents",
 		"ListJobs",
