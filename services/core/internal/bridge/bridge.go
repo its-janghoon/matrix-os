@@ -485,7 +485,10 @@ func (b *Bridge) Reconcile() (*Reconciliation, error) {
 	defer b.mu.Unlock()
 
 	var locked, unlocked, escrow uint64
-	if err := b.ledger.Atomically(func(ltx market.LedgerTx) error {
+	// ReadOnly, not Atomically: this is a snapshot, and it is reachable from an
+	// UNAUTHENTICATED GetBridgeReconciliation. Taking the write lock for it let
+	// anyone who can poll a read stall every block the node was applying.
+	if err := b.ledger.ReadOnly(func(ltx market.LedgerTx) error {
 		var err error
 		if locked, err = b.readUint64(lockedTTLKey); err != nil {
 			return err

@@ -264,3 +264,47 @@ func TestRecordLockRunsInsideTheCallersSection(t *testing.T) {
 			rec.OutstandingNative)
 	}
 }
+
+// Reconcile must not take the ledger WRITE lock.
+//
+// It is a read-only backing snapshot, and it is reachable from an
+// UNAUTHENTICATED GetBridgeReconciliation. When it opened a write section,
+// anyone who could poll that read serialized every block the node was applying:
+// a monitoring loop pointed at the health of the bridge would have throttled
+// the chain.
+//
+// Held deterministic by running it while a read section is open. A read section
+// admits other readers and excludes writers, so a Reconcile that finished
+// proves it wanted the read lock, and one that blocks proves it wanted the
+// write lock.
+func TestReconcileDoesNotTakeTheWriteLock(t *testing.T) {
+	b, ledger := orderHarness(t, true)
+
+	inRead := make(chan struct{})
+	release := make(chan struct{})
+	go func() {
+		_ = ledger.ReadOnly(func(market.LedgerTx) error {
+			close(inRead)
+			<-release
+			return nil
+		})
+	}()
+	<-inRead
+	defer close(release)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := b.Reconcile()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Reconcile: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Reconcile blocked behind an open read section, so it is taking the ledger " +
+			"WRITE lock for a read-only snapshot: an unauthenticated poll of " +
+			"GetBridgeReconciliation can stall block application")
+	}
+}

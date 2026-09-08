@@ -298,6 +298,15 @@ go run ./cmd/bridge-attest \
 The `-seed` flag derives the local test attestor keys deterministically via
 sha256; it is **not** a secret and must never be used for real funds.
 
+## Testnet rehearsal
+
+Before mainnet, run the whole thing on Sepolia: attestor keys, deploy, node
+config, lock, attest, mint, reconcile, burn. The runbook is
+[docs/runbooks/sepolia-rehearsal.md](../docs/runbooks/sepolia-rehearsal.md),
+which also answers the question everyone asks first - whether to use a MetaMask
+account, and which of the keys involved actually need test ETH (fewer than you
+would think: the attestor keys never send a transaction).
+
 ## Mainnet Release Harness
 
 This section is the **operator runbook** for releasing the Ethereum-side wrapped

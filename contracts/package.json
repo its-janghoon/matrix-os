@@ -8,7 +8,13 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "node": "hardhat node",
-    "deploy:localhost": "hardhat run scripts/deploy.ts --network localhost"
+    "deploy:localhost": "hardhat run scripts/deploy.ts --network localhost",
+    "deploy:bridge:localhost": "hardhat run scripts/deploy-bridge.ts --network localhost",
+    "deploy:bridge:sepolia": "hardhat run scripts/deploy-mainnet.ts --network sepolia",
+    "verify:sepolia": "hardhat run scripts/verify-mainnet.ts --network sepolia",
+    "mint:sepolia": "hardhat run scripts/bridge-mint.ts --network sepolia",
+    "deploy:bridge:mainnet": "hardhat run scripts/deploy-mainnet.ts --network mainnet",
+    "verify:mainnet": "hardhat run scripts/verify-mainnet.ts --network mainnet"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",

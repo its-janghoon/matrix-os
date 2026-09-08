@@ -77,8 +77,14 @@ type Ledger struct {
 	store *kv.Store
 	mu    sync.RWMutex
 
-	// heldSinceNS is the wall-clock nanosecond at which the CURRENT holder took
+	// heldSinceNS is the MONOTONIC nanosecond at which the CURRENT holder took
 	// the write lock, or zero when nobody holds it.
+	//
+	// Monotonic and not wall-clock, deliberately. A wall-clock stamp makes the
+	// watchdog fire on a clock STEP: an NTP correction or a VM resume that jumps
+	// the clock forward past the threshold turns a healthy holder into a
+	// reported stall and takes a working node out of rotation. lockedNanos
+	// counts from process start and no adjustment can move it.
 	//
 	// It exists because a stalled ledger is otherwise silent. A goroutine that
 	// takes this lock and never gives it back stops every writer AND every
@@ -91,8 +97,67 @@ type Ledger struct {
 	// A timestamp rather than a "locked" flag, because the question worth
 	// asking is not whether the lock is held - it is held constantly, that is
 	// its job - but whether THIS holder has had it for longer than any honest
-	// holder ever needs. See WriteLockHeldFor.
+	// holder ever needs. See LockStatus.
 	heldSinceNS atomic.Int64
+
+	// writeWaiters is how many goroutines are blocked trying to take the write
+	// lock, and writeAcquires counts how many have ever succeeded.
+	//
+	// THESE ARE HOW A STUCK READER IS CAUGHT, and without them the watchdog has
+	// a blind spot that reports the opposite of the truth. A parked RLock holder
+	// wedges the ledger exactly as thoroughly as a parked writer - Go's RWMutex
+	// is writer-preferring, so a queued writer stops all later readers too - but
+	// heldSinceNS is ZERO the whole time, because no writer ever got in. The
+	// watchdog would have read "not locked", concluded the stall was over, and
+	// announced the node was serving again while nothing could proceed.
+	//
+	// A waiter count alone is not enough either: under sustained write load
+	// there is always someone waiting, and their age grows without anything
+	// being wrong. Progress is the honest signal, so the acquisition counter
+	// goes alongside it: writers queued AND not one acquisition completing is a
+	// wedge, at any load.
+	writeWaiters  atomic.Int64
+	writeAcquires atomic.Uint64
+}
+
+// ledgerStart anchors the monotonic clock used for lock ages. time.Since on a
+// time.Time captured here reads its monotonic component, so the durations below
+// are immune to wall-clock adjustment.
+var ledgerStart = time.Now()
+
+func monoNanos() int64 { return int64(time.Since(ledgerStart)) }
+
+// LockStatus is a snapshot of what the ledger write lock is doing, for a
+// watchdog that has to tell a wedged node from a busy one.
+type LockStatus struct {
+	// Held is whether a writer holds the lock right now, and HeldFor is how
+	// long it has. A long hold is a stuck WRITER.
+	Held    bool
+	HeldFor time.Duration
+	// WritersWaiting is how many writers are blocked. Together with Acquisitions
+	// not advancing, it is a stuck READER: nobody holds the write lock, and
+	// nobody can get it.
+	WritersWaiting int
+	// Acquisitions is the total number of write locks ever taken. A watchdog
+	// compares it across samples; unchanged means no progress at all.
+	Acquisitions uint64
+}
+
+// LockStatus reads the current state of the write lock. It takes no lock - it
+// could not, since the thing it reports on is the lock being unavailable - and
+// is safe to call from any goroutine at any time.
+func (l *Ledger) LockStatus() LockStatus {
+	st := LockStatus{
+		WritersWaiting: int(l.writeWaiters.Load()),
+		Acquisitions:   l.writeAcquires.Load(),
+	}
+	if since := l.heldSinceNS.Load(); since != 0 {
+		st.Held = true
+		if held := monoNanos() - since; held > 0 {
+			st.HeldFor = time.Duration(held)
+		}
+	}
+	return st
 }
 
 // NewLedger creates a new Ledger backed by the given store.
@@ -133,8 +198,11 @@ func (t lockedLedger) Transfer(from, to string, amount uint64) error {
 // took l.mu directly would be a stall the watchdog cannot see, which is the
 // same silence this is here to end.
 func (l *Ledger) lockWrite() {
+	l.writeWaiters.Add(1)
 	l.mu.Lock()
-	l.heldSinceNS.Store(time.Now().UnixNano())
+	l.writeWaiters.Add(-1)
+	l.writeAcquires.Add(1)
+	l.heldSinceNS.Store(monoNanos())
 }
 
 // unlockWrite clears the holder timestamp before releasing, so the window in
@@ -145,29 +213,45 @@ func (l *Ledger) unlockWrite() {
 	l.mu.Unlock()
 }
 
-// WriteLockHeldFor reports how long the current holder has held the write lock,
-// and whether anyone holds it at all. It takes no lock itself - it could not,
-// since the thing it reports on is the lock being unavailable - and is safe to
-// call from any goroutine at any time.
+// ReadOnly runs fn as a single critical section under the ledger READ lock,
+// passing the same LedgerTx view.
 //
-// now is a parameter so a watchdog can be tested against a stall it invents
-// rather than one it has to wait out.
+// It exists because a consistent SNAPSHOT does not need to exclude other
+// readers, only writers, and taking the write lock for one is a self-inflicted
+// wound: Bridge.Reconcile did exactly that, and Reconcile is reachable from an
+// unauthenticated GetBridgeReconciliation, so polling a read serialized every
+// block the node was trying to apply.
 //
-// A false second return means the lock was free at the instant it was read,
-// which says nothing about the next instant; that is fine, because the caller
-// is looking for a hold that PERSISTS across samples, not a snapshot.
-func (l *Ledger) WriteLockHeldFor(now time.Time) (time.Duration, bool) {
-	since := l.heldSinceNS.Load()
-	if since == 0 {
-		return 0, false
-	}
-	held := now.Sub(time.Unix(0, since))
-	if held < 0 {
-		// The holder took the lock after the caller read the clock. Report zero
-		// rather than a negative age, which no threshold comparison expects.
-		return 0, true
-	}
-	return held, true
+// The consistency it offers is the one a snapshot needs: no writer can be
+// midway through a block while fn runs, so two values read inside it belong to
+// the same committed state. What it does NOT offer is a read-modify-write - the
+// LedgerTx handed over will fail any Transfer, because the caller holds no
+// write lock. Anything that decides and then writes must use Atomically.
+//
+// A section here still wedges the ledger if it never returns: a queued writer
+// blocks behind it and, since Go's RWMutex is writer-preferring, so does every
+// later reader. That is why the watchdog watches queued writers and not only
+// the write holder. See LockStatus.
+func (l *Ledger) ReadOnly(fn func(tx LedgerTx) error) error {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return fn(readOnlyLedger{l})
+}
+
+// readOnlyLedger is the LedgerTx handed to ReadOnly. Balance reads through the
+// same unlocked helper a write section uses; Transfer refuses rather than
+// corrupting the store under a read lock, which is what calling
+// transferLocked here would do - concurrently, since RLock admits many holders.
+type readOnlyLedger struct{ l *Ledger }
+
+func (t readOnlyLedger) Balance(account string) (uint64, error) {
+	return t.l.readBalance(account)
+}
+
+func (t readOnlyLedger) Transfer(from, to string, amount uint64) error {
+	return fmt.Errorf("market: Transfer inside a ReadOnly section: this holds the read "+
+		"lock, which admits other readers, so writing here would race them; use "+
+		"Atomically (from %q to %q, %d)", from, to, amount)
 }
 
 // Atomically runs fn as a single critical section under the ledger write lock,

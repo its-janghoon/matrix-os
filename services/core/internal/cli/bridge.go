@@ -40,7 +40,7 @@ func newBridgeCommand(opts *globalOptions) *cobra.Command {
 		Short: "Operator commands for the lock-and-mint bridge",
 	}
 	cmd.AddCommand(newAttestorNewCommand(opts), newBridgeLockCommand(opts),
-		newBridgeAttestationCommand(opts))
+		newBridgeAttestationCommand(opts), newBridgeReconcileCommand(opts))
 	return cmd
 }
 
@@ -62,8 +62,10 @@ attestor set. A node whose address is not registered signs attestations the
 contract rejects, and on a threshold bridge that looks like mints simply never
 reaching quorum.
 
-A passphrase is read from MATRIX_WALLET_PASSPHRASE when set, otherwise typed at
-the prompt. There is no way to recover this key: back up the file.`,
+The passphrase is read from MATRIX_ATTESTOR_PASSPHRASE - the same variable the
+NODE uses to unlock the file - falling back to MATRIX_WALLET_PASSPHRASE, and
+otherwise typed at the prompt. There is no way to recover this key: back up the
+file.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if out == "" {
@@ -76,7 +78,7 @@ the prompt. There is no way to recover this key: back up the file.`,
 				return fmt.Errorf("%s already exists; refusing to overwrite an attestor key", out)
 			}
 
-			ask := passphrasePrompt(cmd.OutOrStdout(), "New attestor passphrase: ")
+			ask := attestorPassphrasePrompt(cmd.OutOrStdout(), "New attestor passphrase: ")
 			pass, err := ask()
 			if err != nil {
 				return err
@@ -364,4 +366,54 @@ func checkAttestationsAgree(atts []attestationOut) error {
 		}
 	}
 	return nil
+}
+
+func newBridgeReconcileCommand(opts *globalOptions) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reconcile",
+		Short: "Check that escrowed native still backs the wrapped supply 1:1",
+		Long: `reconcile reads the node's bridge accounting and its actual escrow balance,
+and reports what the Ethereum contract's total supply must be if the bridge is
+correctly backed.
+
+This is the invariant the whole bridge rests on: every wMATRIX in existence is
+matched by native MATRIX that cannot move until it is burned back. The node
+refuses to return a snapshot at all when its own accounting and its escrow
+balance disagree, so an error here is not a reporting problem - it means the two
+halves have diverged and something has minted or released outside the rules.
+
+The number to compare against the chain is OUTSTANDING (erc20): read
+totalSupply() on the WrappedMatrix contract and require the two to be equal. They
+are allowed to differ only while a lock is committed and its mint has not been
+broadcast yet, and then only in one direction - escrow ahead of supply, never
+behind.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cc, err := dial(opts)
+			if err != nil {
+				return err
+			}
+			defer cc.Close()
+			ctx, cancel := callContext(cmd.Context(), opts)
+			defer cancel()
+
+			resp, err := cc.market.GetBridgeReconciliation(ctx,
+				&marketv1.GetBridgeReconciliationRequest{})
+			if err != nil {
+				return mapErr(opts.Addr, err)
+			}
+
+			w := cmd.OutOrStdout()
+			fmt.Fprintf(w, "Locked (native, cumulative):    %d\n", resp.GetLockedNative())
+			fmt.Fprintf(w, "Unlocked (native, cumulative):  %d\n", resp.GetUnlockedNative())
+			fmt.Fprintf(w, "Outstanding (native):           %d\n", resp.GetOutstandingNative())
+			fmt.Fprintf(w, "Escrow balance (native):        %d\n", resp.GetEscrowBalance())
+			fmt.Fprintf(w, "Outstanding (erc20, 18dp):      %s\n", resp.GetOutstandingErc20())
+			fmt.Fprintf(w, "\nThe contract's totalSupply() must equal the erc20 figure above. "+
+				"Escrow may lead it by a lock whose mint has not been broadcast; it must "+
+				"never lag it.\n")
+			return nil
+		},
+	}
+	return cmd
 }

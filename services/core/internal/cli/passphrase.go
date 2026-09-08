@@ -21,10 +21,38 @@ import (
 // PassphraseEnv is the environment variable checked before prompting.
 const PassphraseEnv = "MATRIX_WALLET_PASSPHRASE"
 
+// AttestorPassphraseEnv is what a node reads to UNLOCK an attestor keystore.
+// It is checked here so that creating one and unlocking it use the same
+// variable.
+//
+// They did not, and the asymmetry is a genuine trap: `matrix bridge
+// attestor-new` took MATRIX_WALLET_PASSPHRASE while matrixd took
+// MATRIX_ATTESTOR_PASSPHRASE, so an operator who set the documented attestor
+// variable and generated a key got one encrypted under a passphrase they never
+// chose, and found out at the next node start with "wrong passphrase, or the
+// keystore is corrupt" - about a file that was written correctly, minutes
+// earlier, by this very tool. The key cannot be recovered.
+//
+// It duplicates the constant in internal/node rather than importing it because
+// the CLI must not depend on the node package; a test pins the two equal.
+const AttestorPassphraseEnv = "MATRIX_ATTESTOR_PASSPHRASE"
+
 // passphrasePrompt returns a function that yields the keystore passphrase,
 // asking at most once and caching, so a command that touches the wallet twice
 // does not ask twice.
 func passphrasePrompt(out io.Writer, label string) func() (string, error) {
+	return passphrasePromptFrom(out, label, PassphraseEnv)
+}
+
+// attestorPassphrasePrompt is passphrasePrompt for an attestor keystore. It
+// prefers the variable the NODE will use to unlock the file, so the key is
+// encrypted under the passphrase the operator already set for it, and falls
+// back to the wallet variable so an existing script keeps working.
+func attestorPassphrasePrompt(out io.Writer, label string) func() (string, error) {
+	return passphrasePromptFrom(out, label, AttestorPassphraseEnv, PassphraseEnv)
+}
+
+func passphrasePromptFrom(out io.Writer, label string, envs ...string) func() (string, error) {
 	var (
 		cached string
 		asked  bool
@@ -35,9 +63,11 @@ func passphrasePrompt(out io.Writer, label string) func() (string, error) {
 		}
 		asked = true
 
-		if fromEnv, ok := os.LookupEnv(PassphraseEnv); ok {
-			cached = fromEnv
-			return cached, nil
+		for _, env := range envs {
+			if fromEnv, ok := os.LookupEnv(env); ok {
+				cached = fromEnv
+				return cached, nil
+			}
 		}
 
 		pass, err := readHidden(out, label, "this wallet is encrypted")

@@ -15,6 +15,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/marketapi"
 	"github.com/ecirlabs/matrix-core/internal/token"
+	"net/url"
 )
 
 // This file wires the lock-and-mint bridge into matrixd as a node subsystem.
@@ -463,4 +464,36 @@ func lockAttestorFor(b *bridge.Bridge, att *bridge.Attestor) marketapi.LockAttes
 		return nil
 	}
 	return lockAttestorAdapter{bridge: b, attestor: att}
+}
+
+// redactRPCURL keeps the scheme and host of an endpoint and drops everything
+// after it.
+//
+// Provider URLs carry the credential in the PATH - an Alchemy or Infura
+// endpoint is https://<host>/v2/<api key> - so printing one at startup writes
+// that key into the node log verbatim, and node logs get shipped to
+// aggregators, tailed in screen shares, and pasted into bug reports. The host
+// is the part an operator actually needs to see to know which provider they are
+// pointed at.
+func redactRPCURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		// Unparseable, so nothing can be assumed about where the secret is.
+		return "(redacted)"
+	}
+	out := u.Scheme + "://" + u.Host
+	if u.Path != "" && u.Path != "/" {
+		out += "/..."
+	}
+	if u.RawQuery != "" {
+		out += "?..."
+	}
+	if u.User != nil {
+		// Userinfo carries credentials too.
+		out = u.Scheme + "://(redacted)@" + u.Host + "/..."
+	}
+	return out
 }

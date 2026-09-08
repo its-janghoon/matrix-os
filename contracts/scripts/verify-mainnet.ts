@@ -54,9 +54,17 @@ function resolveVerifyInput(): VerifyInput {
     address: record.address,
     attestors: record.args.attestors,
     threshold: record.args.threshold,
-    // Prefer the resolved on-chain cap the record captured; fall back to the
-    // raw constructor arg for records written before the cap existed.
-    mintCap: (record.mintCap ?? record.args.mintCap ?? "0").toString(),
+    // The CONSTRUCTOR ARGUMENT, never the resolved cap.
+    //
+    // These differ, and preferring the wrong one made verification impossible
+    // for the common case. MINT_CAP unset means the constructor was called with
+    // 0, and the contract then substitutes DEFAULT_MINT_CAP (1e27) internally.
+    // The record stores both: args.mintCap is what was passed, mintCap is what
+    // the contract reports. Etherscan re-encodes the arguments and compares them
+    // to the deploy transaction's calldata, so submitting 1e27 for a deploy that
+    // passed 0 fails every time - on a step whose whole purpose is to prove the
+    // deployed bytecode matches the source.
+    mintCap: (record.args?.mintCap ?? record.mintCap ?? "0").toString(),
   };
 }
 

@@ -107,6 +107,10 @@ type Config struct {
 	// value disables limiting, which is right for a loopback daemon and wrong for
 	// anything reachable.
 	RateLimit RateLimit
+	// Healthy reports whether the node can actually serve, and why not when it
+	// cannot. Nil means always healthy, which is right for a handler with
+	// nothing watching it and wrong for a node: see the /healthz route.
+	Healthy func() (bool, string)
 	// Now is the clock the rate limiter uses. Nil means time.Now; a test
 	// substitutes its own so it does not have to wait out a refill.
 	Now func() time.Time
@@ -189,8 +193,32 @@ func NewHandler(cfg Config) (http.Handler, error) {
 
 	// A liveness probe that needs no protocol knowledge, so an operator (or a
 	// load balancer) can check the endpoint with curl.
+	//
+	// It ASKS rather than answering "ok" unconditionally, because a hardcoded ok
+	// is the thing that made the ledger deadlock invisible for six minutes: the
+	// gRPC health service said SERVING, this said ok, and every balance read
+	// hung. A probe that cannot report a sick node is worse than no probe, since
+	// it actively tells the supervisor not to act.
+	healthy := cfg.Healthy
+	if healthy == nil {
+		// Nil means nothing is watching, which is the honest answer for an
+		// embedded or test handler: the process is up, and that is all this can
+		// truthfully claim.
+		healthy = func() (bool, string) { return true, "" }
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if ok, reason := healthy(); !ok {
+			// 503 is what a load balancer and a Kubernetes probe both act on. The
+			// reason goes in the body because an operator running curl is the other
+			// reader of this endpoint and a bare status code tells them nothing.
+			w.WriteHeader(http.StatusServiceUnavailable)
+			if reason == "" {
+				reason = "unhealthy"
+			}
+			_, _ = io.WriteString(w, reason+"\n")
+			return
+		}
 		_, _ = io.WriteString(w, "ok\n")
 	})
 

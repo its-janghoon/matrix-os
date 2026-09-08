@@ -35,8 +35,10 @@ import (
 	agentv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/agent/v1"
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
+	healthpb "google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/metadata"
 	"gopkg.in/yaml.v3"
+	"sync/atomic"
 )
 
 // Config represents the node configuration
@@ -614,6 +616,13 @@ type Node struct {
 	inferenceSvc     *inference.Service
 	inferenceServer  *inferenceapi.Server
 	agentServer      *agentapi.Server
+	// unhealthy is why this node cannot serve, or nil when it can.
+	//
+	// It is here rather than inside a subsystem because two surfaces have to
+	// agree on the answer: the gRPC health service and the HTTP /healthz a load
+	// balancer polls. They disagreed once, both saying healthy while the ledger
+	// was deadlocked, which is what let the incident run unnoticed.
+	unhealthy atomic.Pointer[string]
 	// attestor is this validator's secp256k1 bridge key, nil when none is
 	// configured. A node with no attestor still applies every lock and unlock;
 	// it just signs no mint authorizations.
@@ -1545,6 +1554,7 @@ func (n *Node) Start() error {
 				{Desc: &agentv1.AgentService_ServiceDesc, Impl: n.agentServer.Service()},
 			},
 			ExtraRoutes:    openAI.Routes(),
+			Healthy:        n.healthy,
 			Auth:           connectAuth(marketAuth),
 			PublicReads:    n.config.Connect.PublicReads,
 			SignedWrites:   n.config.Connect.SignedWrites,
@@ -1642,8 +1652,11 @@ func (n *Node) Start() error {
 				fmt.Printf("Bridge watcher stopped: %v\n", exitErr)
 			}
 		})
+		// Redacted: a provider endpoint carries its API key in the path, and this
+		// line goes to the node log.
 		fmt.Printf("Bridge watcher: polling %s from block %d (%d confirmations).\n",
-			n.config.Bridge.Watch.RPCURL, watcher.Cursor(), n.config.Bridge.Watch.confirmations())
+			redactRPCURL(n.config.Bridge.Watch.RPCURL), watcher.Cursor(),
+			n.config.Bridge.Watch.confirmations())
 	}
 
 	// Update metrics
@@ -2074,10 +2087,33 @@ func (n *Node) watchLedgerStalls() {
 		return
 	}
 	w := newLedgerStallWatch(n.market.Ledger(), os.Stdout)
-	if n.marketServer != nil {
-		w.setServing = n.marketServer.SetServingStatus
+	w.setServing = func(status healthpb.HealthCheckResponse_ServingStatus) {
+		if n.marketServer != nil {
+			n.marketServer.SetServingStatus(status)
+		}
+		// The HTTP probe has to say the same thing. A load balancer polls
+		// /healthz, not the gRPC health service, so correcting only the latter
+		// would have left the same node in rotation.
+		if status == healthpb.HealthCheckResponse_SERVING {
+			n.unhealthy.Store(nil)
+			return
+		}
+		reason := "ledger stalled: one holder has not released the write lock, so no block " +
+			"is being applied and every balance read hangs. The node log carries the " +
+			"goroutine dump."
+		n.unhealthy.Store(&reason)
 	}
 	w.run(n.ctx)
+}
+
+// healthy answers both health surfaces. False means this node knows it cannot
+// do its job, which is a different and more useful claim than "the process is
+// running".
+func (n *Node) healthy() (bool, string) {
+	if reason := n.unhealthy.Load(); reason != nil {
+		return false, *reason
+	}
+	return true, ""
 }
 
 // expireUnpaidInferenceJobs releases the reservations of jobs whose buyer never

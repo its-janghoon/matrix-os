@@ -127,6 +127,26 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
   if (attestors.length === 0) {
     throw new Error("attestor set is empty");
   }
+  if (isReal && attestors.length === 1) {
+    // The same rule deploy.ts applies to MatrixToken's minters, applied here
+    // because this is the side that holds real collateral. A 1-of-1 bridge is
+    // one key able to mint the entire cap against escrow it does not own, which
+    // is the whole thing an m-of-n set exists to prevent. Escapable only by
+    // saying out loud that the deployment is disposable.
+    if (process.env.ALLOW_SINGLE_ATTESTOR !== "1") {
+      throw new Error(
+        `refusing to deploy to '${networkName}' with a single attestor: that one key can ` +
+          `mint the entire cap on its own. Give at least two attestors and a THRESHOLD of ` +
+          `2 or more. If this is deliberately a throwaway rehearsal, set ` +
+          `ALLOW_SINGLE_ATTESTOR=1 and treat the deployment as disposable.`
+      );
+    }
+    console.warn(
+      `WARNING: deploying to '${networkName}' with ONE attestor, because ` +
+        `ALLOW_SINGLE_ATTESTOR=1. That key alone can mint the whole cap. This deployment ` +
+        `is a rehearsal and must never be treated as production.`
+    );
+  }
   const unique = new Set(attestors.map((a) => a.toLowerCase()));
   if (unique.size !== attestors.length) {
     throw new Error("ATTESTORS contains duplicate addresses");
@@ -233,7 +253,10 @@ async function main() {
   const argsCsv = result.args.attestors.join(",");
   console.log("\nTo verify on Etherscan (ETHERSCAN_API_KEY must be set):");
   console.log(
-    `  ATTESTORS='${argsCsv}' THRESHOLD=${result.args.threshold} MINT_CAP=${result.mintCap} \\`
+    // args.mintCap, not result.mintCap: verification re-encodes the CONSTRUCTOR
+    // ARGUMENT and compares it to the deploy calldata, and those differ whenever
+    // MINT_CAP was unset (0 passed, 1e27 resolved).
+    `  ATTESTORS='${argsCsv}' THRESHOLD=${result.args.threshold} MINT_CAP=${result.args.mintCap} \\`
   );
   console.log(
     `    npx hardhat run scripts/verify-mainnet.ts --network ${result.network}`
@@ -241,7 +264,7 @@ async function main() {
   console.log("  # or directly:");
   console.log(
     `  npx hardhat verify --network ${result.network} ${result.address} ` +
-      `'[${result.args.attestors.map((a) => `"${a}"`).join(",")}]' ${result.args.threshold} ${result.mintCap}`
+      `'[${result.args.attestors.map((a) => `"${a}"`).join(",")}]' ${result.args.threshold} ${result.args.mintCap}`
   );
 
   console.log(

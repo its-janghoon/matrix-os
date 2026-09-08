@@ -1381,7 +1381,102 @@ reverted with `LockAlreadyMinted`. That is the on-ramp, demonstrated rather than
 argued.
 
 A **public** testnet run (Sepolia) is still not possible from here: it needs a
-funded key and an RPC endpoint, which is operator capital, not code.
+funded key and an RPC endpoint, which is operator capital, not code. What IS
+now here is everything else it needs - see
+`docs/runbooks/sepolia-rehearsal.md`, and the section below on what working out
+that runbook turned up.
+
+### Working out the Sepolia runbook found eight defects
+
+None of them were in the bridge logic. All of them were on the path an operator
+walks, which is the part no test covers and no local run exercises, and six of
+the eight fail in a way that reads like success.
+
+**Three would have bitten on the first attempt.**
+
+- `.env` was never read. `hardhat.config.ts` took everything from `process.env`
+  and nothing loaded a file, while the README and `.env.example` both said to
+  create one. Following the repo's own instruction produced "refusing to deploy:
+  PRIVATE_KEY is not set", and the only documented alternative put a private key
+  in shell history. It loads `.env` now.
+- **`--network sepolia` did not mean Sepolia.** No network entry declared a
+  `chainId`, and hardhat only checks the endpoint's chain when one is declared.
+  A mainnet URL in `SEPOLIA_RPC_URL` passed every guard and would have broadcast
+  to mainnet; the only thing in the way was "double-check the network" on a
+  human checklist. Now it is an error before a transaction is signed.
+- Etherscan verification could not succeed. `verify-mainnet.ts` submitted the
+  RESOLVED mint cap where the constructor took `0`, so an unset `MINT_CAP` -
+  the common case - always failed the args comparison. Two more places printed
+  the same wrong value in the instructions.
+
+**Two were security.**
+
+- `deploy-bridge.ts` would have made the deploy key the bridge's minting
+  authority. With `ATTESTORS` unset it fell back to "the first n local hardhat
+  accounts" on ANY network, and on a real one `accounts` is `[PRIVATE_KEY]`, so
+  there is exactly one signer to offer. It would have registered a key exported
+  into an env var that afternoon as the sole attestor of an ownerless contract
+  with an immutable cap, and printed it as success. Both deploy scripts now
+  refuse that, and refuse a 1-of-1 on a real network unless
+  `ALLOW_SINGLE_ATTESTOR=1` says the deployment is disposable.
+- The node printed its `bridge.watch.rpc_url` verbatim at every start. A
+  provider endpoint carries its API key in the path, so that key went into the
+  node log - and node logs get shipped to aggregators and pasted into bug
+  reports. Redacted to scheme and host.
+
+**Three were the operator's hands.**
+
+- The attestor keystore was CREATED with `MATRIX_WALLET_PASSPHRASE` and UNLOCKED
+  with `MATRIX_ATTESTOR_PASSPHRASE`. Setting the documented attestor variable
+  and generating a key produced a file encrypted under a passphrase you never
+  chose, discovered at the next node start, unrecoverable. This cost an hour in
+  this session before it was recognised. `attestor-new` now reads the variable
+  the node unlocks with.
+- The mint step had no script. Every rehearsal hand-rolled one, against a
+  contract whose requirements are exacting and invisible at the call site - the
+  signature ORDER rule above all, which reverts a perfectly valid m-of-n mint
+  submitted in the order the nodes answered.
+- Collecting attestations had no command. `matrix bridge lock` said "collect a
+  threshold of attestations" and the only way to do it was to POST to a gRPC
+  method by hand, once per validator.
+
+`matrix bridge attestation`, `matrix bridge reconcile` and
+`contracts/scripts/bridge-mint.ts` close the last three, each refusing the sets
+that cannot mint before any gas is spent.
+
+### A node that cannot serve now says so
+
+The deadlock above was fixed; the silence around it was not. The node answered
+gRPC health with SERVING and `/healthz` with a hardcoded "ok" while every
+balance read hung and no block was produced.
+
+The ledger records when the current write-lock holder took it, a node goroutine
+samples that, and a hold past the threshold is reported once with a full
+`runtime.Stack` dump - the thing that previously required SIGQUIT, which kills
+the process. Both health surfaces then report the node as not serving, from one
+answer, because they disagreed before.
+
+Three things about it are worth knowing, because each was wrong first:
+
+- **It watches queued writers, not just the holder.** A parked READER wedges the
+  ledger exactly as thoroughly - Go's RWMutex is writer-preferring, so one
+  stuck RLock blocks every writer and then every later reader - but the holder
+  is empty the whole time. The first version read "not locked", concluded the
+  stall was over, and would have announced the node was serving again while
+  nothing could proceed.
+- **The clock is monotonic.** A wall-clock stamp makes the watchdog fire on an
+  NTP correction or a VM resume, taking a healthy node out of rotation.
+- **The threshold is two minutes, and the reasoning is asymmetric.** An honest
+  section is not cheap: `transferLocked` fsyncs PER TRANSFER, so a full block is
+  ~1665 fsyncs in one hold - measured here at 370ms idle, 2.2s under load, 8.6s
+  with a concurrent scan contending for the store beneath it. A false positive
+  takes a healthy node out of rotation and teaches its operator to distrust the
+  alarm; a late true positive costs nothing, because the condition never
+  resolves on its own.
+
+`Bridge.Reconcile` also stopped taking the ledger WRITE lock for a read-only
+snapshot. It is reachable from an unauthenticated `GetBridgeReconciliation`, so
+anyone who could poll a read was serializing block application.
 
 ## Docs and website, brought in line
 
