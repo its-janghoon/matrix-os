@@ -1,9 +1,13 @@
 package cli
 
 import (
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"time"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
@@ -14,19 +18,29 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
+// lockIDLen is the byte length of a lock id, which is a sha256 digest. It is
+// checked before the RPC so a truncated paste is named here rather than coming
+// back as a not_found the operator reads as "the lock did not commit".
+const lockIDLen = 32
+
 // `matrix bridge` groups the operator commands for the lock-and-mint bridge.
 //
-// Today that is one command: generating this validator's attestor key. It exists
-// because the key had nowhere to come from. The node held no attestor at all,
-// and the only signer in the tree was cmd/bridge-attest's deterministic test
-// seed - which is documented as never for real funds, and is not a key an
-// operator can be handed.
+// It is the operator's whole side of the on-ramp: generate this validator's
+// attestor key, lock native for an Ethereum address, and collect the validators'
+// signatures for that lock. The last step is the mint, which happens on
+// Ethereum and is contracts/scripts/bridge-mint.ts.
+//
+// The attestor command exists because the key had nowhere to come from. The node
+// held no attestor at all, and the only signer in the tree was
+// cmd/bridge-attest's deterministic test seed - which is documented as never for
+// real funds, and is not a key an operator can be handed.
 func newBridgeCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bridge",
 		Short: "Operator commands for the lock-and-mint bridge",
 	}
-	cmd.AddCommand(newAttestorNewCommand(opts), newBridgeLockCommand(opts))
+	cmd.AddCommand(newAttestorNewCommand(opts), newBridgeLockCommand(opts),
+		newBridgeAttestationCommand(opts))
 	return cmd
 }
 
@@ -206,4 +220,148 @@ pass the collected set to WrappedMatrix.mint.`,
 	_ = cmd.MarkFlagRequired("to")
 	_ = cmd.MarkFlagRequired("amount")
 	return cmd
+}
+
+// attestationOut is the wire shape written to stdout: exactly the field names
+// GetLockAttestation returns over the Connect HTTP surface, because that is what
+// contracts/scripts/bridge-mint.ts reads. Two encodings of the same thing would
+// be one more place for the mint to fail with a bare revert.
+type attestationOut struct {
+	Recipient    string `json:"recipient"`
+	ERC20Amount  string `json:"erc20Amount"`
+	LockID       string `json:"lockId"`
+	Signature    string `json:"signature"`
+	Attestor     string `json:"attestor"`
+	NativeAmount string `json:"nativeAmount"`
+	Validator    string `json:"validator"`
+}
+
+func newBridgeAttestationCommand(opts *globalOptions) *cobra.Command {
+	var (
+		lockID     string
+		validators []string
+	)
+	cmd := &cobra.Command{
+		Use:   "attestation",
+		Short: "Collect validators' mint authorizations for a committed lock",
+		Long: `attestation gathers one signature per validator for a lock the chain has
+already committed, and prints them as the JSON array the mint step reads.
+
+This is the middle step of the on-ramp, and doing it by hand is where a mint
+goes wrong. Each validator holds its own secp256k1 key and signs the same digest
+independently, so an m-of-n mint needs m of these collected from m different
+nodes; there is no gossip of partial signatures, deliberately, because gossiping
+them would be a second consensus for something the contract already checks.
+
+Pass --validator once per node. With none given it asks the single node --addr
+points at, which is a 1-of-1 bridge or a rehearsal.
+
+It refuses to print a set whose members disagree about the lock. Two validators
+naming different recipients or amounts for one lock id means they are not on the
+same chain, and submitting it anyway would spend gas to be told the same thing
+by a revert.
+
+A lock that is not yet committed is a not_found, which is the honest answer:
+there is nothing to sign for until a block carries it.
+
+  matrix bridge attestation --lock-id 0x5b5a... > atts.json
+  CONTRACT=0x... ATTESTATIONS=./atts.json \
+    npx hardhat run scripts/bridge-mint.ts --network sepolia`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			id := strings.TrimPrefix(strings.TrimPrefix(lockID, "0x"), "0X")
+			raw, err := hex.DecodeString(id)
+			if err != nil {
+				return fmt.Errorf("--lock-id must be hex: %w", err)
+			}
+			if len(raw) != lockIDLen {
+				return fmt.Errorf("--lock-id must be %d bytes, got %d; the id is the one "+
+					"`matrix bridge lock` printed", lockIDLen, len(raw))
+			}
+			targets := validators
+			if len(targets) == 0 {
+				targets = []string{opts.Addr}
+			}
+
+			// Progress goes to stderr so stdout stays a clean JSON array that can
+			// be redirected straight into a file.
+			errW := cmd.ErrOrStderr()
+			out := make([]attestationOut, 0, len(targets))
+			for _, target := range targets {
+				per := *opts
+				per.Addr = target
+				cc, err := dial(&per)
+				if err != nil {
+					return err
+				}
+				ctx, cancel := callContext(cmd.Context(), &per)
+				resp, err := cc.market.GetLockAttestation(ctx, &marketv1.GetLockAttestationRequest{
+					LockId: id,
+				})
+				cancel()
+				_ = cc.Close()
+				if err != nil {
+					return fmt.Errorf("validator %s: %w", target, mapErr(target, err))
+				}
+				out = append(out, attestationOut{
+					Recipient:    resp.GetRecipient(),
+					ERC20Amount:  resp.GetErc20Amount(),
+					LockID:       resp.GetLockId(),
+					Signature:    resp.GetSignature(),
+					Attestor:     resp.GetAttestor(),
+					NativeAmount: strconv.FormatUint(resp.GetNativeAmount(), 10),
+					Validator:    target,
+				})
+				fmt.Fprintf(errW, "%s signed as %s\n", target, resp.GetAttestor())
+			}
+			if err := checkAttestationsAgree(out); err != nil {
+				return err
+			}
+
+			enc := json.NewEncoder(cmd.OutOrStdout())
+			enc.SetIndent("", "  ")
+			if err := enc.Encode(out); err != nil {
+				return err
+			}
+			fmt.Fprintf(errW, "\n%d attestation(s). Pass them to the mint step; the contract "+
+				"needs its threshold of DISTINCT registered attestors.\n", len(out))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&lockID, "lock-id", "", "the lock id `matrix bridge lock` printed")
+	cmd.Flags().StringArrayVar(&validators, "validator", nil,
+		"a validator's market endpoint host:port; repeat once per validator (default: --addr)")
+	_ = cmd.MarkFlagRequired("lock-id")
+	return cmd
+}
+
+// checkAttestationsAgree refuses a set whose members describe different locks.
+//
+// Disagreement is not a signature problem to be sorted out on chain: it means
+// two validators applied different state for one lock id, which is a fork or a
+// node pointed at the wrong network. The mint would revert, but only after the
+// gas, and the revert would say "threshold not met" rather than what is wrong.
+func checkAttestationsAgree(atts []attestationOut) error {
+	if len(atts) < 2 {
+		return nil
+	}
+	first := atts[0]
+	for _, a := range atts[1:] {
+		switch {
+		case !strings.EqualFold(a.Recipient, first.Recipient):
+			return fmt.Errorf("validator %s says lock %s mints to %s, but %s says %s: the "+
+				"validators are not on the same chain",
+				a.Validator, first.LockID, a.Recipient, first.Validator, first.Recipient)
+		case a.ERC20Amount != first.ERC20Amount:
+			return fmt.Errorf("validator %s says lock %s is worth %s, but %s says %s: the "+
+				"validators are not on the same chain",
+				a.Validator, first.LockID, a.ERC20Amount, first.Validator, first.ERC20Amount)
+		case strings.EqualFold(a.Attestor, first.Attestor):
+			return fmt.Errorf("validators %s and %s both signed as %s. The contract counts "+
+				"DISTINCT signers, so two answers from one key are one signature, not two - "+
+				"check that --validator names different nodes",
+				first.Validator, a.Validator, a.Attestor)
+		}
+	}
+	return nil
 }
