@@ -1102,7 +1102,11 @@ func (n *Node) Start() error {
 		// network agreed on rather than snapping back to whatever this file says.
 		// consensus.validators is therefore the GENESIS set - it seeds a fresh
 		// store and is ignored once the chain has changed the set.
-		Sets:               consensus.NewSetStore(n.kvStore),
+		Sets: consensus.NewSetStore(n.kvStore),
+		// The bridge records locks the chain applies. Nil when no bridge is
+		// configured, which still escrows - a node that skipped the move would
+		// diverge from every node that has one.
+		BridgeLocker:       bridgeLockerFor(n.bridge),
 		EpochLength:        n.config.Consensus.EpochLength,
 		ApprovedSetChanges: n.config.Consensus.ApprovedChanges,
 		EjectEquivocators:  n.config.Consensus.EjectEquivocators,

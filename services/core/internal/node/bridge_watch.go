@@ -338,3 +338,28 @@ func runBridgeWatcher(ctx context.Context, w *bridge.Watcher, onExit func(error)
 	}()
 	return done
 }
+
+// bridgeLockerFor adapts the bridge to the consensus engine's BridgeLocker, and
+// returns a nil INTERFACE when there is no bridge.
+//
+// The explicit nil matters: a nil *bridge.Bridge stored in an interface is not
+// itself nil, so returning the pointer directly would give the engine a
+// non-nil-looking locker that panics on first use. The bridge builder has the
+// same trap documented at its own call site.
+func bridgeLockerFor(b *bridge.Bridge) consensus.BridgeLocker {
+	if b == nil {
+		return nil
+	}
+	return bridgeLockAdapter{bridge: b}
+}
+
+// bridgeLockAdapter translates the engine's plain [20]byte address into the
+// bridge's Address type. It exists so consensus does not import the bridge
+// package - the same split the burn unlock uses in the other direction.
+type bridgeLockAdapter struct{ bridge *bridge.Bridge }
+
+func (a bridgeLockAdapter) RecordLock(lockID [32]byte, from string, recipient [20]byte, nativeAmount uint64) error {
+	return a.bridge.RecordLock(lockID, from, bridge.Address(recipient), nativeAmount)
+}
+
+func (a bridgeLockAdapter) EscrowAccount() string { return a.bridge.EscrowAccount() }

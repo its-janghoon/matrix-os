@@ -177,6 +177,13 @@ func encodeU64(v uint64) []byte {
 // deriveLockID computes a deterministic, collision-resistant 32-byte lock id
 // from the sequence number, sender, recipient, and amount. Using sha256 over a
 // length-prefixed encoding keeps ids unique per lock and reproducible for audit.
+// DeriveLockID is deriveLockID with the sequence supplied by the caller. The
+// consensus-ordered lock passes the transaction's nonce, which every node agrees
+// on, instead of the per-node counter Lock uses.
+func DeriveLockID(seq uint64, from string, recipient Address, amount uint64) [LockIDLen]byte {
+	return deriveLockID(seq, from, recipient, amount)
+}
+
 func deriveLockID(seq uint64, from string, recipient Address, amount uint64) [LockIDLen]byte {
 	h := sha256.New()
 	var u [8]byte
@@ -498,3 +505,74 @@ func (b *Bridge) Reconcile() (*Reconciliation, error) {
 		OutstandingERC20:  token.NativeToERC20(outstanding),
 	}, nil
 }
+
+// RecordLock persists a lock the CONSENSUS ENGINE has already applied.
+//
+// It is Lock's other half, split out because the two now happen in different
+// places. Lock does both jobs - move the value into escrow and record the event
+// - which was correct while it ran against one node's ledger and wrong the
+// moment the escrow move became a committed transaction: consensus does the move
+// so that every node makes it, and this records what the chain decided so the
+// bridge can attest to it and Reconcile can account for it.
+//
+// It therefore does NOT transfer anything. An implementation that did would
+// double count, moving the value twice out of an account the engine has already
+// debited.
+//
+// IDEMPOTENT PER LOCK ID, which is what makes a replay safe. A node that
+// re-applies a committed block - a crash before the cursor advanced, a resync -
+// calls this again with the same id, and the running locked total must not
+// climb twice for one lock. The check and the write are inside the same ledger
+// critical section, so two callers cannot both see "absent" and both add.
+func (b *Bridge) RecordLock(lockID [LockIDLen]byte, from string, recipient Address, nativeAmount uint64) error {
+	if nativeAmount == 0 {
+		return ErrZeroAmount
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return b.ledger.Atomically(func(market.LedgerTx) error {
+		key := lockPrefix + hex.EncodeToString(lockID[:])
+		if existing, err := b.store.Get([]byte(key)); err == nil && len(existing) > 0 {
+			// Already recorded. Not an error: replaying a committed block is
+			// ordinary, and the whole point of keying by lock id is that doing so
+			// is free.
+			return nil
+		}
+		locked, err := b.readUint64(lockedTTLKey)
+		if err != nil {
+			return err
+		}
+		if locked > (^uint64(0))-nativeAmount {
+			return fmt.Errorf("bridge: locked total overflow")
+		}
+		event := &LockEvent{
+			LockID:       lockID,
+			FromAccount:  from,
+			Recipient:    recipient,
+			NativeAmount: nativeAmount,
+		}
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return fmt.Errorf("bridge: marshal lock event: %w", err)
+		}
+		batch := b.store.NewBatch()
+		defer batch.Close()
+		if err := batch.Set([]byte(key), payload, nil); err != nil {
+			return fmt.Errorf("bridge: stage lock event: %w", err)
+		}
+		if err := batch.Set([]byte(lockedTTLKey), encodeU64(locked+nativeAmount), nil); err != nil {
+			return fmt.Errorf("bridge: stage locked total: %w", err)
+		}
+		if err := batch.Commit(pebble.Sync); err != nil {
+			return fmt.Errorf("bridge: commit recorded lock: %w", err)
+		}
+		return nil
+	})
+}
+
+// EscrowAccount reports where locked collateral is held. It is a method as well
+// as a constant so the consensus engine can ask the bridge rather than carrying
+// its own copy of the name: two places naming the escrow differently would move
+// collateral somewhere the backing check does not look.
+func (b *Bridge) EscrowAccount() string { return EscrowAccount }

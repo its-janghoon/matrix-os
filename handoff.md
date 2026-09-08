@@ -516,6 +516,29 @@ purchase of wMATRIX, `WrappedMatrix.burn`, and the burn watcher in
 `node/bridge_watch.go` releasing native from escrow - and every piece is built.
 What is missing is a mainnet contract deploy, an audit, and DEX liquidity.
 
+**Update: the consensus-ordered lock is now built; what remains is an attestor
+key.** A lock is a signed transfer to `bridge/lock/<eth address>`, applied by
+every node from the committed block: value moves to `bridge/escrow`, the id is
+derived from the transaction (nonce, sender, recipient, amount) rather than from
+a per-node counter, and the bridge records it. It is the one reserved recipient
+besides a stake bond that carries value, and it pays no fee - deliberately, since
+escrow must receive the full amount or the wrapped supply minted against it
+exceeds the collateral by exactly the fee. A node with no bridge still escrows,
+or its balances would diverge from every node that has one.
+
+What is still missing is the ATTESTATION RPC, and the blocker is not the RPC. The
+node holds no secp256k1 attestor key - there is no `Attestor` anywhere in
+`internal/node`, and `cmd/bridge-attest` signs with a deterministic test seed
+that must never touch real funds. So no running node can sign a mint
+authorization. Wiring one up is a custody decision before it is code: a
+validator's attestor key is unilateral authority to mint wMATRIX against escrow,
+and the repo's standing rule is that no real key is committed and secrets come
+from the environment. The ed25519 keystore machinery exists and is the obvious
+place, but choosing that is the operator's call.
+
+The paragraph below is what the entry said before any of this, kept because the
+reasoning still applies to the half that remains.
+
 **"None of which is code" was wrong, and this is the correction.** The INBOUND
 direction is indeed complete: buy wMATRIX, `WrappedMatrix.burn`, watcher,
 quorum-attested unlock, native released. But nothing can create the wMATRIX

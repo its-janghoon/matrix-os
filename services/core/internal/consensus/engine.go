@@ -175,6 +175,11 @@ type Config struct {
 	// would compute different balances from the same block, which is a fork.
 	FeeBasisPoints uint32
 
+	// BridgeLocker records consensus-ordered bridge locks. Optional: a node with
+	// no bridge still applies the escrow move (or it would diverge from nodes
+	// that have one) and simply cannot attest to the lock afterwards.
+	BridgeLocker BridgeLocker
+
 	// MaintainerAccount is paid a standing cut of the protocol fee, before the
 	// rest is split among validators. Empty pays nobody.
 	//
@@ -370,6 +375,9 @@ type Engine struct {
 	// node computes the identical set.
 	committedNonces map[string]struct{}
 	mempoolNonces   map[string]struct{}
+	// bridgeLocker records locks the chain has applied, when this node has a
+	// bridge. Nil on a node with none, which still applies the escrow move.
+	bridgeLocker BridgeLocker
 	// burnAttestations tallies which validators have attested to each burn
 	// unlock, keyed by the reserved recipient (which IS the burn's identity) and
 	// then by attesting validator id. Escrow is released on the block where the
@@ -565,6 +573,7 @@ func New(cfg Config) (*Engine, error) {
 		mempoolSet:         make(map[string]struct{}),
 		committedNonces:    make(map[string]struct{}),
 		mempoolNonces:      make(map[string]struct{}),
+		bridgeLocker:       cfg.BridgeLocker,
 		burnAttestations:   make(map[string]map[string]struct{}),
 		burnUnlocker:       cfg.BurnUnlocker,
 		committedTxs:       make(map[string]struct{}),
@@ -1589,6 +1598,8 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyBurnUnlockLocked(tx)
 	case IsMaintainerRotateRecipient(tx.To):
 		return e.verifyMaintainerRotateLocked(tx)
+	case IsBridgeLockRecipient(tx.To):
+		return e.verifyBridgeLockLocked(tx)
 	}
 	return nil
 }
@@ -1646,6 +1657,15 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		if _, err := ParseMaintainerRotate(tx.To); err != nil {
 			return err
 		}
+	case IsBridgeLockRecipient(tx.To):
+		if _, err := ParseBridgeLock(tx.To); err != nil {
+			return err
+		}
+		// The SECOND reserved recipient that legitimately carries value, and the
+		// only one besides a stake bond. Moving the amount into escrow is the
+		// whole operation, and a zero-value lock would mint nothing while
+		// consuming a lock id.
+		valueAllowed = tx.Amount > 0
 	}
 
 	if tx.Amount != 0 && !valueAllowed {
@@ -2713,6 +2733,19 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = true
 				continue
 			}
+			if IsBridgeLockRecipient(tx.To) {
+				// The one reserved recipient that moves money. The value goes to
+				// the escrow account rather than to the marker string, and it is
+				// deliberately NOT added to credited[]: escrow is collateral, not
+				// earnings, and crediting it would pay the provider emission to
+				// whoever bridged out.
+				ok, err := e.applyBridgeLock(ltx, tx)
+				if err != nil {
+					return err
+				}
+				applied[mempoolKey(tx)] = ok
+				continue
+			}
 			sender := tx.SenderID()
 			bal, err := ltx.Balance(sender)
 			if err != nil {
@@ -3504,7 +3537,8 @@ func IsReservedRecipient(to string) bool {
 		IsSetChangeRecipient(to) ||
 		IsProviderChangeRecipient(to) ||
 		IsBurnUnlockRecipient(to) ||
-		IsMaintainerRotateRecipient(to)
+		IsMaintainerRotateRecipient(to) ||
+		IsBridgeLockRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value
