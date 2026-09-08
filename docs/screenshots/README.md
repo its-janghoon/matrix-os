@@ -4,9 +4,11 @@ Every image here is a 1280x577 viewport capture, which is what makes them drop i
 root [`README.md`](../../README.md) without reflowing its layout. Match that size when
 re-capturing.
 
-## Embedded in the root README
+## The five
 
-Five, not nine: one per distinct claim, so nothing embedded duplicates another shot.
+One per distinct claim, so nothing here duplicates another shot. Every file in this
+directory is embedded in the root README; a capture that nothing embeds is dead weight and
+gets deleted rather than kept "in case".
 
 | File | What it shows | Route |
 | --- | --- | --- |
@@ -15,15 +17,6 @@ Five, not nine: one per distinct claim, so nothing embedded duplicates another s
 | `web-inference.png` | LLM Inference: local runner and provider-API proxy, settled through the same consensus path. | `/products/inference` |
 | `web-consensus.png` | Consensus: leader-based BFT, one globally agreed ledger. | `/products/consensus` |
 | `console-app.png` | Matrix Console on the Providers tab, connected to the built-in demo backend: all six tabs, and local versus remote providers with their peer ids, capacity and price. | `apps/console` on `http://localhost:5173` |
-
-## Present but referenced by nothing
-
-`web-introduction.png`, `web-cli.png`, `web-network-setup.png` and `web-agent-dev.png` are
-captures of doc pages that no README or page embeds. They are re-captured along with the
-rest so nothing here is stale, but they are dead weight until something links them - and
-`web-cli` in particular was deliberately removed once, on the reasoning that a doc page is
-navigational rather than a claim, then re-added without being wired in. Either embed them
-or delete them; leaving them is the state this note exists to stop being invisible.
 
 ## Re-capturing the web screenshots
 
@@ -34,9 +27,14 @@ corepack yarn build     # Turbopack is the default in Next 16; no --turbopack fl
 corepack yarn start -p 3000
 ```
 
-Then capture `http://localhost:3000` at each route in the table above, plus
-`/docs/introduction`, `/docs/cli`, `/docs/guides/network-setup` and
-`/docs/guides/agent-development` if those four are still here.
+Then capture `http://localhost:3000` at each route in the table above.
+
+Doc pages are deliberately not captured. `web-introduction`, `web-cli`, `web-network-setup`
+and `web-agent-dev` existed here once, embedded nowhere: a doc page is navigational rather
+than a claim, and a screenshot of prose goes stale every time the prose changes while
+nothing points at it to notice. `web-cli` was removed on that reasoning, came back
+unreferenced, and has been removed again. Add a capture here only together with the README
+change that embeds it.
 
 Two things a capture script has to get right, both learned by getting them wrong:
 
