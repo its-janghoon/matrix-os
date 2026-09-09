@@ -48,22 +48,83 @@ export interface Settled {
   completionTokens: number;
 }
 
+export interface NativeTransaction {
+  index: bigint;
+  from: string;
+  to: string;
+  amount: bigint;
+  nonce: bigint;
+  blockHeight: bigint;
+}
+
+export interface SignedTransferInput {
+  fromPublicKey: Uint8Array;
+  to: string;
+  amount: bigint;
+  nonce: bigint;
+  prevHash: Uint8Array;
+  signature: Uint8Array;
+  timestamp: bigint;
+}
+
+export interface SettledTransfer {
+  transaction: NativeTransaction;
+  committed: boolean;
+  applied: boolean;
+}
+
+export interface LockAttestation {
+  recipient: string;
+  erc20Amount: bigint;
+  lockId: string;
+  signature: string;
+  attestor: string;
+  nativeAmount: bigint;
+}
+
+export interface BridgeReadiness {
+  chainId: bigint;
+  contract: string;
+  attestor: string;
+  minLockNative: bigint;
+  challenge: Uint8Array;
+  signature: Uint8Array;
+}
+
+export interface BridgeReconciliation {
+  lockedNative: bigint;
+  unlockedNative: bigint;
+  outstandingNative: bigint;
+  escrowBalance: bigint;
+  outstandingErc20: bigint;
+  blockHeight: bigint;
+}
+
 async function rpc(
   endpoint: string,
   service: string,
   method: string,
   body: unknown,
+  options: { timeoutMs?: number } = {},
 ): Promise<Record<string, unknown>> {
   const url = `${endpoint.replace(/\/$/, '')}/${service}/${method}`;
+  const controller = options.timeoutMs ? new AbortController() : undefined;
+  const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1' },
       body: JSON.stringify(body ?? {}),
+      ...(controller ? { signal: controller.signal } : {}),
     });
   } catch {
+    if (controller?.signal.aborted) {
+      throw new NodeError('deadline_exceeded', `${method} timed out after ${options.timeoutMs}ms`);
+    }
     throw new NodeError('unreachable', `could not reach ${endpoint}. Is a node running there?`);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 
   const text = await response.text();
@@ -105,6 +166,96 @@ function obj(value: unknown): Record<string, unknown> {
 export async function getBalance(endpoint: string, account: string): Promise<bigint> {
   const out = await rpc(endpoint, MARKET, 'GetBalance', { account });
   return big(out.balance);
+}
+
+/** True only for the one bridge polling condition that may resolve after commit propagation. */
+export function isNotFoundNodeError(error: unknown): error is NodeError {
+  return error instanceof NodeError && error.code === 'not_found';
+}
+
+/** Submit a public caller-signed native transfer; no API key or server-side key is used. */
+export async function submitSignedTransfer(
+  endpoint: string,
+  input: SignedTransferInput,
+): Promise<SettledTransfer> {
+  if (input.fromPublicKey.length !== 20 && input.fromPublicKey.length !== 32) {
+    throw new Error('fromPublicKey must be a 20-byte EVM address or 32-byte ed25519 key');
+  }
+  const out = await rpc(endpoint, MARKET, 'SubmitSignedTransfer', {
+    fromPublicKey: toBase64(input.fromPublicKey),
+    to: input.to,
+    amount: String(input.amount),
+    nonce: String(input.nonce),
+    prevHash: toBase64(input.prevHash),
+    signature: toBase64(input.signature),
+    timestamp: String(input.timestamp),
+  });
+  const transaction = obj(out.transaction);
+  return {
+    transaction: {
+      index: big(transaction.index),
+      from: str(transaction.from),
+      to: str(transaction.to),
+      amount: big(transaction.amount),
+      nonce: big(transaction.nonce),
+      blockHeight: big(transaction.blockHeight),
+    },
+    committed: out.committed === true,
+    applied: out.applied === true,
+  };
+}
+
+/** True only for endpoint transport failures that a threshold may outvote. */
+export function isBridgeReadinessTransportError(error: unknown): error is NodeError {
+  return error instanceof NodeError && (error.code === 'unreachable' || error.code === 'deadline_exceeded');
+}
+
+/** Request one validator's challenge-bound deployment-readiness proof. */
+export async function getBridgeReadiness(
+  endpoint: string,
+  challenge: Uint8Array,
+  timeoutMs = 10_000,
+): Promise<BridgeReadiness> {
+  if (challenge.length !== 32) throw new Error(`bridge readiness challenge must be 32 bytes, got ${challenge.length}`);
+  const out = await rpc(endpoint, MARKET, 'GetBridgeReadiness', { challenge: toBase64(challenge) }, { timeoutMs });
+  return {
+    chainId: big(out.chainId),
+    contract: str(out.contract),
+    attestor: str(out.attestor),
+    minLockNative: big(out.minLockNative),
+    challenge: fromBase64(str(out.challenge)),
+    signature: fromBase64(str(out.signature)),
+  };
+}
+
+/** Fetch one validator's attestation for an already-committed lock. */
+export async function getLockAttestation(
+  endpoint: string,
+  lockId: string,
+  timeoutMs = 10_000,
+): Promise<LockAttestation> {
+  const out = await rpc(endpoint, MARKET, 'GetLockAttestation', { lockId }, { timeoutMs });
+  return {
+    recipient: str(out.recipient),
+    erc20Amount: big(out.erc20Amount),
+    lockId: str(out.lockId),
+    signature: str(out.signature),
+    attestor: str(out.attestor),
+    nativeAmount: big(out.nativeAmount),
+  };
+}
+
+/** Read a public, reproducible bridge escrow/supply reconciliation snapshot. */
+export async function getBridgeReconciliation(endpoint: string): Promise<BridgeReconciliation> {
+  const out = await rpc(endpoint, MARKET, 'GetBridgeReconciliation', {});
+  return {
+    lockedNative: big(out.lockedNative),
+    unlockedNative: big(out.unlockedNative),
+    outstandingNative: big(out.outstandingNative),
+    escrowBalance: big(out.escrowBalance),
+    outstandingErc20: big(out.outstandingErc20),
+    blockHeight: big(out.blockHeight),
+  };
 }
 
 /**

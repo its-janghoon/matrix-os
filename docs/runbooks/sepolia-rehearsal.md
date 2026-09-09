@@ -1,6 +1,13 @@
-# Sepolia rehearsal: the bridge, end to end, on a public testnet
+# Legacy Ethereum Sepolia rehearsal
 
-This is the dress rehearsal for the lock-and-mint bridge on a chain you do not
+> **Legacy compatibility guide.** The authoritative launch policy is Base Sepolia
+> (`84532`) followed by Base production (`8453`), documented in
+> [`base-launch.md`](base-launch.md). Current cap, founder vesting, fee,
+> maintainer, emission, bonded-open stake, public endpoint, and evidence policy
+> come only from that runbook. This file remains for operators maintaining the
+> legacy Ethereum Sepolia path.
+
+This is an Ethereum Sepolia rehearsal for the lock-and-mint bridge on a chain you do not
 control. It goes from nothing to: native MATRIX escrowed on your own L1, wMATRIX
 minted on Sepolia against it, the two reconciled, and the wrapped tokens burned
 back.
@@ -124,12 +131,17 @@ deploy time, and it is **immutable** - changing the set later is a redeploy.
 is deliberate: silently replacing an attestor key strands every lock that
 validator already attested to.
 
+This immutable EVM committee is separate from dynamic native validator
+membership. A native validator join, exit, or ejection does not add, remove, or
+rotate an attestor; a removed validator can remain an attestor for this contract.
+Changing the committee requires a new `WrappedMatrix` deployment and migration.
+
 ## 3. Deploy WrappedMatrix
 
 ```sh
 cd contracts
-ATTESTORS=0xAttestor1,0xAttestor2,0xAttestor3 THRESHOLD=2 \
-  npm run deploy:bridge:sepolia
+ATTESTORS=0xAttestor1,0xAttestor2,0xAttestor3 THRESHOLD=3 \
+  MINT_CAP=60000000000000000000000000 npm run deploy:bridge:sepolia
 ```
 
 The script refuses, on a real network, to invent an attestor set from local
@@ -195,7 +207,7 @@ redacted, so the node log is not a place your RPC key ends up.
 On a **single-node** rehearsal:
 
 ```sh
-matrix fund --account <account id> --amount 10000000000 --api-key <key>
+matrix fund --account <account id> --amount 100000000000 --api-key <key>
 ```
 
 On a **multi-validator** rehearsal this is refused, and correctly: reward-pool
@@ -206,11 +218,12 @@ start.
 ## 7. Lock
 
 ```sh
-matrix bridge lock --to 0x<your MetaMask address> --amount 4000000000 \
+matrix bridge lock --to 0x<your MetaMask address> --amount 100000000000 \
   --api-key <key>
 ```
 
-Amounts are native base units, 9 decimals. It prints the LOCK ID.
+Amounts are native base units, 9 decimals. The example locks the current
+minimum: `100000000000` base units = 100 MATRIX. It prints the LOCK ID.
 
 Escrow receives the full amount - a lock pays no protocol fee, because the
 wrapped supply minted against it is computed from what was locked, and a fee
@@ -271,10 +284,11 @@ back to zero.
 
 ## What a testnet cannot rehearse
 
-- **The consensus-ordered unlock path, if you run one node.** A solo node gets a
-  direct bridge and applies the burn itself. The quorum tally, the attestation
-  submission and `ApplyAttestedUnlock` only run on a validator SET. Run at least
-  two nodes if you want to exercise them.
+- **A singleton still exercises consensus ordering.** Every bridge configured
+  inside `matrixd`, including a singleton, submits burn observations through
+  consensus. A singleton has a one-validator quorum; it does not use the direct
+  watcher release path. Run multiple validators to rehearse multi-party quorum
+  behavior, dynamic membership, and disagreement handling.
 - **Multi-signature ordering,** with one attestor. The sort and the distinct
   signer rule are trivially satisfied by a set of one.
 - **Mainnet gas prices.** Gas UNITS transfer exactly; the ETH cost does not.

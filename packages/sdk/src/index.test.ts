@@ -120,6 +120,39 @@ describe('64-bit amounts', () => {
     const balance = await c.getBalance('ghost');
     expect(balance.balance).toBe(0n);
   });
+
+  it('encodes updateProviderQuote metadata and decodes the refreshed quote', async () => {
+    const { client: c, calls } = client([{ body: { provider: {
+      id: 'gpu', pricePerUnit: '12', costPerUnit: '8', markupBasisPoints: 125,
+      quoteId: 'quote-2', quoteVersion: '9', observedAt: '2026-02-01T00:00:00Z',
+      validUntil: '2026-02-02T00:00:00Z',
+    } } }]);
+
+    const provider = await c.updateProviderQuote({
+      id: 'gpu',
+      pricePerUnit: 12n,
+      costPerUnit: 8n,
+      markupBasisPoints: 125,
+      quoteId: 'quote-2',
+      quoteVersion: 9n,
+      observedAt: '2026-02-01T00:00:00Z',
+      validUntil: '2026-02-02T00:00:00Z',
+    });
+
+    expect(calls[0]!.url).toBe('http://node.test:9093/matrix.market.v1.MarketService/UpdateProviderQuote');
+    expect(JSON.parse(String(calls[0]!.init.body))).toEqual({
+      id: 'gpu',
+      pricePerUnit: '12',
+      costPerUnit: '8',
+      markupBasisPoints: 125,
+      quoteId: 'quote-2',
+      quoteVersion: '9',
+      observedAt: '2026-02-01T00:00:00Z',
+      validUntil: '2026-02-02T00:00:00Z',
+    });
+    expect(provider.costPerUnit).toBe(8n);
+    expect(provider.quoteVersion).toBe(9n);
+  });
 });
 
 describe('decoding', () => {
@@ -132,6 +165,12 @@ describe('decoding', () => {
               id: 'gpu-1',
               capacity: '20',
               pricePerUnit: '5',
+              costPerUnit: '4',
+              markupBasisPoints: 250,
+              quoteId: 'quote-1',
+              quoteVersion: '7',
+              observedAt: '2026-01-01T00:00:00Z',
+              validUntil: '2026-01-02T00:00:00Z',
               available: '17',
               origin: 'PROVIDER_ORIGIN_LOCAL',
               peerId: '',
@@ -148,6 +187,12 @@ describe('decoding', () => {
       id: 'gpu-1',
       capacity: 20n,
       pricePerUnit: 5n,
+      costPerUnit: 4n,
+      markupBasisPoints: 250,
+      quoteId: 'quote-1',
+      quoteVersion: 7n,
+      observedAt: '2026-01-01T00:00:00Z',
+      validUntil: '2026-01-02T00:00:00Z',
       available: 17n,
       origin: 'PROVIDER_ORIGIN_LOCAL',
       peerId: '',
@@ -191,6 +236,11 @@ describe('decoding', () => {
             provider: 'p',
             units: '3',
             price: '21',
+            pricePerUnit: '7',
+            quoteId: 'quote-1',
+            quoteVersion: '4',
+            quoteObservedAt: '2026-01-01T00:00:00Z',
+            quoteValidUntil: '2026-01-02T00:00:00Z',
             status: 'JOB_STATUS_COMPLETED',
             createdAt: '2026-01-01T00:00:00Z',
             updatedAt: '2026-01-01T00:00:01Z',
@@ -202,6 +252,11 @@ describe('decoding', () => {
     const job = await c.completeJob('job-1');
 
     expect(job.price).toBe(21n);
+    expect(job.pricePerUnit).toBe(7n);
+    expect(job.quoteId).toBe('quote-1');
+    expect(job.quoteVersion).toBe(4n);
+    expect(job.quoteObservedAt).toBe('2026-01-01T00:00:00Z');
+    expect(job.quoteValidUntil).toBe('2026-01-02T00:00:00Z');
     expect(job.status).toBe('JOB_STATUS_COMPLETED');
     expect(job.createdAt).toBe('2026-01-01T00:00:00Z');
   });
@@ -281,6 +336,7 @@ describe('coverage against the served surface', () => {
   const wrapped: Record<string, string[]> = {
     'matrix.market.v1.MarketService': [
       'RegisterProvider',
+      'UpdateProviderQuote',
       'ListProviders',
       'SubmitJob',
       'GetJob',
@@ -292,6 +348,7 @@ describe('coverage against the served surface', () => {
       'ListTransactions',
       'SubmitSignedTransfer',
       'FundAccount',
+      'GetBridgeReadiness',
       'GetBridgeReconciliation',
       'GetLockAttestation',
     ],

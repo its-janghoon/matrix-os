@@ -66,6 +66,33 @@ func TestConfiguredBackendJoinsBothTheRegistryAndTheOrderBook(t *testing.T) {
 	}
 }
 
+func TestConfiguredBackendGrossesUpManualMatrixCost(t *testing.T) {
+	n, registry := backendTestNode(t, InferenceConfig{
+		Backends: []InferenceBackendConfig{{
+			ID: "costed", Kind: "echo", Capacity: 5,
+			CostPerUnit: 10_000, MarkupBasisPoints: 1_000,
+		}},
+	})
+	n.config.Consensus.FeeBasisPoints = 100 // one percent protocol fee
+
+	if err := n.registerConfiguredInferenceBackends(registry); err != nil {
+		t.Fatalf("registerConfiguredInferenceBackends: %v", err)
+	}
+	prov, ok := n.market.GetProvider("costed")
+	if !ok {
+		t.Fatal("cost-backed provider not on the order book")
+	}
+	// ceil(10_000 * 1.10 / 0.99) = 11_112, preserving the requested ten
+	// percent provider margin after the one-percent protocol fee.
+	if prov.PricePerUnit != 11_112 || prov.CostPerUnit != 10_000 || prov.MarkupBasisPoints != 1_000 {
+		t.Fatalf("provider quote = price %d cost %d markup %d; want 11112/10000/1000",
+			prov.PricePerUnit, prov.CostPerUnit, prov.MarkupBasisPoints)
+	}
+	if prov.QuoteID == "" || prov.QuoteVersion == 0 || prov.ObservedAt.IsZero() || prov.ValidUntil.IsZero() {
+		t.Fatalf("config-backed quote metadata not normalized: %+v", prov)
+	}
+}
+
 func TestAConfiguredBackendIsNotReRegisteredOverPendingReservations(t *testing.T) {
 	cfg := InferenceConfig{
 		Backends: []InferenceBackendConfig{{
@@ -115,7 +142,12 @@ func TestConfiguredBackendRejectsBadDeclarations(t *testing.T) {
 		{
 			name:    "no price",
 			backend: InferenceBackendConfig{ID: "a", Kind: "echo", Capacity: 1},
-			wantIn:  "price_per_unit must be > 0",
+			wantIn:  "set price_per_unit or cost_per_unit",
+		},
+		{
+			name:    "both final price and cost",
+			backend: InferenceBackendConfig{ID: "a", Kind: "echo", Capacity: 1, PricePerUnit: 2, CostPerUnit: 1},
+			wantIn:  "mutually exclusive",
 		},
 		{
 			name:    "unknown kind",

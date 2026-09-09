@@ -150,11 +150,19 @@ type Config struct {
 		RateLimitBurst int `yaml:"rate_limit_burst"`
 	} `yaml:"connect"`
 	Consensus struct {
-		// Validators is the fixed validator set as hex-encoded account IDs
-		// (ed25519 public keys). This node's own consensus identity is always
-		// added to the set, so an empty list yields a functioning single-validator
-		// consensus suitable for a solo/dev node. Every node configured with the
-		// same list derives the identical round-robin leader schedule.
+		// MembershipMode is "operator-approved" for the legacy allow-list or
+		// "bonded-open" for permissionless, self-signed admission after the
+		// configured minimum bond has committed.
+		MembershipMode string `yaml:"membership_mode"`
+		// ParticipateInOpenSet is this node's desired state in bonded-open mode.
+		// Nil defaults to true. Set false to submit a voluntary self-exit and stop
+		// retrying admission; no operator can remove an honest validator for being
+		// offline.
+		ParticipateInOpenSet *bool `yaml:"participate_in_open_set"`
+		// Validators is the genesis validator set as hex-encoded account IDs
+		// (ed25519 public keys). A non-empty list is authoritative and must be
+		// identical on every node so passive candidates can replay from genesis.
+		// Only an empty list creates a solo/dev set containing this node itself.
 		Validators []string `yaml:"validators"`
 		// EpochLength is how many committed blocks make an epoch. A validator-set
 		// change carried by a committed block takes effect at the next height that
@@ -301,23 +309,6 @@ func effectiveUnbonding(cfg StakeConfig) uint64 {
 	return consensus.DefaultUnbondingPeriod
 }
 
-// recommendedProviderEmissionPerBlock is the per-block provider emission a
-// generated config ships with, in native base units. It is the token proposal's
-// recommended schedule, chosen so the pool spends about 40% of the native supply
-// cap over its half-life and no more.
-//
-// The total ever paid by a right-shift (halving) schedule is about
-// 1.44 * PerBlock * HalfLife. With the default half-life of
-// consensus.DefaultProviderEmissionHalfLife (1,000,000 blocks):
-//
-//	1.44 * 280_000_000_000 * 1_000_000 == 4.032e17 base units
-//
-// which is ~40% of token.NativeMaxSupply (1e18 base units), matching the
-// provider allocation in docs/proposals/token-and-bridge-policy.md. An operator
-// who wants a different budget edits consensus.rewards.per_block (0 disables the
-// emission entirely).
-const recommendedProviderEmissionPerBlock uint64 = 280_000_000_000
-
 // RewardsConfig configures the provider emission from the genesis pool.
 //
 // The token policy allocates a share of the pool to compute providers. This is
@@ -441,8 +432,19 @@ type InferenceBackendConfig struct {
 	Models []string `yaml:"models"`
 	// Capacity is the advertised capacity in compute units. Must be > 0.
 	Capacity uint64 `yaml:"capacity"`
-	// PricePerUnit is the price per compute unit in base units. Must be > 0.
+	// PricePerUnit is an already-final gross customer quote in native MATRIX
+	// base units. For loss-protected pricing prefer CostPerUnit plus
+	// MarkupBasisPoints; the node then grosses up for the protocol fee.
 	PricePerUnit uint64 `yaml:"price_per_unit"`
+	// CostPerUnit is the provider's manually observed upstream cost converted to
+	// MATRIX base units. It is not a peg or DEX oracle. When non-zero it is the
+	// pricing source and PricePerUnit must be zero.
+	CostPerUnit uint64 `yaml:"cost_per_unit"`
+	// MarkupBasisPoints is added to CostPerUnit before protocol-fee gross-up.
+	MarkupBasisPoints uint32 `yaml:"markup_basis_points"`
+	// QuoteTTL is how long this manual quote remains valid. Zero means the
+	// marketplace default (24 hours); stale quotes fail before upstream work.
+	QuoteTTL time.Duration `yaml:"quote_ttl"`
 }
 
 type AgentConfig struct {
@@ -702,23 +704,28 @@ func Initialize(configPath string) error {
 	// zero turns it off.
 	config.Connect.RateLimitPerMinute = defaultRateLimitPerMinute
 	config.Connect.RateLimitBurst = defaultRateLimitBurst
-	// Spell out the epoch length rather than leaving it zero: every node in a
-	// network must agree on it, so it belongs in the file where an operator can
-	// see and copy it. Approve no set changes by default - a node that
-	// pre-approved membership changes would vote to admit validators its operator
-	// never agreed to.
+	// Public launch default: permissionless membership backed by a positive bond.
+	// Admission and exit are self-signed; approved_changes is ignored in this
+	// mode. A new candidate starts as a passive follower, bonds from its own
+	// consensus account, then gossips its own admission request.
+	config.Consensus.MembershipMode = string(consensus.MembershipBondedOpen)
+	participate := true
+	config.Consensus.ParticipateInOpenSet = &participate
 	config.Consensus.EpochLength = consensus.DefaultEpochLength
 	config.Consensus.ApprovedChanges = nil
 	// Spelled out rather than left null so the knob is visible in the file an
 	// operator reads. True is the default either way.
 	ejectEquivocators := true
 	config.Consensus.EjectEquivocators = &ejectEquivocators
-	// Bonded stake OFF in a generated config. Turning it on is a decision about
-	// what a validator must risk, and it cannot be made for an operator: on a
-	// single-node dev network it would require that node to bond a million
-	// MATRIX before it could validate anything. The section is written so the
-	// knobs are visible.
-	config.Consensus.Stake = StakeConfig{Enabled: false}
+	// Bonded stake is required by bonded-open membership. The target equals the
+	// admission floor; the node never subsidizes it, so the operator must fund
+	// this node's printed consensus account before it can join.
+	minBond := consensus.DefaultMinBond
+	config.Consensus.Stake = StakeConfig{
+		Enabled: true,
+		MinBond: &minBond,
+		Bond:    minBond,
+	}
 	// Protocol fee set to 100 basis points (1%) in a generated config, which is
 	// the code cap (consensus.MaxFeeBasisPoints). This is the operator's explicit
 	// monetary-policy decision for this network, recorded here so a freshly
@@ -728,27 +735,18 @@ func Initialize(configPath string) error {
 	// consensus.fee_basis_points; the engine still refuses any value above the
 	// cap at startup rather than silently clamping it.
 	config.Consensus.FeeBasisPoints = consensus.MaxFeeBasisPoints
-	// Provider emission set to the recommended schedule in a generated config.
-	// Like the fee, this is monetary policy the operator decided explicitly (the
-	// CTO's "as recommended" answer): a node that started paying out the genesis
-	// pool because that was the default would be making that policy on the
-	// operator's behalf, so the number lives here in the file rather than in the
-	// engine, and an operator who wants no emission sets consensus.rewards.per_block
-	// to 0 (the engine's zero-value default remains emission-free either way).
-	//
-	// The schedule is sized to the token proposal's provider allocation: the total
-	// ever paid is about 1.44 * PerBlock * HalfLife, so at the recommended per-block
-	// figure and a 1,000,000-block half-life it is about
-	// 1.44 * 2.8e11 * 1e6 == 4.03e17 base units, i.e. ~40% of the 1e18 native supply
-	// cap (config.Genesis.RewardPool == token.NativeMaxSupply funds it). See
-	// recommendedProviderEmissionPerBlock for the arithmetic.
-	//
-	// ApprovedProviders stays empty on purpose: a registration needs a QUORUM of
-	// operators to list a provider (the same as admitting a validator), so an empty
-	// registry pays nothing until this operator adds one. The emission is armed but
-	// idle until then.
+	// Initialize has no explicit maintainer-account input and must never invent
+	// or silently assign an account. Keep both fields zero. A launch-specific
+	// configuration may opt into the maximum 5000-basis-point share only when it
+	// also supplies a real, non-empty maintainer account.
+	config.Consensus.MaintainerAccount = ""
+	config.Consensus.MaintainerFeeShareBasisPoints = 0
+	// No provider token emission at launch. Providers charge buyers directly and
+	// set a margin that covers upstream cost plus protocol fee; creating rewards
+	// before real demand would subsidize usage from the genesis pool. The approved
+	// provider set is therefore intentionally empty as well.
 	config.Consensus.Rewards = RewardsConfig{
-		PerBlock: recommendedProviderEmissionPerBlock,
+		PerBlock: 0,
 		HalfLife: consensus.DefaultProviderEmissionHalfLife,
 	}
 	// Register the GPU-free deterministic echo backend for a demo provider so a
@@ -966,6 +964,7 @@ func (n *Node) Start() error {
 	exchange, err := marketexchange.New(marketexchange.Config{
 		Transport: n.transport,
 		Settled:   settled,
+		Market:    n.market,
 		PeerID:    n.p2pHost.GetPeerID().String(),
 	})
 	if err != nil {
@@ -1077,13 +1076,11 @@ func (n *Node) Start() error {
 		}
 	}
 	// The bridge is built BEFORE the engine because the engine needs something
-	// that can release escrow for a quorum-attested burn. Which kind of bridge it
-	// is depends on the validator set: a single node applies unlocks itself, a
-	// set gets a consensus-ordered bridge whose unlocks arrive through the engine
-	// (see newConfiguredBridgeForSet). validatorSet is already built above, so the
-	// decision is made from the same set the engine will run with rather than
-	// from the config list.
-	nodeBridge, err := newConfiguredBridgeForSet(n.market.Ledger(), n.kvStore, n.config.Bridge, validatorSet.Len())
+	// that can release escrow for a quorum-attested burn. It is always
+	// consensus-ordered, even for a singleton: the validator set is dynamic chain
+	// state and may grow after startup, so burn authority must not be frozen in
+	// direct mode from the genesis set size.
+	nodeBridge, err := newConfiguredBridge(n.market.Ledger(), n.kvStore, n.config.Bridge)
 	if err != nil {
 		return fmt.Errorf("failed to initialize bridge: %w", err)
 	}
@@ -1103,16 +1100,11 @@ func (n *Node) Start() error {
 			"set, or this node's signatures are rejected on-chain.\n", attestor.AddressHex())
 	}
 	if nodeBridge != nil {
-		how := "this node applies unlocks directly (single-node network)"
-		if nodeBridge.IsConsensusOrdered() {
-			how = fmt.Sprintf("unlocks require a quorum of the %d validators to attest, "+
-				"and are applied by consensus", validatorSet.Len())
-		}
-		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d; %s.\n",
-			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID, how)
+		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d; unlocks require a quorum of the %d validators to attest and are applied by consensus.\n",
+			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID, validatorSet.Len())
 	}
 	var burnUnlocker consensus.BurnUnlocker
-	if nodeBridge != nil && nodeBridge.IsConsensusOrdered() {
+	if nodeBridge != nil {
 		burnUnlocker = attestedUnlockTranslator{bridge: nodeBridge}
 	}
 
@@ -1133,10 +1125,12 @@ func (n *Node) Start() error {
 		// The bridge records locks the chain applies. Nil when no bridge is
 		// configured, which still escrows - a node that skipped the move would
 		// diverge from every node that has one.
-		BridgeLocker:       bridgeLockerFor(n.bridge),
-		EpochLength:        n.config.Consensus.EpochLength,
-		ApprovedSetChanges: n.config.Consensus.ApprovedChanges,
-		EjectEquivocators:  n.config.Consensus.EjectEquivocators,
+		BridgeLocker:         bridgeLockerFor(n.bridge),
+		EpochLength:          n.config.Consensus.EpochLength,
+		MembershipMode:       consensus.MembershipMode(n.config.Consensus.MembershipMode),
+		ParticipateInOpenSet: n.config.Consensus.ParticipateInOpenSet,
+		ApprovedSetChanges:   n.config.Consensus.ApprovedChanges,
+		EjectEquivocators:    n.config.Consensus.EjectEquivocators,
 		// Bonded stake, when the operator has turned it on. A bond is a balance
 		// in a reserved account on the SAME ledger everything else settles on, so
 		// bonding conserves supply and bonded coins leave the spendable balance
@@ -1330,6 +1324,7 @@ func (n *Node) Start() error {
 			}
 			return bridgeReconciler
 		}(),
+		ReadinessSigner: bridgeReadinessFor(n.bridge, n.attestor),
 		// Same typed-nil trap: lockAttestorFor returns a nil interface when the
 		// node lacks either the bridge or the key, so the RPC refuses instead of
 		// panicking on a non-nil-looking value.
@@ -1408,14 +1403,20 @@ func (n *Node) Start() error {
 		// Only when it is not already there: RegisterProvider resets Available to
 		// Capacity, so re-registering on every restart would forget the capacity
 		// currently reserved by pending jobs.
+		observedAt := time.Now().UTC()
+		demoQuote := market.Provider{
+			ID:           n.config.Inference.EchoProvider,
+			Capacity:     demoInferenceCapacity,
+			PricePerUnit: demoInferencePrice,
+			ObservedAt:   observedAt,
+			ValidUntil:   observedAt.Add(market.DefaultQuoteTTL),
+		}
 		if _, exists := n.market.GetProvider(n.config.Inference.EchoProvider); !exists {
-			if err := n.market.RegisterProvider(market.Provider{
-				ID:           n.config.Inference.EchoProvider,
-				Capacity:     demoInferenceCapacity,
-				PricePerUnit: demoInferencePrice,
-			}); err != nil {
+			if err := n.market.RegisterProvider(demoQuote); err != nil {
 				return fmt.Errorf("failed to register the demo inference provider on the market: %w", err)
 			}
+		} else if err := n.market.UpdateProviderQuote(n.config.Inference.EchoProvider, demoQuote); err != nil {
+			return fmt.Errorf("failed to refresh the demo inference provider quote: %w", err)
 		}
 		fmt.Printf("Inference: registered echo backend for demo provider %q (capacity %d, price %d/unit).\n",
 			n.config.Inference.EchoProvider, demoInferenceCapacity, demoInferencePrice)
@@ -1591,12 +1592,11 @@ func (n *Node) Start() error {
 	// rather than silently ignored, so a deployment that believes it is relaying
 	// never comes up quiet.
 	//
-	// AUTHORITY: the watcher is a per-node polling relayer, because it is the
-	// half that holds an Ethereum endpoint. What it may DO with what it sees
-	// depends on the size of the validator set, and the node decides that rather
-	// than the operator: alone it releases escrow directly, and on a set it
-	// submits an attestation that releases escrow once a quorum agrees. See
-	// bridge_watch.go for the two adapters and the reason they are two.
+	// AUTHORITY: the watcher is a per-node polling relayer because it is the
+	// half that holds an Ethereum endpoint. It never applies a burn directly in
+	// matrixd, even on a singleton: it submits this validator's attestation and
+	// escrow moves only through consensus. That invariant survives dynamic
+	// validator membership.
 	ethClient, err := dialBridgeClient(n.config.Bridge)
 	if err != nil {
 		return fmt.Errorf("failed to initialize bridge watcher: %w", err)
@@ -1605,20 +1605,13 @@ func (n *Node) Start() error {
 	// value: a nil *bridge.Bridge in an interface is non-nil, which would defeat
 	// the builder's own "no bridge configured" check.
 	//
-	// On a validator set the watcher does NOT get the bridge. It gets an applier
-	// that submits this node's attestation, and escrow moves only when a quorum
-	// of the set has attested to the same burn, account and amount. Handing it
-	// the bridge there would release collateral on this node's ledger and nowhere
-	// else, which is the divergence this whole path exists to avoid - and the
-	// consensus-ordered bridge refuses ProcessBurn outright, so the mistake would
-	// fail loudly rather than silently fork.
+	// A configured matrixd watcher never gets the bridge directly. It gets an
+	// applier that submits this node's attestation, and escrow moves only when a
+	// consensus quorum has agreed to the burn. Direct bridge mode remains for
+	// library callers and explicit test helpers only.
 	var applier bridge.Applier
 	if nodeBridge != nil {
-		if nodeBridge.IsConsensusOrdered() {
-			applier = consensusAttestingApplier{engine: n.consensus}
-		} else {
-			applier = nodeBridge
-		}
+		applier = consensusAttestingApplier{engine: n.consensus}
 	}
 	watcher, err := newConfiguredBridgeWatcher(
 		applier,
@@ -2165,8 +2158,19 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 		if b.Capacity == 0 {
 			return fmt.Errorf("inference.backends[%d] (%s): capacity must be > 0", i, b.ID)
 		}
-		if b.PricePerUnit == 0 {
-			return fmt.Errorf("inference.backends[%d] (%s): price_per_unit must be > 0", i, b.ID)
+		if b.PricePerUnit == 0 && b.CostPerUnit == 0 {
+			return fmt.Errorf("inference.backends[%d] (%s): set price_per_unit or cost_per_unit", i, b.ID)
+		}
+		if b.PricePerUnit > 0 && b.CostPerUnit > 0 {
+			return fmt.Errorf("inference.backends[%d] (%s): price_per_unit and cost_per_unit are mutually exclusive", i, b.ID)
+		}
+		pricePerUnit := b.PricePerUnit
+		if b.CostPerUnit > 0 {
+			var err error
+			pricePerUnit, err = market.GrossPricePerUnit(b.CostPerUnit, b.MarkupBasisPoints, n.config.Consensus.FeeBasisPoints)
+			if err != nil {
+				return fmt.Errorf("inference.backends[%d] (%s): calculate loss-protected price: %w", i, b.ID, err)
+			}
 		}
 
 		// Build and install the backend first: a bad kind or a missing API key
@@ -2179,18 +2183,31 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 			return fmt.Errorf("inference.backends[%d] (%s): %w", i, b.ID, err)
 		}
 
-		// Only when absent, for the same reason the echo provider checks:
-		// RegisterProvider resets Available to Capacity, so re-registering on
-		// every restart would forget the capacity pending jobs already hold.
+		quoteTTL := b.QuoteTTL
+		if quoteTTL <= 0 {
+			quoteTTL = market.DefaultQuoteTTL
+		}
+		observedAt := time.Now().UTC()
+		quote := market.Provider{
+			ID:                b.ID,
+			Capacity:          b.Capacity,
+			PricePerUnit:      pricePerUnit,
+			CostPerUnit:       b.CostPerUnit,
+			MarkupBasisPoints: b.MarkupBasisPoints,
+			ObservedAt:        observedAt,
+			ValidUntil:        observedAt.Add(quoteTTL),
+			Models:            b.Models,
+		}
+		// A fresh provider gets capacity and quote together. An existing one keeps
+		// its live reservations but receives the newly observed config quote on
+		// every restart, fixing the old behavior where config price changes were
+		// silently ignored forever.
 		if _, exists := n.market.GetProvider(b.ID); !exists {
-			if err := n.market.RegisterProvider(market.Provider{
-				ID:           b.ID,
-				Capacity:     b.Capacity,
-				PricePerUnit: b.PricePerUnit,
-				Models:       b.Models,
-			}); err != nil {
+			if err := n.market.RegisterProvider(quote); err != nil {
 				return fmt.Errorf("inference.backends[%d] (%s): register on the market: %w", i, b.ID, err)
 			}
+		} else if err := n.market.UpdateProviderQuote(b.ID, quote); err != nil {
+			return fmt.Errorf("inference.backends[%d] (%s): refresh market quote: %w", i, b.ID, err)
 		}
 
 		stored, _ := n.market.GetProvider(b.ID)

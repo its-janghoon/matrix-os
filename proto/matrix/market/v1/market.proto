@@ -55,6 +55,20 @@ message Provider {
     // sorted. This is what a request naming a model is routed on; a
     // compute-only provider advertises none and is never selected by model.
     repeated string models = 7;
+    // Provider's manually observed upstream cost basis in native MATRIX base
+    // units. This is metadata only; price_per_unit is the final customer quote
+    // and must already include provider margin and protocol-fee gross-up.
+    uint64 cost_per_unit = 8;
+    // Provider markup in basis points recorded with cost_per_unit.
+    uint32 markup_basis_points = 9;
+    // Stable identity of this quote observation.
+    string quote_id = 10;
+    // Monotonically increasing quote revision for this provider.
+    uint64 quote_version = 11;
+    // When the provider observed the MATRIX-denominated quote inputs.
+    google.protobuf.Timestamp observed_at = 12;
+    // Exclusive expiry after which this quote is ineligible for new jobs.
+    google.protobuf.Timestamp valid_until = 13;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.
@@ -75,6 +89,16 @@ message Job {
     google.protobuf.Timestamp created_at = 7;
     // When the job's status last changed.
     google.protobuf.Timestamp updated_at = 8;
+    // Final per-unit price snapshotted when capacity was reserved.
+    uint64 price_per_unit = 9;
+    // Quote identity snapshotted when capacity was reserved.
+    string quote_id = 10;
+    // Quote revision snapshotted when capacity was reserved.
+    uint64 quote_version = 11;
+    // Provider quote observation time snapshotted at reservation.
+    google.protobuf.Timestamp quote_observed_at = 12;
+    // Provider quote expiry snapshotted at reservation.
+    google.protobuf.Timestamp quote_valid_until = 13;
 }
 
 // Transaction is a single value transfer that consensus committed, read back
@@ -124,11 +148,57 @@ message RegisterProviderRequest {
     // de-duplicated and sorted on registration. Omit for a compute-only
     // provider; a provider that serves no model is never selected by model.
     repeated string models = 4;
+    // Optional manually observed upstream cost basis in native MATRIX base
+    // units. This is metadata only: price_per_unit remains required and must
+    // already include provider margin plus protocol-fee gross-up. The API never
+    // derives a final price from this field; config-backed registration is the
+    // safe automatic gross-up path.
+    optional uint64 cost_per_unit = 5;
+    // Optional provider markup in basis points recorded as quote metadata.
+    optional uint32 markup_basis_points = 6;
+    // Optional quote identity. The market generates one when omitted.
+    string quote_id = 7;
+    // Optional quote revision. The market initializes it when omitted.
+    uint64 quote_version = 8;
+    // Optional observation time. The market uses the current time when omitted.
+    google.protobuf.Timestamp observed_at = 9;
+    // Optional exclusive expiry. The market applies its default TTL when omitted.
+    google.protobuf.Timestamp valid_until = 10;
 }
 
 // RegisterProviderResponse returns the registered provider record.
 message RegisterProviderResponse {
     // The registered provider, with available capacity initialized to capacity.
+    Provider provider = 1;
+}
+
+// UpdateProviderQuoteRequest replaces only an existing provider's economic
+// quote. Capacity, current availability, and advertised models are preserved.
+message UpdateProviderQuoteRequest {
+    // Existing provider ID whose quote is being refreshed.
+    string id = 1;
+    // Required final customer price in native MATRIX base units. It must already
+    // include provider margin and protocol-fee gross-up.
+    uint64 price_per_unit = 2;
+    // Optional manually observed MATRIX-denominated cost metadata. The server
+    // does not derive price_per_unit from it.
+    optional uint64 cost_per_unit = 3;
+    // Optional provider markup metadata in basis points.
+    optional uint32 markup_basis_points = 4;
+    // Optional quote identity. The market generates one when omitted.
+    string quote_id = 5;
+    // Optional quote revision. The market advances it when omitted or stale.
+    uint64 quote_version = 6;
+    // Optional observation time. The market uses the current time when omitted.
+    google.protobuf.Timestamp observed_at = 7;
+    // Optional exclusive expiry. The market applies its default TTL when omitted.
+    google.protobuf.Timestamp valid_until = 8;
+}
+
+// UpdateProviderQuoteResponse returns the refreshed provider while preserving
+// its capacity reservation and model advertisement.
+message UpdateProviderQuoteResponse {
+    // The provider after its quote was refreshed.
     Provider provider = 1;
 }
 
@@ -340,6 +410,35 @@ message FundAccountResponse {
     uint64 balance = 2;
 }
 
+// GetBridgeReadinessRequest asks a validator to prove that its live attestor
+// key is configured for the exact WrappedMatrix deployment the caller intends
+// to use. The caller supplies fresh entropy so a cached response cannot be
+// replayed as current readiness.
+message GetBridgeReadinessRequest {
+    // Exactly 32 random bytes generated by the caller.
+    bytes challenge = 1;
+}
+
+// GetBridgeReadinessResponse is a challenge-bound proof of this validator's
+// pre-lock deployment configuration. The signature is over a readiness-only
+// domain-separated digest containing every response field; it is never the
+// WrappedMatrix mint-attestation digest.
+message GetBridgeReadinessResponse {
+    // EVM chain id configured on this validator.
+    uint64 chain_id = 1;
+    // Normalized 0x-prefixed lowercase WrappedMatrix contract address.
+    string contract = 2;
+    // Normalized 0x-prefixed lowercase address recovered from this node's live
+    // secp256k1 attestor key.
+    string attestor = 3;
+    // Protocol minimum native lock amount in native base units.
+    uint64 min_lock_native = 4;
+    // Exact 32-byte challenge supplied by the caller.
+    bytes challenge = 5;
+    // Ethereum-style 65-byte r||s||v signature over the readiness digest.
+    bytes signature = 6;
+}
+
 // GetLockAttestationRequest asks a node to sign the mint authorization for a
 // lock the chain has already committed.
 message GetLockAttestationRequest {
@@ -421,6 +520,13 @@ service MarketService {
     // Side effects: persists the provider and updates provider-count metrics.
     rpc RegisterProvider(RegisterProviderRequest) returns (RegisterProviderResponse) {}
 
+    // UpdateProviderQuote refreshes an existing provider's final price and
+    // optional manually observed quote metadata. Input: provider ID, required
+    // final price, and optional cost/markup/identity/validity fields. Output: the
+    // updated provider. Side effects: persists only the economic quote; capacity,
+    // current availability, and models are preserved.
+    rpc UpdateProviderQuote(UpdateProviderQuoteRequest) returns (UpdateProviderQuoteResponse) {}
+
     // ListProviders enumerates providers. Input: whether to include remote P2P
     // providers. Output: providers flagged by origin (local vs. remote). No side
     // effects; remote entries are drawn from the P2P discovery registry.
@@ -487,6 +593,17 @@ service MarketService {
     // FailedPrecondition, and is gated behind the same auth as other
     // state-mutating RPCs.
     rpc FundAccount(FundAccountRequest) returns (FundAccountResponse) {}
+
+    // GetBridgeReadiness returns a fresh challenge-response proof that this
+    // node has both a configured bridge and a live secp256k1 attestor key bound
+    // to the reported chain and WrappedMatrix contract. The proof also signs
+    // the protocol minimum lock amount. Input: exactly 32 random challenge
+    // bytes. Output: the deployment fields, echoed challenge, and one 65-byte
+    // r||s||v signature over the readiness-only domain-separated digest. No
+    // side effects beyond signing; classified as a rate-limited public read
+    // when connect.public_reads is enabled. Returns FailedPrecondition without
+    // both bridge and key, and InvalidArgument for a malformed challenge.
+    rpc GetBridgeReadiness(GetBridgeReadinessRequest) returns (GetBridgeReadinessResponse) {}
 
     // GetBridgeReconciliation returns the lock-and-mint bridge backing snapshot:
     // the native MATRIX locked/unlocked/outstanding in escrow, the escrow

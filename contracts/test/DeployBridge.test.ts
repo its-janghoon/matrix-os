@@ -18,6 +18,7 @@ import { resolveAttestors } from "../scripts/deploy-bridge";
 describe("deploy-bridge.ts attestor guards", () => {
   const a = ethers.getAddress("0xad42459bdc6d4e2761461788239fcc995e42cce7");
   const b = ethers.getAddress("0x709fca731675b619cc24c284eeb5aef1d7527c77");
+  const c = ethers.getAddress("0x90f79bf6eb2c4f870365e785982e1f101e93b906");
   const local = [
     ethers.getAddress("0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"),
     ethers.getAddress("0x70997970c51812dc3a010c7d01b50e0d17dc79c8"),
@@ -55,6 +56,29 @@ describe("deploy-bridge.ts attestor guards", () => {
     const got = resolveAttestors("sepolia", [], 2, { ATTESTORS: `${a},${b}` });
     expect(got.attestors).to.deep.equal([a, b]);
     expect(got.singleAttestorWarning).to.equal(undefined);
+  });
+
+  it("rejects real-network 1-of-N and 2-of-3, but accepts 3-of-3", () => {
+    const attestors = `${a},${b},${c}`;
+    expect(() => resolveAttestors("baseSepolia", [], 1, { ATTESTORS: attestors })).to.throw(
+      /strictly greater than two thirds/
+    );
+    expect(() => resolveAttestors("baseSepolia", [], 2, { ATTESTORS: attestors })).to.throw(
+      /strictly greater than two thirds/
+    );
+    expect(resolveAttestors("baseSepolia", [], 3, { ATTESTORS: attestors }).attestors).to.deep.equal([
+      a,
+      b,
+      c,
+    ]);
+  });
+
+  it("never allows a production 1-of-1, even with the testnet override", () => {
+    for (const production of ["mainnet", "base"]) {
+      expect(() =>
+        resolveAttestors(production, [], 1, { ATTESTORS: a, ALLOW_SINGLE_ATTESTOR: "1" })
+      ).to.throw(/fewer than two attestors/);
+    }
   });
 
   /**

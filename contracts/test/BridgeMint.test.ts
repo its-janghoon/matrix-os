@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import { ethers } from "hardhat";
-import { parseAttestations, orderSignatures } from "../scripts/bridge-mint";
+import { mintAttestations, parseAttestations, orderSignatures } from "../scripts/bridge-mint";
 
 /**
  * Guards on the mint script.
@@ -54,6 +54,31 @@ describe("bridge-mint.ts attestation guards", () => {
 
   it("refuses an empty set rather than sending a mint with no signatures", () => {
     expect(() => parseAttestations("[]")).to.throw(/empty/);
+  });
+
+  it("mints the validated snapshot without rereading the attestation path", async () => {
+    const attestor = ethers.Wallet.createRandom();
+    const Wrapped = await ethers.getContractFactory("WrappedMatrix");
+    const token = await Wrapped.deploy([attestor.address], 1, BigInt(AMOUNT));
+    await token.waitForDeployment();
+    const digest = await token.attestationDigest(RECIPIENT, BigInt(AMOUNT), LOCK);
+    const signature = ethers.Signature.from(attestor.signingKey.sign(digest)).serialized;
+    const snapshot = parseAttestations(JSON.stringify([att({ signature })]));
+
+    const previousContract = process.env.CONTRACT;
+    const previousAttestations = process.env.ATTESTATIONS;
+    process.env.CONTRACT = await token.getAddress();
+    process.env.ATTESTATIONS = "/path/replaced-after-founder-preflight.json";
+    try {
+      await mintAttestations(snapshot);
+    } finally {
+      if (previousContract === undefined) delete process.env.CONTRACT;
+      else process.env.CONTRACT = previousContract;
+      if (previousAttestations === undefined) delete process.env.ATTESTATIONS;
+      else process.env.ATTESTATIONS = previousAttestations;
+    }
+
+    expect(await token.balanceOf(RECIPIENT)).to.equal(BigInt(AMOUNT));
   });
 
   /**

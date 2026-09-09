@@ -291,7 +291,7 @@ func TestDecodeBurnedLog_DrivesProcessBurn(t *testing.T) {
 	if err := treasury.ApplyGenesis(nil, token.NativeMaxSupply); err != nil {
 		t.Fatalf("ApplyGenesis: %v", err)
 	}
-	const lockAmount = 1000
+	const lockAmount = token.MinBridgeLockAmount
 	if err := treasury.FundFromRewardPool(userID, lockAmount); err != nil {
 		t.Fatalf("FundFromRewardPool: %v", err)
 	}
@@ -307,7 +307,7 @@ func TestDecodeBurnedLog_DrivesProcessBurn(t *testing.T) {
 	}
 
 	// A burn on Ethereum releases part of the escrow back to the native user.
-	const unlockNative = 400
+	const unlockNative = token.MinBridgeLockAmount / 4
 	burnAmountERC20 := token.NativeToERC20(unlockNative)
 	log := EthLog{
 		Topics:   [][wordLen]byte{BurnedEventTopic(), addrTopic(recipientEth)},

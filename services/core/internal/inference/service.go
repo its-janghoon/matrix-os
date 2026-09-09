@@ -351,11 +351,6 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 		s.failJob(jobID)
 		return nil, fmt.Errorf("%w: market job %q", market.ErrJobNotFound, marketJobID)
 	}
-	prov, ok := s.market.GetProvider(provider)
-	if !ok {
-		s.failJob(jobID)
-		return nil, fmt.Errorf("%w: %q", market.ErrProviderNotFound, provider)
-	}
 
 	billableUnits := resp.Units
 	if billableUnits > mjob.Units {
@@ -363,7 +358,11 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 		// the buyer is never charged more than it agreed to and was checked for.
 		billableUnits = mjob.Units
 	}
-	amount := billableUnits * prov.PricePerUnit
+	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
+	if err != nil {
+		s.failJob(jobID)
+		return nil, fmt.Errorf("inference: price job %q from quote %s/%d: %w", jobID, mjob.QuoteID, mjob.QuoteVersion, err)
+	}
 	// Defensive re-check: the charge must not exceed the reserved, affordability-
 	// checked price. Clamping units to the estimate guarantees this, but assert it
 	// so a future pricing change cannot silently reintroduce an over-charge.

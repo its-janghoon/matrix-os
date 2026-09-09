@@ -1,29 +1,21 @@
-/**
- * MetaMask as the wallet for a native account.
- *
- * A native account is normally an ed25519 keypair, which MetaMask cannot sign
- * for. So the node accepts a second kind of account - `eth:0x<address>` -
- * verified by recovering an Ethereum signature over EIP-712 typed data. This
- * file is the browser end of that: connect, read the address, and sign the two
- * payloads.
- *
- * WHY THIS IS WORTH THE SECOND ACCOUNT KIND: the alternative is a user holding
- * MetaMask for wMATRIX on Ethereum and something of ours for native MATRIX, and
- * being told those are the same money.
- *
- * A note on what the user sees. EIP-712 is not just a signing format, it is the
- * reason MetaMask can show "Transfer: 26 to gpu-1" instead of a hex blob. That
- * is most of the value: a wallet prompt nobody can read is a wallet prompt
- * everybody approves.
- */
+/** MetaMask signer for Matrix-native EIP-712 operations and Base wallet access. */
 
+import { getAddress, type Address } from 'viem';
+import type { BridgeChain } from '@/lib/bridge/config';
 import { EIP712_DOMAIN, RUN_AUTHORIZATION_TYPES, TRANSFER_TYPES, bytes32, fromHex, toHex } from './eip712';
 import { messagesDigest } from './signing';
 import type { Message, PaymentFields, PaymentSignature, RunAuthorization, Signer } from './signer';
 
-/** The subset of EIP-1193 this needs. */
-interface Eip1193Provider {
-  request(args: { method: string; params?: unknown[] }): Promise<unknown>;
+export interface Eip1193RequestArguments {
+  method: string;
+  params?: readonly unknown[] | object;
+}
+
+/** Browser-wallet boundary shared by native EIP-712 and viem's custom transport. */
+export interface Eip1193Provider {
+  request(args: Eip1193RequestArguments): Promise<unknown>;
+  on?(event: 'accountsChanged' | 'chainChanged', listener: (...args: unknown[]) => void): void;
+  removeListener?(event: 'accountsChanged' | 'chainChanged', listener: (...args: unknown[]) => void): void;
 }
 
 declare global {
@@ -32,47 +24,118 @@ declare global {
   }
 }
 
-/** True when a browser wallet is injected on this page. */
+export interface EvmSigner extends Signer {
+  readonly kind: 'metamask';
+  readonly address: Address;
+  readonly provider: Eip1193Provider;
+  getChainId(): Promise<number>;
+  switchChain(chain: BridgeChain): Promise<void>;
+  subscribe(listener: (change: { address?: Address | null; chainId?: number }) => void): () => void;
+}
+
 export function metamaskAvailable(): boolean {
   return typeof window !== 'undefined' && typeof window.ethereum !== 'undefined';
 }
 
-/** The native account id an Ethereum address controls. Must match
- * token.EthAccountID on the node, including the lowercasing. */
 export function ethAccountID(address: string): string {
-  return 'eth:' + address.toLowerCase();
+  return 'eth:' + getAddress(address).toLowerCase();
 }
 
-/**
- * Connects, prompting the user to choose an account, and returns a signer.
- *
- * `eth_requestAccounts` is what shows the connect prompt; `eth_accounts` would
- * silently return nothing when the site is not yet authorised, which looks to a
- * user like a broken button.
- */
-export async function connectMetamask(): Promise<Signer> {
-  if (!metamaskAvailable()) {
-    throw new Error('no browser wallet is installed on this page');
+export async function requestEvmAccounts(provider: Eip1193Provider): Promise<Address[]> {
+  const accounts = await provider.request({ method: 'eth_requestAccounts' });
+  if (!Array.isArray(accounts)) throw new Error('the wallet returned an invalid account list');
+  return accounts.map((account) => {
+    if (typeof account !== 'string') throw new Error('the wallet returned an invalid account');
+    return getAddress(account);
+  });
+}
+
+export async function getEvmChainId(provider: Eip1193Provider): Promise<number> {
+  const value = await provider.request({ method: 'eth_chainId' });
+  if (typeof value !== 'string' || !/^0x[0-9a-f]+$/i.test(value)) {
+    throw new Error('the wallet returned an invalid chain id');
   }
+  return Number(BigInt(value));
+}
+
+function errorCode(error: unknown): number | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const direct = (error as { code?: unknown }).code;
+  if (typeof direct === 'number') return direct;
+  const nested = (error as { data?: { originalError?: { code?: unknown } } }).data?.originalError?.code;
+  return typeof nested === 'number' ? nested : undefined;
+}
+
+/** Switch to Base/Base Sepolia, adding the standard chain metadata only after 4902. */
+export async function switchEvmChain(provider: Eip1193Provider, chain: BridgeChain): Promise<void> {
+  const chainId = `0x${chain.id.toString(16)}`;
+  try {
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId }] });
+  } catch (error) {
+    if (errorCode(error) !== 4902) throw error;
+    await provider.request({
+      method: 'wallet_addEthereumChain',
+      params: [{
+        chainId,
+        chainName: chain.name,
+        nativeCurrency: chain.nativeCurrency,
+        rpcUrls: [...chain.rpcUrls],
+        blockExplorerUrls: [chain.explorerUrl],
+      }],
+    });
+    // Some wallets add without selecting it.
+    await provider.request({ method: 'wallet_switchEthereumChain', params: [{ chainId }] });
+  }
+  const selected = await getEvmChainId(provider);
+  if (selected !== chain.id) throw new Error(`wallet remained on chain ${selected}; expected ${chain.id}`);
+}
+
+export async function connectMetamask(): Promise<EvmSigner> {
+  if (!metamaskAvailable()) throw new Error('no browser wallet is installed on this page');
   const provider = window.ethereum as Eip1193Provider;
-
-  const accounts = (await provider.request({ method: 'eth_requestAccounts' })) as string[];
-  const address = accounts?.[0];
-  if (!address) {
-    throw new Error('the wallet returned no account');
-  }
-  return new MetamaskSigner(provider, address);
+  const accounts = await requestEvmAccounts(provider);
+  if (!accounts[0]) throw new Error('the wallet returned no account');
+  return new MetamaskSigner(provider, accounts[0]);
 }
 
-class MetamaskSigner implements Signer {
+export class MetamaskSigner implements EvmSigner {
   readonly kind = 'metamask' as const;
   readonly accountId: string;
+  readonly address: Address;
 
   constructor(
-    private readonly provider: Eip1193Provider,
-    private readonly address: string,
+    readonly provider: Eip1193Provider,
+    address: string,
   ) {
-    this.accountId = ethAccountID(address);
+    this.address = getAddress(address);
+    this.accountId = ethAccountID(this.address);
+  }
+
+  getChainId(): Promise<number> {
+    return getEvmChainId(this.provider);
+  }
+
+  switchChain(chain: BridgeChain): Promise<void> {
+    return switchEvmChain(this.provider, chain);
+  }
+
+  subscribe(listener: (change: { address?: Address | null; chainId?: number }) => void): () => void {
+    const accountsChanged = (value: unknown) => {
+      const accounts = Array.isArray(value) ? value : [];
+      const first = accounts[0];
+      listener({ address: typeof first === 'string' ? getAddress(first) : null });
+    };
+    const chainChanged = (value: unknown) => {
+      if (typeof value === 'string' && /^0x[0-9a-f]+$/i.test(value)) {
+        listener({ chainId: Number(BigInt(value)) });
+      }
+    };
+    this.provider.on?.('accountsChanged', accountsChanged);
+    this.provider.on?.('chainChanged', chainChanged);
+    return () => {
+      this.provider.removeListener?.('accountsChanged', accountsChanged);
+      this.provider.removeListener?.('chainChanged', chainChanged);
+    };
   }
 
   async signRunAuthorization(input: {
@@ -90,8 +153,6 @@ class MetamaskSigner implements Signer {
       timestamp: input.timestamp.toString(),
     });
     return {
-      // The node reads a 20-byte "public key" as an address; that length IS the
-      // discriminator between the two account kinds.
       publicKey: fromHex(this.address),
       timestamp: input.timestamp,
       signature,
@@ -110,11 +171,6 @@ class MetamaskSigner implements Signer {
     return { fromPublicKey: fromHex(this.address), signature };
   }
 
-  /**
-   * eth_signTypedData_v4 takes the whole payload as a JSON STRING, with the
-   * domain types spelled out in `types`. Passing an object, or omitting
-   * EIP712Domain, is rejected by some wallets and silently mis-hashed by others.
-   */
   private async signTypedData(types: object, message: Record<string, string>): Promise<Uint8Array> {
     const payload = JSON.stringify({
       domain: EIP712_DOMAIN,
@@ -130,11 +186,11 @@ class MetamaskSigner implements Signer {
       message,
     });
 
-    const signature = (await this.provider.request({
+    const signature = await this.provider.request({
       method: 'eth_signTypedData_v4',
       params: [this.address, payload],
-    })) as string;
-
+    });
+    if (typeof signature !== 'string') throw new Error('the wallet returned an invalid signature');
     const bytes = fromHex(signature);
     if (bytes.length !== 65) {
       throw new Error(`the wallet returned a ${bytes.length}-byte signature, expected 65`);
@@ -143,5 +199,4 @@ class MetamaskSigner implements Signer {
   }
 }
 
-/** Exported for the tests, which check the payload a wallet is handed. */
 export const _internal = { toHex };

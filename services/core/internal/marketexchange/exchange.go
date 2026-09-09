@@ -32,9 +32,11 @@ type Transport interface {
 	Publish(ctx context.Context, topic string, data []byte) error
 }
 
-// RemoteProvider is a provider discovered from a received announcement, together
-// with the local time the announcement was received (ReceivedAt) so the registry
-// can age out stale entries.
+// RemoteProvider is a provider discovered from a received announcement. The
+// embedded market.Provider preserves the complete signed quote (CostPerUnit,
+// MarkupBasisPoints, QuoteID, QuoteVersion, ObservedAt, and ValidUntil) alongside
+// capacity and model data. ReceivedAt is local receipt time and controls gossip
+// liveness independently from the quote's ValidUntil.
 type RemoteProvider struct {
 	market.Provider
 	PublicKey  ed25519.PublicKey
@@ -64,9 +66,10 @@ type RemoteProvider struct {
 // the transport closes on ctx cancellation, so cancelling the node context stops
 // the Exchange cleanly with no separate stop signal required.
 type Exchange struct {
-	transport Transport
-	settled   *token.SettledLedger
-	peerID    string
+	transport   Transport
+	settled     *token.SettledLedger
+	localMarket *market.Market
+	peerID      string
 
 	// providerTTL bounds how long a remote provider stays discoverable after its
 	// last announcement.
@@ -88,6 +91,10 @@ type Config struct {
 	// Settled is the signed-settlement entrypoint into the local ledger and token
 	// chain (required). Received settlements are applied through it.
 	Settled *token.SettledLedger
+	// Market owns local providers and durable jobs. When set, valid requests
+	// addressed to a local provider are conditionally reserved against their
+	// exact signed quote snapshot. Observer-only exchanges may leave it nil.
+	Market *market.Market
 	// PeerID is this node's libp2p peer ID string, embedded in outgoing
 	// announcements so remote buyers know where to reach the provider.
 	PeerID string
@@ -117,6 +124,7 @@ func New(cfg Config) (*Exchange, error) {
 	return &Exchange{
 		transport:   cfg.Transport,
 		settled:     cfg.Settled,
+		localMarket: cfg.Market,
 		peerID:      cfg.PeerID,
 		providerTTL: ttl,
 		now:         nowFn,
@@ -197,42 +205,88 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 	if err := json.Unmarshal(msg.Payload, &ann); err != nil {
 		return
 	}
-	if err := ann.Verify(); err != nil {
+	now := e.now().UTC()
+	if err := ann.VerifyAt(now); err != nil {
 		return
 	}
 	e.mu.Lock()
+	if existing, ok := e.providers[ann.ProviderID]; ok {
+		if ann.QuoteVersion < existing.QuoteVersion {
+			e.mu.Unlock()
+			return
+		}
+		if ann.QuoteVersion == existing.QuoteVersion && !sameEconomicQuote(existing.Provider, ann) {
+			e.mu.Unlock()
+			return
+		}
+	}
 	e.providers[ann.ProviderID] = RemoteProvider{
 		Provider: market.Provider{
-			ID:           ann.ProviderID,
-			Capacity:     ann.Capacity,
-			PricePerUnit: ann.PricePerUnit,
-			Available:    ann.Available,
-			Models:       ann.Models,
+			ID:                ann.ProviderID,
+			Capacity:          ann.Capacity,
+			PricePerUnit:      ann.PricePerUnit,
+			CostPerUnit:       ann.CostPerUnit,
+			MarkupBasisPoints: ann.MarkupBasisPoints,
+			QuoteID:           ann.QuoteID,
+			QuoteVersion:      ann.QuoteVersion,
+			ObservedAt:        ann.ObservedAt.UTC(),
+			ValidUntil:        ann.ValidUntil.UTC(),
+			Available:         ann.Available,
+			Models:            ann.Models,
 		},
 		PublicKey:  ann.PublicKey,
 		PeerID:     ann.PeerID,
-		ReceivedAt: e.now(),
+		ReceivedAt: now,
 	}
 	e.mu.Unlock()
 }
 
-// handleJobRequest decodes and verifies a JobRequest. Verified requests are
-// accepted (a provider node would act on them); invalid ones are dropped. The
-// hook exists so the settlement path and future scheduling can build on verified
-// requests; today it validates and records nothing beyond the verification gate,
-// keeping the wire contract enforced end to end.
+// sameEconomicQuote reports whether an equal-version announcement preserves
+// the existing signed economic terms. Equal versions may refresh liveness,
+// capacity, availability, peer, and models, but changing price identity or
+// validity requires a strictly newer QuoteVersion.
+func sameEconomicQuote(existing market.Provider, incoming ProviderAnnouncement) bool {
+	return existing.PricePerUnit == incoming.PricePerUnit &&
+		existing.CostPerUnit == incoming.CostPerUnit &&
+		existing.MarkupBasisPoints == incoming.MarkupBasisPoints &&
+		existing.QuoteID == incoming.QuoteID &&
+		existing.ObservedAt.Equal(incoming.ObservedAt) &&
+		existing.ValidUntil.Equal(incoming.ValidUntil)
+}
+
+// handleJobRequest verifies a v2 request at receipt time and attempts one
+// durable conditional reservation. Gossip is best-effort, so rejection remains
+// silent here; acceptJobRequest is the synchronous form used by tests and future
+// request/receipt transports.
 func (e *Exchange) handleJobRequest(msg transport.Message) {
 	var req JobRequest
 	if err := json.Unmarshal(msg.Payload, &req); err != nil {
 		return
 	}
-	if err := req.Verify(); err != nil {
-		return
+	_, _ = e.acceptJobRequest(&req)
+}
+
+// acceptJobRequest rejects expired, refreshed, mismatched, unaffordable, or
+// over-capacity requests and persists the exact accepted quote snapshot for a
+// valid local provider request. Quote refresh and reservation are serialized by
+// Market, closing the check-then-reserve race.
+func (e *Exchange) acceptJobRequest(req *JobRequest) (*market.Job, error) {
+	now := e.now().UTC()
+	if err := req.VerifyAt(now); err != nil {
+		return nil, err
 	}
-	// A verified request is addressed to a specific provider. Only the targeted
-	// provider would fulfil it; other nodes ignore it. We record nothing here
-	// because job bookkeeping happens on settlement, but the verification gate
-	// guarantees no unsigned/forged request is ever acted upon.
+	if e.localMarket == nil {
+		return nil, fmt.Errorf("marketexchange: no local market configured")
+	}
+	return e.localMarket.ReserveRemoteJob(
+		req.BuyerID,
+		req.Provider,
+		req.Units,
+		req.Nonce,
+		req.Digest(),
+		req.AcceptedQuote(),
+		now,
+	)
 }
 
 // handleSettlement decodes and verifies a Settlement and, if valid, attempts to
@@ -272,26 +326,36 @@ func (e *Exchange) ApplySettlement(st *Settlement) (*token.Record, error) {
 	return e.settled.Settle(&tx)
 }
 
-// AnnounceProvider signs a ProviderAnnouncement for acct advertising p's
-// capacity/pricing and publishes it on the announce topic. The announcement is
-// stamped with the current time and this node's peer ID so remote buyers can age
-// it out and know where to reach the provider.
+// AnnounceProvider signs a v2 ProviderAnnouncement for acct advertising p's
+// complete economic quote and capacity, then publishes it on TopicAnnounce. The
+// announcement timestamp uses the current UTC clock; quote observation and
+// validity come from p and must already satisfy the market quote policy.
 func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p market.Provider) error {
 	if acct == nil {
 		return fmt.Errorf("marketexchange: account is required to announce")
 	}
+	now := e.now().UTC()
 	ann := ProviderAnnouncement{
-		ProviderID:   acct.AccountID(),
-		PublicKey:    acct.PublicKey,
-		Capacity:     p.Capacity,
-		PricePerUnit: p.PricePerUnit,
-		Available:    p.Available,
-		Models:       p.Models,
-		PeerID:       e.peerID,
-		Timestamp:    e.now().UnixNano(),
+		ProviderID:        acct.AccountID(),
+		PublicKey:         acct.PublicKey,
+		Capacity:          p.Capacity,
+		PricePerUnit:      p.PricePerUnit,
+		CostPerUnit:       p.CostPerUnit,
+		MarkupBasisPoints: p.MarkupBasisPoints,
+		QuoteID:           p.QuoteID,
+		QuoteVersion:      p.QuoteVersion,
+		ObservedAt:        p.ObservedAt.UTC(),
+		ValidUntil:        p.ValidUntil.UTC(),
+		Available:         p.Available,
+		Models:            p.Models,
+		PeerID:            e.peerID,
+		Timestamp:         now.UnixNano(),
 	}
 	if err := ann.Sign(acct.PrivateKey); err != nil {
 		return err
+	}
+	if err := ann.VerifyAt(now); err != nil {
+		return fmt.Errorf("marketexchange: invalid provider announcement: %w", err)
 	}
 	data, err := json.Marshal(&ann)
 	if err != nil {
@@ -303,27 +367,46 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p 
 	return nil
 }
 
-// SubmitRemoteJob discovers the target provider in the registry, then signs and
-// publishes a JobRequest from buyer for the requested units. It returns
-// ErrProviderNotFound if the provider is unknown or has aged out, so a buyer
-// cannot submit into the void.
+// SubmitRemoteJob discovers one complete remote-provider snapshot, signs every
+// accepted v2 quote term plus the exact fixed Total, and publishes it. A quote
+// that expires between lookup and signing is rejected locally; a provider quote
+// refresh after publication is rejected atomically on receipt.
 func (e *Exchange) SubmitRemoteJob(ctx context.Context, buyer *token.Account, providerID string, units uint64, nonce uint64) (*JobRequest, error) {
 	if buyer == nil {
 		return nil, fmt.Errorf("marketexchange: buyer account is required")
 	}
-	if _, ok := e.LookupRemoteProvider(providerID); !ok {
+	rp, ok := e.LookupRemoteProvider(providerID)
+	if !ok {
 		return nil, fmt.Errorf("marketexchange: remote provider %q: %w", providerID, market.ErrProviderNotFound)
 	}
+	if units == 0 || rp.Available < units {
+		return nil, fmt.Errorf("marketexchange: remote provider %q has %d units available, need %d: %w",
+			providerID, rp.Available, units, market.ErrInsufficientCapacity)
+	}
+	total, err := market.CheckedMul(units, rp.PricePerUnit)
+	if err != nil {
+		return nil, fmt.Errorf("marketexchange: price remote job: %w", err)
+	}
+	now := e.now().UTC()
 	req := JobRequest{
-		BuyerID:   buyer.AccountID(),
-		PublicKey: buyer.PublicKey,
-		Provider:  providerID,
-		Units:     units,
-		Nonce:     nonce,
-		Timestamp: e.now().UnixNano(),
+		BuyerID:         buyer.AccountID(),
+		PublicKey:       buyer.PublicKey,
+		Provider:        providerID,
+		Units:           units,
+		PricePerUnit:    rp.PricePerUnit,
+		QuoteID:         rp.QuoteID,
+		QuoteVersion:    rp.QuoteVersion,
+		QuoteObservedAt: rp.ObservedAt.UTC(),
+		QuoteValidUntil: rp.ValidUntil.UTC(),
+		Total:           total,
+		Nonce:           nonce,
+		Timestamp:       now.UnixNano(),
 	}
 	if err := req.Sign(buyer.PrivateKey); err != nil {
 		return nil, err
+	}
+	if err := req.VerifyAt(now); err != nil {
+		return nil, fmt.Errorf("marketexchange: invalid remote job request: %w", err)
 	}
 	data, err := json.Marshal(&req)
 	if err != nil {
@@ -359,8 +442,9 @@ func (e *Exchange) PublishSettlement(ctx context.Context, st *Settlement) error 
 	return nil
 }
 
-// LookupRemoteProvider returns a single non-stale remote provider by ID. A
-// provider whose last announcement is older than the TTL is treated as absent.
+// LookupRemoteProvider returns a remote provider only while both independent
+// freshness conditions hold: its announcement receipt is within providerTTL and
+// its signed economic quote remains valid.
 func (e *Exchange) LookupRemoteProvider(id string) (RemoteProvider, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
@@ -368,23 +452,24 @@ func (e *Exchange) LookupRemoteProvider(id string) (RemoteProvider, bool) {
 	if !ok {
 		return RemoteProvider{}, false
 	}
-	if e.isStale(rp) {
+	if e.isUnavailableAt(rp, e.now().UTC()) {
 		return RemoteProvider{}, false
 	}
 	return rp, true
 }
 
-// ListRemoteProviders returns all currently-known, non-stale remote providers
-// sorted by ID, so buyers and the gRPC API can enumerate cross-network capacity.
-// Stale entries are both filtered from the result and pruned from the registry
-// so it does not grow unbounded with departed providers.
+// ListRemoteProviders returns all remotely announced providers whose receipt
+// TTL and quote validity are both current, sorted by ID. Unavailable entries are
+// filtered and pruned so expired quotes cannot reach listing or model-routing
+// callers and departed providers do not accumulate in the registry.
 func (e *Exchange) ListRemoteProviders() []RemoteProvider {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	now := e.now().UTC()
 	out := make([]RemoteProvider, 0, len(e.providers))
 	for id, rp := range e.providers {
-		if e.isStale(rp) {
+		if e.isUnavailableAt(rp, now) {
 			delete(e.providers, id)
 			continue
 		}
@@ -394,8 +479,11 @@ func (e *Exchange) ListRemoteProviders() []RemoteProvider {
 	return out
 }
 
-// isStale reports whether rp's last announcement is older than the TTL. Callers
-// must hold e.mu (read or write).
-func (e *Exchange) isStale(rp RemoteProvider) bool {
-	return e.now().Sub(rp.ReceivedAt) > e.providerTTL
+// isUnavailableAt keeps gossip liveness and economic validity as separate
+// checks. Receipt TTL is measured from the local ReceivedAt clock; quote expiry
+// is measured from the provider-signed ValidUntil instant.
+func (e *Exchange) isUnavailableAt(rp RemoteProvider, now time.Time) bool {
+	receiptStale := now.Sub(rp.ReceivedAt) > e.providerTTL
+	quoteExpired := rp.ValidUntil.IsZero() || !rp.ValidUntil.After(now)
+	return receiptStale || quoteExpired
 }

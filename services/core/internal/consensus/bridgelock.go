@@ -144,15 +144,29 @@ func DeriveLockID(nonce uint64, from string, recipient [20]byte, amount uint64) 
 	return out
 }
 
+// verifyBridgeLockAmount enforces the protocol-wide launch anti-dust floor.
+// Keeping it separate from recipient parsing lets both block verification and
+// permanent-invalid mempool admission apply exactly the same boundary.
+func verifyBridgeLockAmount(amount uint64) error {
+	if amount == 0 {
+		return fmt.Errorf("%w: a bridge lock of zero would mint nothing and still consume a "+
+			"lock id", ErrInvalidMessage)
+	}
+	if amount < token.MinBridgeLockAmount {
+		return fmt.Errorf("%w: bridge lock amount %d is below the minimum %d native base units",
+			ErrInvalidMessage, amount, token.MinBridgeLockAmount)
+	}
+	return nil
+}
+
 // verifyBridgeLockLocked decides whether a lock may enter a block. Everything it
 // checks is committed state or the transaction itself, so every node agrees.
 func (e *Engine) verifyBridgeLockLocked(tx *token.Transaction) error {
 	if _, err := ParseBridgeLock(tx.To); err != nil {
 		return err
 	}
-	if tx.Amount == 0 {
-		return fmt.Errorf("%w: a bridge lock of zero would mint nothing and still consume a "+
-			"lock id", ErrInvalidMessage)
+	if err := verifyBridgeLockAmount(tx.Amount); err != nil {
+		return err
 	}
 	// Affordability is NOT checked here. It is checked at apply time against the
 	// balance every node agrees on, the same way an ordinary transfer is: a lock

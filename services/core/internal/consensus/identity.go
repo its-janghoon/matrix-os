@@ -62,15 +62,16 @@ func LoadOrCreateValidatorAccount(store *kv.Store) (*token.Account, error) {
 	return acct, nil
 }
 
-// ValidatorSetFromConfig builds the fixed validator set from a list of
-// hex-encoded validator account IDs (public keys) plus this node's own public
-// key (self), so a node is always a member of its own validator set. Duplicate
-// keys are collapsed by NewValidatorSet. When ids is empty the set is just self,
-// which yields a functioning single-validator consensus (quorum 1) suitable for
-// a solo/dev node. Every node given the same ids derives the identical set and
-// leader schedule.
+// ValidatorSetFromConfig builds the genesis validator set. An explicit list is
+// authoritative: a passive follower or bonded-open candidate must not silently
+// add its own key, because doing so changes the leader schedule and makes it
+// unable to replay the network's history. Only an empty list creates the
+// convenient single-validator solo/dev set containing self.
 func ValidatorSetFromConfig(self ed25519.PublicKey, ids []string) (*ValidatorSet, error) {
-	keys := []ed25519.PublicKey{self}
+	if len(ids) == 0 {
+		return NewValidatorSet([]ed25519.PublicKey{self})
+	}
+	keys := make([]ed25519.PublicKey, 0, len(ids))
 	for _, id := range ids {
 		if id == "" {
 			continue

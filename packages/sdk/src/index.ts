@@ -95,6 +95,16 @@ export interface Provider {
   capacity: bigint;
   /** Price in native MATRIX base units per unit of compute. */
   pricePerUnit: bigint;
+  /** Manually observed MATRIX-denominated upstream cost metadata. */
+  costPerUnit: bigint;
+  /** Provider markup recorded with the quote, in basis points. */
+  markupBasisPoints: number;
+  /** Stable quote identity and monotonically increasing revision. */
+  quoteId: string;
+  quoteVersion: bigint;
+  /** RFC 3339 quote observation and exclusive expiry times. */
+  observedAt: string;
+  validUntil: string;
   /** Units not currently reserved by a job. */
   available: bigint;
   origin: ProviderOrigin;
@@ -106,6 +116,20 @@ export interface Provider {
    * advertises none and is reachable only by naming its id.
    */
   models: string[];
+}
+
+/** A final provider quote plus optional manually observed audit metadata. */
+export interface ProviderQuoteInput {
+  /** Final customer price; callers must include margin and protocol-fee gross-up. */
+  pricePerUnit: bigint | number;
+  /** Manual MATRIX-denominated upstream cost metadata; never auto-converted by the API. */
+  costPerUnit?: bigint | number;
+  markupBasisPoints?: number;
+  quoteId?: string;
+  quoteVersion?: bigint | number;
+  /** RFC 3339 timestamps. Omitted values are normalized by the market. */
+  observedAt?: string;
+  validUntil?: string;
 }
 
 /**
@@ -167,6 +191,13 @@ export interface Job {
   units: bigint;
   /** units * pricePerUnit, fixed when the job was submitted. */
   price: bigint;
+  /** Final per-unit price and quote identity snapshotted at reservation. */
+  pricePerUnit: bigint;
+  quoteId: string;
+  quoteVersion: bigint;
+  /** RFC 3339 quote observation and expiry snapshots. */
+  quoteObservedAt: string;
+  quoteValidUntil: string;
   status: JobStatus;
   /** RFC 3339. */
   createdAt: string;
@@ -196,6 +227,19 @@ export interface Transaction {
   timestamp: string;
 }
 
+/** The caller-signed fields accepted by SubmitSignedTransfer. */
+export interface SignedTransferInput {
+  /** 32-byte ed25519 public key, or raw 20-byte EVM sender address. */
+  fromPublicKey: Uint8Array;
+  to: string;
+  amount: bigint | number;
+  nonce: bigint | number;
+  prevHash: Uint8Array;
+  /** 64-byte ed25519 signature or 65-byte recoverable EVM signature, as applicable. */
+  signature: Uint8Array;
+  timestamp?: bigint | number;
+}
+
 /** The outcome of settling a signed transfer through consensus. */
 export interface SettledTransfer {
   /** The settled transfer, with its committed index and block height. */
@@ -206,9 +250,38 @@ export interface SettledTransfer {
   applied: boolean;
 }
 
+/** Caller-signed native-to-Base lock. The SDK never creates or holds a private key. */
+export interface SubmitBridgeLockInput {
+  /** Exact native sender account id used by consensus in the lock-id hash. */
+  sender: string;
+  /** 32-byte ed25519 public key or raw 20-byte EVM address matching sender. */
+  fromPublicKey: Uint8Array;
+  /** Base/EVM address that will receive wrapped MATRIX. */
+  recipient: string;
+  nativeAmount: bigint | number;
+  nonce: bigint | number;
+  prevHash: Uint8Array;
+  signature: Uint8Array;
+  timestamp?: bigint | number;
+}
+
+export interface SubmitBridgeLockResult {
+  lockId: string;
+  settlement: SettledTransfer;
+}
+
 export interface Balance {
   account: string;
   balance: bigint;
+}
+
+export interface BridgeReadiness {
+  chainId: bigint;
+  contract: string;
+  attestor: string;
+  minLockNative: bigint;
+  challenge: Uint8Array;
+  signature: Uint8Array;
 }
 
 /**
@@ -276,6 +349,115 @@ export function bridgeLockRecipient(ethAddress: string): string {
   return `bridge/lock/${raw.toLowerCase()}`;
 }
 
+/** Native base units in one whole MATRIX (9 native decimals). */
+export const NativeUnit = 1_000_000_000n;
+
+/** ERC-20 base units represented by one native base unit (18 - 9 decimals). */
+export const ERC20PerNativeUnit = 1_000_000_000n;
+
+/** Launch anti-dust floor: exactly 100 whole MATRIX in native base units. */
+export const MinBridgeLockAmount = 100n * NativeUnit;
+
+const UINT64_MAX = (1n << 64n) - 1n;
+
+function uint64(value: bigint | number, field: string): bigint {
+  if (typeof value === 'number') {
+    if (!Number.isSafeInteger(value)) {
+      throw new RangeError(`${field} must be a safe integer or bigint uint64`);
+    }
+    value = BigInt(value);
+  }
+  if (value < 0n || value > UINT64_MAX) {
+    throw new RangeError(`${field} must be a uint64 between 0 and 2^64-1`);
+  }
+  return value;
+}
+
+/** Validate the consensus bridge-lock floor and return an exact bigint amount. */
+export function validateBridgeLockAmount(value: bigint | number): bigint {
+  const amount = uint64(value, 'nativeAmount');
+  if (amount < MinBridgeLockAmount) {
+    throw new RangeError(`nativeAmount must be at least ${MinBridgeLockAmount} native base units`);
+  }
+  return amount;
+}
+
+function nonNegativeInteger(value: bigint | number | string, field: string): bigint {
+  if (typeof value === 'number' && !Number.isSafeInteger(value)) {
+    throw new RangeError(`${field} must be a safe integer, bigint, or decimal integer string`);
+  }
+  if (typeof value === 'string' && !/^(0|[1-9][0-9]*)$/.test(value)) {
+    throw new TypeError(`${field} must be a non-negative decimal integer`);
+  }
+  const out = BigInt(value);
+  if (out < 0n) throw new RangeError(`${field} must be non-negative`);
+  return out;
+}
+
+function normalizedHex(value: string, bytes: number, field: string): string {
+  const raw = value.startsWith('0x') || value.startsWith('0X') ? value.slice(2) : value;
+  if (!new RegExp(`^[0-9a-fA-F]{${bytes * 2}}$`).test(raw)) {
+    throw new TypeError(`${field} must be exactly ${bytes} bytes of hex`);
+  }
+  return `0x${raw.toLowerCase()}`;
+}
+
+/** Parse and normalize an Ethereum address, returning its exact 20 bytes. */
+export function ethereumAddressBytes(address: string): Uint8Array {
+  const normalized = normalizedHex(address, 20, 'ethereum address');
+  const out = new Uint8Array(20);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = Number.parseInt(normalized.slice(2 + i * 2, 4 + i * 2), 16);
+  }
+  return out;
+}
+
+/** The native account id controlled by an Ethereum address, matching Go EthAccountID. */
+export function ethereumAccountId(address: string): string {
+  return `eth:${normalizedHex(address, 20, 'ethereum address')}`;
+}
+
+/** Derive the canonical native account id from a server-supported sender key. */
+export function senderAccountId(senderKey: Uint8Array): string {
+  const hex = Array.from(senderKey, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  if (senderKey.length === 20) return ethereumAccountId(hex);
+  if (senderKey.length === 32) return hex;
+  throw new TypeError('senderKey must be a 32-byte ed25519 key or raw 20-byte EVM address');
+}
+
+/**
+ * SHA-256 over the exact bridge lock layout used by Go consensus:
+ * u64be nonce || u32be UTF-8 sender byte length || sender UTF-8 ||
+ * 20 recipient bytes || u64be native amount.
+ */
+export async function deriveBridgeLockId(
+  nonce: bigint | number,
+  sender: string,
+  recipient: string,
+  nativeAmount: bigint | number,
+): Promise<string> {
+  const checkedNonce = uint64(nonce, 'nonce');
+  const checkedAmount = uint64(nativeAmount, 'nativeAmount');
+  const senderBytes = utf8(sender);
+  if (senderBytes.length > 0xffff_ffff) {
+    throw new RangeError('sender UTF-8 encoding exceeds uint32 length');
+  }
+  const payload = new Uint8Array(8 + 4 + senderBytes.length + 20 + 8);
+  const view = new DataView(payload.buffer);
+  let offset = 0;
+  view.setBigUint64(offset, checkedNonce, false);
+  offset += 8;
+  view.setUint32(offset, senderBytes.length, false);
+  offset += 4;
+  payload.set(senderBytes, offset);
+  offset += senderBytes.length;
+  payload.set(ethereumAddressBytes(recipient), offset);
+  offset += 20;
+  view.setBigUint64(offset, checkedAmount, false);
+  const hash = await crypto.subtle.digest('SHA-256', payload);
+  return `0x${Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 export interface LockAttestation {
   /** Ethereum address the wrapped tokens mint to, 0x hex. */
   recipient: string;
@@ -289,6 +471,54 @@ export interface LockAttestation {
   attestor: string;
   /** Native base units locked, so the conversion is checkable without another call. */
   nativeAmount: bigint;
+}
+
+/** A lock attestation with canonical lowercase 0x-prefixed hex fields. */
+export interface NormalizedLockAttestation extends LockAttestation {}
+
+/** Normalize one attestation's encodings without claiming signature verification. */
+export function normalizeLockAttestation(attestation: LockAttestation): NormalizedLockAttestation {
+  return {
+    recipient: normalizedHex(attestation.recipient, 20, 'attestation recipient'),
+    erc20Amount: nonNegativeInteger(attestation.erc20Amount, 'attestation erc20Amount'),
+    lockId: normalizedHex(attestation.lockId, 32, 'attestation lockId'),
+    signature: normalizedHex(attestation.signature, 65, 'attestation signature'),
+    attestor: normalizedHex(attestation.attestor, 20, 'attestation attestor'),
+    nativeAmount: uint64(attestation.nativeAmount, 'attestation nativeAmount'),
+  };
+}
+
+/**
+ * Require validators to agree on one lock and reject duplicate claimed
+ * attestors. This checks fields and conversion only; the Base contract adapter
+ * remains responsible for cryptographic signature verification.
+ */
+export function validateLockAttestations(
+  attestations: readonly LockAttestation[],
+): NormalizedLockAttestation[] {
+  if (attestations.length === 0) throw new Error('at least one lock attestation is required');
+  const normalized = attestations.map(normalizeLockAttestation);
+  const expected = normalized[0] as NormalizedLockAttestation;
+  const seen = new Set<string>();
+
+  for (const attestation of normalized) {
+    if (seen.has(attestation.attestor)) {
+      throw new Error(`duplicate claimed attestor ${attestation.attestor}`);
+    }
+    seen.add(attestation.attestor);
+    if (
+      attestation.lockId !== expected.lockId ||
+      attestation.recipient !== expected.recipient ||
+      attestation.nativeAmount !== expected.nativeAmount ||
+      attestation.erc20Amount !== expected.erc20Amount
+    ) {
+      throw new Error('lock attestations disagree on lock id, recipient, or amount');
+    }
+    if (attestation.erc20Amount !== attestation.nativeAmount * ERC20PerNativeUnit) {
+      throw new Error('lock attestation ERC-20 amount does not match native amount conversion');
+    }
+  }
+  return normalized;
 }
 
 export interface ChatMessage {
@@ -367,6 +597,12 @@ function decodeProvider(raw: Record<string, unknown>): Provider {
     id: str(raw.id),
     capacity: big(raw.capacity),
     pricePerUnit: big(raw.pricePerUnit),
+    costPerUnit: big(raw.costPerUnit),
+    markupBasisPoints: Number(raw.markupBasisPoints ?? 0),
+    quoteId: str(raw.quoteId),
+    quoteVersion: big(raw.quoteVersion),
+    observedAt: str(raw.observedAt),
+    validUntil: str(raw.validUntil),
     available: big(raw.available),
     origin: (str(raw.origin) || 'PROVIDER_ORIGIN_UNSPECIFIED') as ProviderOrigin,
     peerId: str(raw.peerId),
@@ -381,6 +617,11 @@ function decodeJob(raw: Record<string, unknown>): Job {
     provider: str(raw.provider),
     units: big(raw.units),
     price: big(raw.price),
+    pricePerUnit: big(raw.pricePerUnit),
+    quoteId: str(raw.quoteId),
+    quoteVersion: big(raw.quoteVersion),
+    quoteObservedAt: str(raw.quoteObservedAt),
+    quoteValidUntil: str(raw.quoteValidUntil),
     status: (str(raw.status) || 'JOB_STATUS_UNSPECIFIED') as JobStatus,
     createdAt: str(raw.createdAt),
     updatedAt: str(raw.updatedAt),
@@ -730,17 +971,40 @@ export class MatrixClient {
    * inference-capable provider so a request naming one of those models can be
    * routed here; omit it for compute-only capacity.
    */
-  async registerProvider(input: {
+  async registerProvider(input: ProviderQuoteInput & {
     id: string;
     capacity: bigint | number;
-    pricePerUnit: bigint | number;
     models?: string[];
   }): Promise<Provider> {
     const out = await this.call(MARKET, 'RegisterProvider', {
       id: input.id,
       capacity: String(input.capacity),
       pricePerUnit: String(input.pricePerUnit),
+      ...(input.costPerUnit === undefined ? {} : { costPerUnit: String(input.costPerUnit) }),
+      ...(input.markupBasisPoints === undefined ? {} : { markupBasisPoints: input.markupBasisPoints }),
+      ...(input.quoteId === undefined ? {} : { quoteId: input.quoteId }),
+      ...(input.quoteVersion === undefined ? {} : { quoteVersion: String(input.quoteVersion) }),
+      ...(input.observedAt === undefined ? {} : { observedAt: input.observedAt }),
+      ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }),
       ...(input.models && input.models.length > 0 ? { models: input.models } : {}),
+    });
+    return decodeProvider(record(out.provider));
+  }
+
+  /**
+   * Refresh only an existing provider's quote. Capacity, current reservations,
+   * and models are preserved by the server.
+   */
+  async updateProviderQuote(input: ProviderQuoteInput & { id: string }): Promise<Provider> {
+    const out = await this.call(MARKET, 'UpdateProviderQuote', {
+      id: input.id,
+      pricePerUnit: String(input.pricePerUnit),
+      ...(input.costPerUnit === undefined ? {} : { costPerUnit: String(input.costPerUnit) }),
+      ...(input.markupBasisPoints === undefined ? {} : { markupBasisPoints: input.markupBasisPoints }),
+      ...(input.quoteId === undefined ? {} : { quoteId: input.quoteId }),
+      ...(input.quoteVersion === undefined ? {} : { quoteVersion: String(input.quoteVersion) }),
+      ...(input.observedAt === undefined ? {} : { observedAt: input.observedAt }),
+      ...(input.validUntil === undefined ? {} : { validUntil: input.validUntil }),
     });
     return decodeProvider(record(out.provider));
   }
@@ -826,31 +1090,20 @@ export class MatrixClient {
   }
 
   /**
-   * Broadcast a transfer signed by the sender's ed25519 key. It settles through
-   * consensus: the signed transfer is ordered into a committed block by a quorum
-   * and applied by every node, so all nodes agree on the resulting balances and
-   * it pays the protocol fee (when configured) like every other committed
+   * Broadcast a caller-signed native transfer. The sender key bytes are either
+   * a 32-byte ed25519 public key or a raw 20-byte EVM address; the latter uses
+   * the node's Matrix OS EIP-712 transfer domain and a 65-byte recoverable
+   * signature. It settles through consensus, so all validators apply the same
    * transfer.
    *
-   * The node verifies the signature; it never sees a private key. Sign with
-   * whatever ed25519 implementation you already trust and pass the bytes. The
-   * nonce is a per-sender uniquifier (consensus dedups committed transfers for
-   * replay protection); prevHash is unused for linkage and may be empty, though
-   * it must match what the signature covers.
-   *
-   * The returned SettledTransfer reports whether the transfer committed and
-   * applied; a committed-but-unaffordable transfer surfaces as a
-   * FailedPrecondition error rather than a successful result.
+   * The node verifies the signature and never sees a private key. The nonce is
+   * a per-sender uniquifier; prevHash may be empty, but must exactly match the
+   * signed payload (and for EVM signing is either empty or 32 bytes).
    */
-  async submitSignedTransfer(input: {
-    fromPublicKey: Uint8Array;
-    to: string;
-    amount: bigint | number;
-    nonce: bigint | number;
-    prevHash: Uint8Array;
-    signature: Uint8Array;
-    timestamp?: bigint | number;
-  }): Promise<SettledTransfer> {
+  async submitSignedTransfer(input: SignedTransferInput): Promise<SettledTransfer> {
+    if (input.fromPublicKey.length !== 20 && input.fromPublicKey.length !== 32) {
+      throw new TypeError('fromPublicKey must be a 32-byte ed25519 key or raw 20-byte EVM address');
+    }
     const out = await this.call(MARKET, 'SubmitSignedTransfer', {
       fromPublicKey: toBase64(input.fromPublicKey),
       to: input.to,
@@ -868,6 +1121,54 @@ export class MatrixClient {
   }
 
   /**
+   * Submit a pre-signed native-to-Base lock and derive its canonical lock id.
+   * Signing remains entirely caller-owned; this helper only validates, submits,
+   * and checks the committed/applied settlement.
+   */
+  async submitBridgeLock(input: SubmitBridgeLockInput): Promise<SubmitBridgeLockResult> {
+    const amount = validateBridgeLockAmount(input.nativeAmount);
+    const nonce = uint64(input.nonce, 'nonce');
+    const canonicalSender = senderAccountId(input.fromPublicKey);
+    if (input.sender !== canonicalSender) {
+      throw new TypeError(`sender must match fromPublicKey (${canonicalSender})`);
+    }
+    const recipient = normalizedHex(input.recipient, 20, 'recipient');
+    const to = bridgeLockRecipient(recipient);
+    const settlement = await this.submitSignedTransfer({
+      fromPublicKey: input.fromPublicKey,
+      to,
+      amount,
+      nonce,
+      prevHash: input.prevHash,
+      signature: input.signature,
+      ...(input.timestamp === undefined ? {} : { timestamp: input.timestamp }),
+    });
+    if (!settlement.committed || !settlement.applied) {
+      throw new MatrixError(
+        'failed_precondition',
+        `${MARKET}/SubmitSignedTransfer`,
+        'bridge lock did not both commit and apply',
+      );
+    }
+    if (
+      settlement.transaction.from !== input.sender ||
+      settlement.transaction.to !== to ||
+      settlement.transaction.amount !== amount ||
+      settlement.transaction.nonce !== nonce
+    ) {
+      throw new MatrixError(
+        'data_loss',
+        `${MARKET}/SubmitSignedTransfer`,
+        'settled bridge lock fields do not match the signed request',
+      );
+    }
+    return {
+      lockId: await deriveBridgeLockId(nonce, input.sender, recipient, amount),
+      settlement,
+    };
+  }
+
+  /**
    * Move MATRIX from the genesis reward pool to an account.
    *
    * Admin-gated: it needs an API key, and a node with ACLs disabled refuses it
@@ -879,6 +1180,24 @@ export class MatrixClient {
       amount: String(input.amount),
     });
     return { account: str(out.account), balance: big(out.balance) };
+  }
+
+  /**
+   * Ask this node to prove possession of the live secp256k1 attestor key for
+   * its configured bridge deployment. The caller must supply a fresh 32-byte
+   * challenge and independently recover/validate the signature.
+   */
+  async bridgeReadiness(challenge: Uint8Array): Promise<BridgeReadiness> {
+    if (challenge.length !== 32) throw new Error(`bridge readiness challenge must be 32 bytes, got ${challenge.length}`);
+    const out = await this.call(MARKET, 'GetBridgeReadiness', { challenge: toBase64(challenge) });
+    return {
+      chainId: big(out.chainId),
+      contract: str(out.contract),
+      attestor: str(out.attestor),
+      minLockNative: big(out.minLockNative),
+      challenge: fromBase64(str(out.challenge)),
+      signature: fromBase64(str(out.signature)),
+    };
   }
 
   /**
@@ -1312,6 +1631,66 @@ export class MatrixClient {
       throw new MatrixError('internal', label, `${label} returned a body that is not JSON`, cause);
     }
   }
+}
+
+export interface CollectLockAttestationsInput {
+  lockId: string;
+  /** Explicit validator clients or Matrix HTTP endpoints; no committee is discovered implicitly. */
+  validators: readonly (MatrixClient | string)[];
+  /** Total calls per validator, including the first. Defaults to 10. */
+  attempts?: number;
+  /** Delay after a not_found response before the next attempt. Defaults to 1000ms. */
+  delayMs?: number;
+}
+
+/**
+ * Poll explicit validators for one attestation each. Only `not_found` is
+ * retryable because it means the committed lock may not be visible yet;
+ * configuration, transport, and all other failures are returned immediately.
+ * This checks agreement and uniqueness, not cryptographic signatures.
+ */
+export async function collectLockAttestations(
+  input: CollectLockAttestationsInput,
+): Promise<NormalizedLockAttestation[]> {
+  if (input.validators.length === 0) throw new Error('at least one validator is required');
+  const attempts = input.attempts ?? 10;
+  const delayMs = input.delayMs ?? 1_000;
+  if (!Number.isInteger(attempts) || attempts < 1) {
+    throw new RangeError('attempts must be a positive integer');
+  }
+  if (!Number.isFinite(delayMs) || delayMs < 0) {
+    throw new RangeError('delayMs must be a non-negative finite number');
+  }
+  const lockId = normalizedHex(input.lockId, 32, 'lockId');
+  let cancelled = false;
+  const cancelledError = new Error('lock attestation collection cancelled after validator failure');
+
+  const collectOne = async (validator: MatrixClient | string): Promise<LockAttestation> => {
+    const client = typeof validator === 'string' ? new MatrixClient({ endpoint: validator }) : validator;
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      if (cancelled) throw cancelledError;
+      try {
+        return await client.lockAttestation(lockId);
+      } catch (error) {
+        if (!(error instanceof MatrixError) || error.code !== 'not_found' || attempt === attempts) {
+          cancelled = true;
+          throw error;
+        }
+        // Yield even for a zero delay so a sibling's hard failure can cancel
+        // this loop before it sends another request.
+        await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
+        if (cancelled) throw cancelledError;
+      }
+    }
+    throw new Error('unreachable attestation polling state');
+  };
+
+  const attestations = await Promise.all(input.validators.map(collectOne));
+  const normalized = validateLockAttestations(attestations);
+  if (normalized.some((attestation) => attestation.lockId !== lockId)) {
+    throw new Error(`validator attestation does not match requested lock id ${lockId}`);
+  }
+  return normalized;
 }
 
 function record(value: unknown): Record<string, unknown> {

@@ -3,6 +3,7 @@
   "version": "0.1.0",
   "description": "TypeScript client for a Matrix OS node: the compute marketplace and LLM inference APIs over HTTP.",
   "license": "MIT",
+  "packageManager": "yarn@1.22.22",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

@@ -1,6 +1,7 @@
 package node
 
 import (
+	"math/big"
 	"testing"
 
 	"github.com/ecirlabs/matrix-core/internal/bridge"
@@ -15,12 +16,11 @@ type fixedHeight uint64
 
 func (h fixedHeight) Height() uint64 { return uint64(h) }
 
-// TestBridgeReconciler_StampsSnapshotFromRealBridge builds the reconciler the
-// way Node.Start does - over a real bridge on the node's own ledger - drives a
-// known lock and a partial unlock through it, and asserts the marketapi snapshot
-// mirrors Bridge.Reconcile with the committed height stamped in. This is the
-// node-side half of the reconciliation endpoint: the marketapi handler test
-// covers the RPC surface with a fake, this covers the real bridge adapter.
+// TestBridgeReconciler_StampsSnapshotFromRealBridge builds the reconciler over
+// a real direct-mode bridge test helper, drives a known lock and partial unlock,
+// and asserts the marketapi snapshot mirrors Bridge.Reconcile with the committed
+// height stamped in. matrixd itself always uses consensus-ordered burn release;
+// direct mode remains useful here to isolate reconciliation from consensus.
 func TestBridgeReconciler_StampsSnapshotFromRealBridge(t *testing.T) {
 	store, ledger := newBridgeTestLedger(t)
 
@@ -29,20 +29,17 @@ func TestBridgeReconciler_StampsSnapshotFromRealBridge(t *testing.T) {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
 	userID := user.AccountID()
-	const funded = uint64(1_000)
-	const locked = uint64(400)
+	const funded = 2 * token.MinBridgeLockAmount
+	const locked = token.MinBridgeLockAmount
 	if err := ledger.Credit(userID, funded); err != nil {
 		t.Fatalf("Credit: %v", err)
 	}
 
-	cfg := BridgeConfig{Contract: testContract, ChainID: testChainID}
-	b, err := newConfiguredBridge(ledger, store, cfg)
+	contract, err := bridge.ParseAddress(testContract)
 	if err != nil {
-		t.Fatalf("newConfiguredBridge: %v", err)
+		t.Fatalf("ParseAddress: %v", err)
 	}
-	if b == nil {
-		t.Fatal("expected a bridge for a configured contract")
-	}
+	b := bridge.New(ledger, store, bridge.AttestationParams{ChainID: big.NewInt(testChainID), BridgeContract: contract})
 
 	// Lock native into escrow, then release part of it via a processed burn, so
 	// locked != unlocked != 0 and the snapshot is non-trivial.
@@ -51,7 +48,7 @@ func TestBridgeReconciler_StampsSnapshotFromRealBridge(t *testing.T) {
 	if _, err := b.Lock(userID, l1Recipient, locked); err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
-	const unlockNative = uint64(150)
+	const unlockNative = token.MinBridgeLockAmount / 4
 	if err := b.ProcessBurn(bridge.BurnEvent{
 		ID:          "burn-recon-1",
 		ToAccount:   userID,
@@ -126,7 +123,7 @@ func TestBridgeReconciler_PropagatesMismatch(t *testing.T) {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
 	userID := user.AccountID()
-	if err := ledger.Credit(userID, 1_000); err != nil {
+	if err := ledger.Credit(userID, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("Credit: %v", err)
 	}
 
@@ -136,14 +133,14 @@ func TestBridgeReconciler_PropagatesMismatch(t *testing.T) {
 	}
 	var l1Recipient bridge.Address
 	l1Recipient[19] = 0x02
-	if _, err := b.Lock(userID, l1Recipient, 300); err != nil {
+	if _, err := b.Lock(userID, l1Recipient, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("Lock: %v", err)
 	}
 
 	// Tamper: move escrow out of band so the on-ledger balance no longer matches
 	// the (locked - unlocked) accounting.
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		return ltx.Transfer(bridge.EscrowAccount, userID, 100)
+		return ltx.Transfer(bridge.EscrowAccount, userID, token.NativeUnit)
 	}); err != nil {
 		t.Fatalf("tamper transfer: %v", err)
 	}

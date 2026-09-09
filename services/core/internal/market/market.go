@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/cockroachdb/pebble"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/google/uuid"
 )
@@ -28,15 +29,34 @@ const (
 	JobCompleted JobStatus = "completed"
 	JobFailed    JobStatus = "failed"
 	JobCancelled JobStatus = "cancelled"
+	// JobQuoteIncomplete is an in-memory read marker returned for a persisted
+	// active legacy job whose immutable quote snapshot is incomplete. It is never
+	// persisted as a lifecycle transition; CancelJob still sees the underlying
+	// pending/running state, while settlement coordinators that read through
+	// GetJob refuse it before submitting payment.
+	JobQuoteIncomplete JobStatus = "incomplete_quote_snapshot"
 )
 
 // Provider represents an idle-machine compute provider that has registered
 // capacity on the marketplace.
 type Provider struct {
-	ID           string `json:"id"`
-	Capacity     uint64 `json:"capacity"`
+	ID       string `json:"id"`
+	Capacity uint64 `json:"capacity"`
+	// PricePerUnit is the final gross customer quote in native MATRIX base
+	// units. It includes provider markup and protocol-fee gross-up when
+	// CostPerUnit is configured.
 	PricePerUnit uint64 `json:"price_per_unit"`
-	Available    uint64 `json:"available"`
+	// CostPerUnit is the provider's manually observed MATRIX-denominated upstream
+	// cost basis. Zero means PricePerUnit was supplied as an already-final quote.
+	CostPerUnit       uint64 `json:"cost_per_unit,omitempty"`
+	MarkupBasisPoints uint32 `json:"markup_basis_points,omitempty"`
+	// Quote identity and validity make price changes auditable and let job
+	// reservations snapshot exactly what the buyer accepted.
+	QuoteID      string    `json:"quote_id"`
+	QuoteVersion uint64    `json:"quote_version"`
+	ObservedAt   time.Time `json:"observed_at"`
+	ValidUntil   time.Time `json:"valid_until"`
+	Available    uint64    `json:"available"`
 	// Models are the model identifiers this provider will serve, lowercased,
 	// de-duplicated and sorted by RegisterProvider. It is what a request naming
 	// a model is routed on: without it a caller has to know a provider ID, and
@@ -102,14 +122,39 @@ func (p Provider) ServesModel(model string) bool {
 // CreatedAt records submit time and UpdatedAt the last status transition, giving
 // ListJobs a stable chronological order and basic auditability.
 type Job struct {
-	ID        string    `json:"id"`
-	Buyer     string    `json:"buyer"`
-	Provider  string    `json:"provider"`
-	Units     uint64    `json:"units"`
-	Price     uint64    `json:"price"`
-	Status    JobStatus `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID       string `json:"id"`
+	Buyer    string `json:"buyer"`
+	Provider string `json:"provider"`
+	Units    uint64 `json:"units"`
+	Price    uint64 `json:"price"`
+	// PricePerUnit and quote metadata are immutable reservation snapshots. A
+	// provider may refresh its live quote while work is running without changing
+	// what this buyer pays.
+	PricePerUnit    uint64    `json:"price_per_unit"`
+	QuoteID         string    `json:"quote_id"`
+	QuoteVersion    uint64    `json:"quote_version"`
+	QuoteObservedAt time.Time `json:"quote_observed_at"`
+	QuoteValidUntil time.Time `json:"quote_valid_until"`
+	// RemoteRequestDigest and RemoteRequestNonce identify a v2 remote request.
+	// Persisting both makes redelivery idempotent across process restarts and
+	// prevents a buyer from reserving twice by reusing one nonce with new terms.
+	RemoteRequestDigest string    `json:"remote_request_digest,omitempty"`
+	RemoteRequestNonce  uint64    `json:"remote_request_nonce,omitempty"`
+	Status              JobStatus `json:"status"`
+	CreatedAt           time.Time `json:"created_at"`
+	UpdatedAt           time.Time `json:"updated_at"`
+}
+
+// AcceptedQuote is the exact fixed-price quote snapshot a remote buyer signed.
+// Total must equal Units * PricePerUnit. Quote expiry gates reservation only;
+// once accepted, settlement continues to use this immutable snapshot.
+type AcceptedQuote struct {
+	PricePerUnit uint64
+	QuoteID      string
+	QuoteVersion uint64
+	ObservedAt   time.Time
+	ValidUntil   time.Time
+	Total        uint64
 }
 
 // Observer receives notifications about marketplace activity so an integration
@@ -144,8 +189,9 @@ type Market struct {
 	providersMu sync.RWMutex
 	providers   map[string]Provider
 
-	jobsMu sync.RWMutex
-	jobs   map[string]Job
+	jobsMu         sync.RWMutex
+	jobs           map[string]Job
+	remoteRequests map[string]string
 }
 
 // NewMarket creates a new Market backed by the given store, constructing the
@@ -155,10 +201,11 @@ type Market struct {
 // is a no-op and the maps start empty.
 func NewMarket(store *kv.Store) (*Market, error) {
 	m := &Market{
-		store:     store,
-		ledger:    NewLedger(store),
-		providers: make(map[string]Provider),
-		jobs:      make(map[string]Job),
+		store:          store,
+		ledger:         NewLedger(store),
+		providers:      make(map[string]Provider),
+		jobs:           make(map[string]Job),
+		remoteRequests: make(map[string]string),
 	}
 	if err := m.load(); err != nil {
 		return nil, err
@@ -186,7 +233,23 @@ func (m *Market) load() error {
 		if err := json.Unmarshal(value, &j); err != nil {
 			return fmt.Errorf("failed to unmarshal persisted job: %w", err)
 		}
+		// Active records from versions before quote snapshots may contain a total
+		// price (and, during partial rollouts, even a per-unit price) without the
+		// quote identity/times that prove what the buyer accepted. Keep the record
+		// cancellable and visible, but force inference's existing CheckedMul path to
+		// return ErrStaleQuote rather than construct a payment. Do not persist this
+		// marker and never fabricate historical quote identity.
+		if (j.Status == JobPending || j.Status == JobRunning) && validateJobQuoteSnapshot(j) != nil {
+			j.PricePerUnit = 0
+		}
 		m.jobs[j.ID] = j
+		if j.RemoteRequestDigest != "" {
+			key := remoteRequestKey(j.Buyer, j.RemoteRequestNonce)
+			if existingID, exists := m.remoteRequests[key]; exists && existingID != j.ID {
+				return fmt.Errorf("persisted remote request nonce %q belongs to jobs %q and %q: %w", key, existingID, j.ID, ErrRemoteRequestConflict)
+			}
+			m.remoteRequests[key] = j.ID
+		}
 		return nil
 	}); err != nil {
 		return err
@@ -216,8 +279,17 @@ func (m *Market) SyncMetrics() {
 	if m.observer == nil {
 		return
 	}
-	m.observer.ProviderCountChanged(len(m.ListProviders()))
+	m.observer.ProviderCountChanged(m.registeredProviderCount())
 	m.observer.ActiveJobsChanged(m.countActiveJobs())
+}
+
+// registeredProviderCount returns every persisted local provider, including one
+// whose quote needs an administrative refresh. Buyer-facing listings filter
+// those stale records.
+func (m *Market) registeredProviderCount() int {
+	m.providersMu.RLock()
+	defer m.providersMu.RUnlock()
+	return len(m.providers)
 }
 
 // countActiveJobs returns the number of jobs in a pending or running state.
@@ -239,7 +311,7 @@ func (m *Market) notifyProviderCount() {
 	if m.observer == nil {
 		return
 	}
-	m.observer.ProviderCountChanged(len(m.ListProviders()))
+	m.observer.ProviderCountChanged(m.registeredProviderCount())
 }
 
 // notifyActiveJobs reports the current active-job count to the observer.
@@ -282,6 +354,73 @@ func (m *Market) persistJob(j Job) error {
 	return nil
 }
 
+// normalizeProviderQuote fills explicit quote identity/timestamps for legacy
+// callers and validates freshness. Registration is the manual quote update: no
+// DEX price is trusted implicitly.
+func normalizeProviderQuote(p Provider, now time.Time) (Provider, error) {
+	if p.PricePerUnit == 0 {
+		return Provider{}, fmt.Errorf("provider %q price_per_unit must be > 0: %w", p.ID, ErrInvalidProvider)
+	}
+	if p.QuoteID == "" {
+		p.QuoteID = uuid.NewString()
+	}
+	if p.QuoteVersion == 0 {
+		p.QuoteVersion = 1
+	}
+	if p.ObservedAt.IsZero() {
+		p.ObservedAt = now
+	} else {
+		p.ObservedAt = p.ObservedAt.UTC()
+	}
+	if p.ValidUntil.IsZero() {
+		p.ValidUntil = p.ObservedAt.Add(DefaultQuoteTTL)
+	} else {
+		p.ValidUntil = p.ValidUntil.UTC()
+	}
+	if p.ObservedAt.After(now.Add(MaxQuoteClockSkew)) {
+		return Provider{}, fmt.Errorf("provider %q quote observed_at %s is in the future: %w", p.ID, p.ObservedAt.Format(time.RFC3339), ErrInvalidProvider)
+	}
+	if !p.ValidUntil.After(p.ObservedAt) {
+		return Provider{}, fmt.Errorf("provider %q quote valid_until must be after observed_at: %w", p.ID, ErrInvalidProvider)
+	}
+	if !p.ValidUntil.After(now) {
+		return Provider{}, fmt.Errorf("provider %q quote expired at %s: %w", p.ID, p.ValidUntil.Format(time.RFC3339), ErrStaleQuote)
+	}
+	return p, nil
+}
+
+// UpdateProviderQuote refreshes only the economic quote of an existing
+// provider, preserving its capacity reservation and model advertisement. It is
+// the safe startup path for config-backed providers: restarting no longer
+// leaves an old persisted price in force or resets capacity held by jobs.
+func (m *Market) UpdateProviderQuote(id string, quote Provider) error {
+	m.providersMu.Lock()
+	defer m.providersMu.Unlock()
+	existing, ok := m.providers[id]
+	if !ok {
+		return fmt.Errorf("update quote for provider %q: %w", id, ErrProviderNotFound)
+	}
+	quote.ID = id
+	quote.Capacity = existing.Capacity
+	quote.Available = existing.Available
+	quote.Models = existing.Models
+	if quote.QuoteVersion <= existing.QuoteVersion {
+		if existing.QuoteVersion == ^uint64(0) {
+			return fmt.Errorf("provider %q quote version overflow: %w", id, ErrPriceOverflow)
+		}
+		quote.QuoteVersion = existing.QuoteVersion + 1
+	}
+	prepared, err := normalizeProviderQuote(quote, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if err := m.persistProvider(prepared); err != nil {
+		return err
+	}
+	m.providers[id] = prepared
+	return nil
+}
+
 // RegisterProvider validates and registers a compute provider. PricePerUnit and
 // Capacity must both be greater than zero. Available is initialized to Capacity.
 func (m *Market) RegisterProvider(p Provider) error {
@@ -291,9 +430,11 @@ func (m *Market) RegisterProvider(p Provider) error {
 	if p.Capacity == 0 {
 		return fmt.Errorf("provider %q capacity must be > 0: %w", p.ID, ErrInvalidProvider)
 	}
-	if p.PricePerUnit == 0 {
-		return fmt.Errorf("provider %q price_per_unit must be > 0: %w", p.ID, ErrInvalidProvider)
+	prepared, err := normalizeProviderQuote(p, time.Now().UTC())
+	if err != nil {
+		return err
 	}
+	p = prepared
 
 	p.Available = p.Capacity
 	p.Models = normalizeModels(p.Models)
@@ -310,6 +451,203 @@ func (m *Market) RegisterProvider(p Provider) error {
 	// count does not deadlock against the write lock held above.
 	m.notifyProviderCount()
 	return nil
+}
+
+// validateProviderQuoteForUse rejects legacy or expired provider records before
+// they can reserve new work or appear in buyer-facing listings. Operators can
+// still address a stale provider by ID and refresh it with UpdateProviderQuote;
+// it remains deliberately ineligible until every quote field is fresh.
+func validateProviderQuoteForUse(p Provider, now time.Time) error {
+	if p.PricePerUnit == 0 || p.QuoteID == "" || p.QuoteVersion == 0 || p.ObservedAt.IsZero() || p.ValidUntil.IsZero() {
+		return fmt.Errorf("provider %q quote %q version %d is incomplete: %w", p.ID, p.QuoteID, p.QuoteVersion, ErrStaleQuote)
+	}
+	if p.ObservedAt.After(now.Add(MaxQuoteClockSkew)) {
+		return fmt.Errorf("provider %q quote observation %s is in the future: %w", p.ID, p.ObservedAt.Format(time.RFC3339), ErrStaleQuote)
+	}
+	if !p.ValidUntil.After(p.ObservedAt) || !p.ValidUntil.After(now) {
+		return fmt.Errorf("provider %q quote %q version %d expired or invalid (valid until %s): %w",
+			p.ID, p.QuoteID, p.QuoteVersion, p.ValidUntil.Format(time.RFC3339), ErrStaleQuote)
+	}
+	return nil
+}
+
+// validateJobQuoteSnapshot rejects active records written before immutable quote
+// snapshots existed. Cancellation remains available, but no completion path may
+// settle a zero or unauditable legacy amount. Old quote identity is never
+// invented because doing so would misrepresent what the buyer accepted.
+func validateJobQuoteSnapshot(j Job) error {
+	if j.PricePerUnit == 0 || j.QuoteID == "" || j.QuoteVersion == 0 || j.QuoteObservedAt.IsZero() || j.QuoteValidUntil.IsZero() {
+		return fmt.Errorf("job %q price/quote snapshot is incomplete and must not settle: %w", j.ID, ErrStaleQuote)
+	}
+	expected, err := CheckedMul(j.Units, j.PricePerUnit)
+	if err != nil {
+		return fmt.Errorf("job %q snapshot price is invalid: %w", j.ID, err)
+	}
+	if expected != j.Price {
+		return fmt.Errorf("job %q snapshot total %d does not match units * price_per_unit (%d): %w",
+			j.ID, j.Price, expected, ErrStaleQuote)
+	}
+	return nil
+}
+
+// ValidateJobQuoteForSettlement checks that an existing active job has a
+// complete immutable quote snapshot before any external settlement coordinator
+// signs or submits payment for it.
+func (m *Market) ValidateJobQuoteForSettlement(jobID string) error {
+	m.jobsMu.RLock()
+	defer m.jobsMu.RUnlock()
+	job, ok := m.jobs[jobID]
+	if !ok {
+		return fmt.Errorf("validate quote for job %q: %w", jobID, ErrJobNotFound)
+	}
+	if job.Status != JobPending && job.Status != JobRunning {
+		return fmt.Errorf("validate quote for job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
+	}
+	return validateJobQuoteSnapshot(job)
+}
+
+func remoteRequestKey(buyer string, nonce uint64) string {
+	return fmt.Sprintf("%s/%d", buyer, nonce)
+}
+
+// persistReservation atomically stores both sides of a capacity reservation.
+// A crash can therefore expose neither the job nor the capacity decrement, or
+// both, but never a provider record that discarded the accepted snapshot.
+func (m *Market) persistReservation(provider Provider, job Job) error {
+	providerData, err := json.Marshal(provider)
+	if err != nil {
+		return fmt.Errorf("failed to marshal provider %q: %w", provider.ID, err)
+	}
+	jobData, err := json.Marshal(job)
+	if err != nil {
+		return fmt.Errorf("failed to marshal job %q: %w", job.ID, err)
+	}
+	batch := m.store.NewBatch()
+	defer batch.Close()
+	if err := batch.Set([]byte(providerKeyPrefix+provider.ID), providerData, nil); err != nil {
+		return fmt.Errorf("failed to stage provider %q reservation: %w", provider.ID, err)
+	}
+	if err := batch.Set([]byte(jobKeyPrefix+job.ID), jobData, nil); err != nil {
+		return fmt.Errorf("failed to stage job %q reservation: %w", job.ID, err)
+	}
+	if err := batch.Commit(pebble.Sync); err != nil {
+		return fmt.Errorf("failed to commit reservation for job %q: %w", job.ID, err)
+	}
+	return nil
+}
+
+// ReserveRemoteJob validates and persists a v2 remote request against one exact
+// accepted quote. Quote comparison, expiry, capacity checking, and persistence
+// all happen while the provider lock is held, so a concurrent quote refresh can
+// only win before the request (which is rejected) or after its old snapshot has
+// been durably reserved. Redelivery of the same buyer nonce and digest is
+// idempotent, including after restart.
+func (m *Market) ReserveRemoteJob(buyer, providerID string, units, nonce uint64, requestDigest string, accepted AcceptedQuote, now time.Time) (*Job, error) {
+	if units == 0 {
+		return nil, fmt.Errorf("units must be > 0: %w", ErrInsufficientCapacity)
+	}
+	if buyer == providerID {
+		return nil, fmt.Errorf("buyer %q equals provider %q: %w", buyer, providerID, ErrSelfDealing)
+	}
+	if requestDigest == "" {
+		return nil, fmt.Errorf("remote request digest must not be empty: %w", ErrRemoteRequestConflict)
+	}
+	now = now.UTC()
+
+	var reservedJob Job
+	created := false
+	err := func() error {
+		m.providersMu.Lock()
+		defer m.providersMu.Unlock()
+		m.jobsMu.Lock()
+		defer m.jobsMu.Unlock()
+
+		requestKey := remoteRequestKey(buyer, nonce)
+		if existingID, ok := m.remoteRequests[requestKey]; ok {
+			existing, exists := m.jobs[existingID]
+			if !exists || existing.RemoteRequestDigest != requestDigest {
+				return fmt.Errorf("buyer %q reused remote nonce %d: %w", buyer, nonce, ErrRemoteRequestConflict)
+			}
+			reservedJob = existing
+			return nil
+		}
+
+		provider, ok := m.providers[providerID]
+		if !ok {
+			return fmt.Errorf("reserve remote job for provider %q: %w", providerID, ErrProviderNotFound)
+		}
+		if err := validateProviderQuoteForUse(provider, now); err != nil {
+			return err
+		}
+		if provider.PricePerUnit != accepted.PricePerUnit ||
+			provider.QuoteID != accepted.QuoteID ||
+			provider.QuoteVersion != accepted.QuoteVersion ||
+			!provider.ObservedAt.Equal(accepted.ObservedAt) ||
+			!provider.ValidUntil.Equal(accepted.ValidUntil) {
+			return fmt.Errorf("provider %q current quote %q/%d differs from accepted %q/%d: %w",
+				providerID, provider.QuoteID, provider.QuoteVersion, accepted.QuoteID, accepted.QuoteVersion, ErrQuoteMismatch)
+		}
+		if !accepted.ValidUntil.After(now) {
+			return fmt.Errorf("accepted quote %q expired at %s: %w", accepted.QuoteID, accepted.ValidUntil.UTC().Format(time.RFC3339Nano), ErrStaleQuote)
+		}
+		total, err := CheckedMul(units, accepted.PricePerUnit)
+		if err != nil {
+			return fmt.Errorf("price remote job for provider %q: %w", providerID, err)
+		}
+		if total != accepted.Total {
+			return fmt.Errorf("accepted total %d does not equal %d units * %d: %w",
+				accepted.Total, units, accepted.PricePerUnit, ErrQuoteMismatch)
+		}
+		if provider.Available < units {
+			return fmt.Errorf("provider %q has %d units available, need %d: %w",
+				providerID, provider.Available, units, ErrInsufficientCapacity)
+		}
+		balance, err := m.ledger.Balance(buyer)
+		if err != nil {
+			return err
+		}
+		if balance < total {
+			return fmt.Errorf("buyer %q has %d native MATRIX, job costs %d: %w",
+				buyer, balance, total, ErrInsufficientFunds)
+		}
+
+		job := Job{
+			ID:                  uuid.NewString(),
+			Buyer:               buyer,
+			Provider:            providerID,
+			Units:               units,
+			Price:               total,
+			PricePerUnit:        accepted.PricePerUnit,
+			QuoteID:             accepted.QuoteID,
+			QuoteVersion:        accepted.QuoteVersion,
+			QuoteObservedAt:     accepted.ObservedAt.UTC(),
+			QuoteValidUntil:     accepted.ValidUntil.UTC(),
+			RemoteRequestDigest: requestDigest,
+			RemoteRequestNonce:  nonce,
+			Status:              JobPending,
+			CreatedAt:           now,
+			UpdatedAt:           now,
+		}
+		reserved := provider
+		reserved.Available -= units
+		if err := m.persistReservation(reserved, job); err != nil {
+			return err
+		}
+		m.providers[providerID] = reserved
+		m.jobs[job.ID] = job
+		m.remoteRequests[requestKey] = job.ID
+		reservedJob = job
+		created = true
+		return nil
+	}()
+	if err != nil {
+		return nil, err
+	}
+	if created {
+		m.notifyActiveJobs()
+	}
+	copy := reservedJob
+	return &copy, nil
 }
 
 // SubmitJob reserves capacity for a paid compute job. It looks up the provider
@@ -342,8 +680,15 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 		return nil, fmt.Errorf("provider %q has %d units available, need %d: %w",
 			providerID, provider.Available, units, ErrInsufficientCapacity)
 	}
+	now := time.Now().UTC()
+	if err := validateProviderQuoteForUse(provider, now); err != nil {
+		return nil, err
+	}
 
-	price := units * provider.PricePerUnit
+	price, err := CheckedMul(units, provider.PricePerUnit)
+	if err != nil {
+		return nil, fmt.Errorf("price job for provider %q: %w", providerID, err)
+	}
 
 	balance, err := m.ledger.Balance(buyer)
 	if err != nil {
@@ -354,16 +699,20 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 			buyer, balance, price, ErrInsufficientFunds)
 	}
 
-	now := time.Now().UTC()
 	job := Job{
-		ID:        uuid.NewString(),
-		Buyer:     buyer,
-		Provider:  providerID,
-		Units:     units,
-		Price:     price,
-		Status:    JobPending,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:              uuid.NewString(),
+		Buyer:           buyer,
+		Provider:        providerID,
+		Units:           units,
+		Price:           price,
+		PricePerUnit:    provider.PricePerUnit,
+		QuoteID:         provider.QuoteID,
+		QuoteVersion:    provider.QuoteVersion,
+		QuoteObservedAt: provider.ObservedAt,
+		QuoteValidUntil: provider.ValidUntil,
+		Status:          JobPending,
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	// Reserve capacity on a copy first so a persistence failure does not mutate
@@ -421,6 +770,10 @@ func (m *Market) CompleteJob(jobID string) error {
 	if job.Status != JobPending && job.Status != JobRunning {
 		m.jobsMu.Unlock()
 		return fmt.Errorf("complete job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
+	}
+	if err := validateJobQuoteSnapshot(job); err != nil {
+		m.jobsMu.Unlock()
+		return err
 	}
 
 	// Transfer native MATRIX first; only mark completed if the transfer succeeds
@@ -481,6 +834,9 @@ func (m *Market) ReleaseAsCompleted(jobID string, settledAmount uint64) (*Job, e
 		}
 		if job.Status != JobPending && job.Status != JobRunning {
 			return fmt.Errorf("complete settled job %q in state %q: %w", jobID, job.Status, ErrInvalidJobState)
+		}
+		if err := validateJobQuoteSnapshot(job); err != nil {
+			return err
 		}
 
 		// Return the reserved capacity to the provider. The reservation only ever
@@ -584,16 +940,30 @@ func (m *Market) GetJob(id string) (Job, bool) {
 	m.jobsMu.RLock()
 	defer m.jobsMu.RUnlock()
 	j, ok := m.jobs[id]
+	if ok && (j.Status == JobPending || j.Status == JobRunning) && validateJobQuoteSnapshot(j) != nil {
+		// Settlement coordinators consume GetJob before creating payment. Return a
+		// non-settleable read marker so even a caller that bypasses the market API's
+		// explicit validation refuses before funds move. The stored status remains
+		// pending/running, keeping CancelJob available.
+		j.PricePerUnit = 0
+		j.Status = JobQuoteIncomplete
+	}
 	return j, ok
 }
 
-// ListProviders returns all registered providers sorted by ID.
+// ListProviders returns providers with fresh quotes sorted by ID. It is the
+// buyer-facing local order book; stale records remain addressable by ID so an
+// operator can refresh them without exposing an offer that cannot accept work.
 func (m *Market) ListProviders() []Provider {
 	m.providersMu.RLock()
 	defer m.providersMu.RUnlock()
 
 	out := make([]Provider, 0, len(m.providers))
+	now := time.Now().UTC()
 	for _, p := range m.providers {
+		if validateProviderQuoteForUse(p, now) != nil {
+			continue
+		}
 		out = append(out, p)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
@@ -615,8 +985,9 @@ func (m *Market) ProvidersForModel(model string) []Provider {
 	defer m.providersMu.RUnlock()
 
 	out := make([]Provider, 0, len(m.providers))
+	now := time.Now().UTC()
 	for _, p := range m.providers {
-		if p.Available == 0 || !p.ServesModel(model) {
+		if p.Available == 0 || !p.ServesModel(model) || validateProviderQuoteForUse(p, now) != nil {
 			continue
 		}
 		out = append(out, p)

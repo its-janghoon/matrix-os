@@ -79,31 +79,30 @@ consensus:
     - add:9f2c1e4b...`;
 
 const STAKE = `consensus:
+  membership_mode: bonded-open
+  participate_in_open_set: true
   stake:
     enabled: true
-    min_bond: 1000000000000000    # 1,000,000 MATRIX at 9 decimals; null = this default
-    unbonding_period: 1000        # blocks to wait after leaving before withdrawing
-    bond: 2000000000000000        # what THIS node keeps bonded from its own account`;
+    min_bond: 1000000000000000    # positive admission floor; must match every node
+    unbonding_period: 1000
+    bond: 1000000000000000        # fund THIS node's printed consensus account`;
 
 const ECONOMICS = `consensus:
-  fee_basis_points: 100          # 1%, taken from each transfer; the build caps this at 100
+  fee_basis_points: 100           # 1%, the code cap
+  maintainer_account: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" # EXAMPLE; replace
+  maintainer_fee_share_basis_points: 5000 # 50% of the fee, not 50% of transferred value
   rewards:
-    per_block: 400               # what the pool pays per block, shared by the providers it paid
-    half_life: 1000000           # blocks until that halves; total spend is about 1.44 * per_block * half_life
-    approved_providers:
-      - add:cf4f75dc...          # an ACCOUNT id; needs a quorum of operators to have listed it`;
+    per_block: 0                  # public launch: no provider token emissions`;
 
-const ECONOMICS_LOG = `Consensus: a protocol fee of 100 basis points (1.00%) is taken from every value transfer
-  and paid to the validator set pro rata by voting power.
-Consensus: provider rewards are ON. The genesis pool pays up to 400 base units per block,
-  halving every 1000000 blocks, shared among the registered providers a block pays.
-consensus: provider registry change in force at height 0: add:cf4f75dc...
-consensus: paid 400 native base units of provider rewards from the pool at height 1
+const ECONOMICS_LOG = `Consensus: a protocol fee of 100 basis points (1.00%) is taken from every value transfer.
+Consensus: maintainer receives 5000 basis points of that fee (0.50% of transferred value).
+Consensus: provider rewards are OFF; providers earn only user-paid MATRIX.
 
 # a job priced at 10000, settled through consensus:
-#   provider  +9900   (10000 less the 1% fee)   +400 (this block's emission)
-#   validator   +100  (the fee, one validator so no remainder)
-#   pool        -400`;
+#   provider    +9900   (quoted amount less the 1% protocol fee)
+#   maintainer    +50   (half of the fee)
+#   validators    +50   (remainder, pro rata by voting power)
+#   emissions       0`;
 
 const STAKE_LOG = `Consensus identity: 0c2265316242995a96890c698af0e1959264bb6b1f805ed7352fe6174f6fcabb
 Consensus: bonded stake is ON. Voting power is bonded MATRIX; a validator must bond at least
@@ -141,6 +140,17 @@ export default function NetworkSetupPage() {
                     <p className='text-xl text-gray-100'>
                       Two things have to match for two nodes to agree on one ledger: they must be able to reach each
                       other, and they must list the same validator set.
+                    </p>
+                  </div>
+
+                  <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
+                    <h2 className='mb-2 text-xl font-bold text-white'>Generated baseline versus public overlay</h2>
+                    <p className='mb-0 text-gray-100'>
+                      <code className='text-white'>matrixd -init</code> creates a secure starting point, not a turnkey
+                      production profile. Public operators must still set identical genesis and economics, exact
+                      HTTPS CORS origins (never a wildcard), public reads, signed writes, positive 600/120 request
+                      limits, a real 64-hex maintainer account, and the verified Base bridge target. Base Sepolia
+                      rehearsal is chain 84532; Base production is 8453. See the configuration page for the overlay.
                     </p>
                   </div>
 
@@ -202,11 +212,13 @@ export default function NetworkSetupPage() {
                     at different heights - see below.
                   </p>
 
-                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>4. Changing the set later</h2>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>4. Changing an operator-approved set</h2>
                   <p className='mb-4 text-gray-300'>
-                    The list above is the <em>genesis</em> set. Once the chain has changed the set, each node resumes
-                    the set the chain arrived at and ignores this field, so a config that still says the set is empty
-                    is not a problem. Adding or removing a validator does not need a coordinated restart:
+                    This section describes <code className='text-white'>membership_mode: operator-approved</code>.
+                    There the genesis set changes only after operators approve it. The generated and public launch
+                    profile instead uses <code className='text-white'>bonded-open</code>: candidates self-sign
+                    admission after their positive bond commits, and active validators self-sign voluntary exits.
+                    In either mode, the set in force is committed chain state and resumes from history.
                   </p>
 
                   <ValidatorSetChange />
@@ -290,20 +302,13 @@ export default function NetworkSetupPage() {
 
                   <h3 className='mb-2 mt-8 text-xl font-bold text-white'>Getting admitted as a validator</h3>
                   <p className='mb-4 text-gray-300'>
-                    A correctly configured joining node downloads and applies blocks straight away, but it is not yet
-                    a validator. Until a quorum admits it, it <strong className='text-white'>follows without
-                    voting</strong>: it applies every committed block to its ledger and stays perfectly in sync, it
-                    just does not propose or vote. That is a useful state on its own - a read-only replica that
-                    agrees on every balance without any say in the set.
+                    A correctly configured joining node first follows without voting while it replays history. In
+                    bonded-open mode, fund its printed consensus account and set a bond at or above the network&apos;s
+                    positive minimum; the candidate signs and gossips its own admission transaction after that bond
+                    commits. No operator allow-list vote is required. In operator-approved mode, use the
+                    approved-change flow from section 4 instead.
                   </p>
-                  <p className='mb-4 text-gray-300'>
-                    To make it a validator, admission goes through the same set-change path as section 4. The node
-                    prints its consensus identity at startup; that hex id is what other operators put under{' '}
-                    <code className='text-white'>consensus.approved_changes</code> as an{' '}
-                    <code className='text-white'>add:</code>. It needs a quorum of operators to list it, and it lands
-                    at the next epoch boundary.
-                  </p>
-                  <CodeSample label='join + admit' code={JOIN_ADMIT} />
+                  <CodeSample label='operator-approved join (legacy/private networks)' code={JOIN_ADMIT} />
                   <p className='mt-4 text-gray-300'>
                     <code className='text-white'>epoch_length</code> must match every node here too, for the reason
                     in section 3: it is when set changes take effect, and nodes that disagree about it would switch
@@ -313,21 +318,20 @@ export default function NetworkSetupPage() {
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
                     <h3 className='mb-2 text-lg font-bold text-white'>On a staked network, bond before admission</h3>
                     <p className='mb-0 text-gray-100'>
-                      If the network runs bonded stake (section 6), a joining node cannot be admitted until it has
-                      posted at least the minimum bond. Fund its consensus account - the id it prints at startup -
-                      then set <code className='text-white'>consensus.stake.bond</code>; the node bonds the shortfall
-                      itself from that account and keeps topping it up. Until the account holds enough it says so in
-                      the log and does nothing, so an unfunded staked joiner fails loudly rather than quietly. The
-                      quorum still has to approve the <code className='text-white'>add:</code> - a bond is necessary
-                      to be admitted, not sufficient.
+                      In bonded-open mode, a joining node cannot be admitted until its self-funded positive minimum
+                      bond has committed. Fund its consensus account - the id it prints at startup - then set{' '}
+                      <code className='text-white'>consensus.stake.bond</code>; the node signs the bond and admission
+                      itself. In operator-approved mode the bond is still necessary when stake is enabled, and the
+                      separate operator approval remains necessary too.
                     </p>
                   </div>
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>6. Bonded stake</h2>
                   <p className='mb-4 text-gray-300'>
-                    Off by default. With it on, three things change: voting power becomes an account&apos;s bonded
-                    native MATRIX, admission requires a minimum bond, and a validator proven to have equivocated
-                    loses that bond instead of only its place.
+                    The generated bonded-open baseline turns this on. Voting power becomes an account&apos;s bonded
+                    native MATRIX, admission requires a positive minimum bond, and a validator proven to have
+                    equivocated loses that bond instead of only its place. A private operator-approved network can
+                    choose equal voting power instead.
                   </p>
                   <CodeSample label='config.yaml' code={STAKE} />
                   <p className='mt-4 text-gray-300'>
@@ -371,18 +375,21 @@ export default function NetworkSetupPage() {
                   </p>
 
                   <div className='my-8 rounded-xl border border-semantic-processing/40 bg-semantic-processing/10 p-6'>
-                    <h3 className='mb-2 text-lg font-bold text-white'>What stake does not make this</h3>
+                    <h3 className='mb-2 text-lg font-bold text-white'>What bonded-open means</h3>
                     <p className='mb-0 text-gray-100'>
-                      Membership is still a decision a quorum of operators makes, not one anyone can buy into: a bond
-                      is necessary to be admitted and it is not sufficient. So this is permissioned with capital at
-                      risk, not permissionless.
+                      Admission and voluntary exit are permissionless only after the candidate&apos;s positive bond and
+                      self-signed membership transaction commit. That prices identities but does not make EVM bridge
+                      attestors dynamic: WrappedMatrix keeps the fixed committee selected at contract deployment,
+                      independently of native validator joins and exits.
                     </p>
                   </div>
 
-                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>7. Paying for it: the fee and the emission</h2>
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>7. Launch economics: fee, no emissions</h2>
                   <p className='mb-4 text-gray-300'>
-                    Both off by default, because what a network charges and what it pays out is monetary policy and
-                    not something a generated config should decide.
+                    The public overlay charges a 100-basis-point protocol fee, gives the configured maintainer 5000
+                    basis points of that fee, and sets <code className='text-white'>rewards.per_block: 0</code>.
+                    Providers publish MATRIX-denominated quotes and earn user payments; launch supply does not grow
+                    through provider emissions.
                   </p>
                   <CodeSample label='config.yaml' code={ECONOMICS} />
 
@@ -414,27 +421,21 @@ export default function NetworkSetupPage() {
                     earns, and the answer to that is to remove it.
                   </p>
 
-                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>The provider emission</h3>
+                  <h3 className='mb-2 mt-8 text-xl font-bold text-white'>Provider emissions are zero at launch</h3>
                   <p className='mb-4 text-gray-300'>
-                    A fixed budget per block, paid out of the genesis reward pool and shared among the{' '}
-                    <em>registered</em> providers that a block paid, pro rata by how much. It halves every{' '}
-                    <code className='text-white'>half_life</code> blocks and reaches exactly zero, so the pool
-                    empties on a schedule rather than trailing off.
+                    matrixd supports a fixed, supply-tracked reward-pool schedule for networks that explicitly choose
+                    one, but the public overlay does not: <code className='text-white'>per_block: 0</code>. Providers
+                    manually quote their final MATRIX price (or a MATRIX-denominated observed cost plus markup), and
+                    a buyer&apos;s job snapshots that quote. Manual quotes expire and must be refreshed with{' '}
+                    <code className='text-white'>matrix provider quote-update --id &lt;provider&gt; --price &lt;price&gt;</code>;
+                    run or schedule it before expiry. Do not re-register to refresh: quote-update preserves available
+                    capacity and active reservations. There is no stablecoin peg and no DEX oracle silently repricing
+                    jobs.
                   </p>
                   <p className='mb-4 text-gray-300'>
-                    Why a fixed budget and not a percentage of what a provider earned: consensus cannot see work. A
-                    job lives in the marketplace, whose provider list and job records are per-node state no quorum
-                    ever ordered, so the chain knows only that MATRIX moved between two accounts. A percentage of a
-                    transfer would be a money pump - send coins to an account you also control, collect the
-                    percentage, send them back, repeat. A fixed budget means faked volume can move a share of it and
-                    cannot increase it.
-                  </p>
-                  <p className='mb-4 text-gray-300'>
-                    Which accounts are eligible is a registry the chain keeps, changed the way the validator set is:
-                    a quorum of operators has to have listed the change under{' '}
-                    <code className='text-white'>approved_providers</code>. Without a registry the emission would pay
-                    whoever happened to receive a transfer. Registration takes effect from the next block, so a block
-                    cannot register an account and pay it in the same breath.
+                    A reservation keeps the exact price-per-unit, quote id/version, observation time and validity
+                    window accepted by the buyer. A later provider refresh changes future jobs, not an existing
+                    snapshot, and stale quotes are rejected before work starts.
                   </p>
                   <CodeSample label='node log' code={ECONOMICS_LOG} />
 

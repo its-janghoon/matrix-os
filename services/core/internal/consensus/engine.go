@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -132,6 +133,15 @@ type Config struct {
 	// EpochLength is how many committed blocks pass between set changes taking
 	// effect. Zero means DefaultEpochLength.
 	EpochLength uint64
+	// MembershipMode selects validator admission policy. Empty and
+	// "operator-approved" preserve the legacy allow-list. "bonded-open" makes
+	// admission and voluntary exit permissionless and self-signed, with MinBond
+	// as the Sybil-resistance floor.
+	MembershipMode MembershipMode
+	// ParticipateInOpenSet is this node's desired membership state in
+	// bonded-open mode. Nil means participate. False makes an active validator
+	// submit a self-removal and prevents a candidate from joining.
+	ParticipateInOpenSet *bool
 	// ApprovedSetChanges is this operator's approval list, in the form
 	// "add:<hex public key>" or "remove:<account id>".
 	//
@@ -278,6 +288,8 @@ type Engine struct {
 	onEquivocation       func(eq *Equivocation)
 	sets                 *SetStore
 	epochLength          uint64
+	membershipMode       MembershipMode
+	participateInOpenSet bool
 	approvedChanges      map[string]struct{}
 	// approvedSpecs is the same allow-list in parsed form. A node does not only
 	// vote for the changes its operator approved, it also PROPOSES them: without
@@ -375,6 +387,11 @@ type Engine struct {
 	// node computes the identical set.
 	committedNonces map[string]struct{}
 	mempoolNonces   map[string]struct{}
+	// pendingMembership gives each identity one stable slot per open-membership
+	// operation. Unlike mempoolKey, its key excludes nonce, timestamp and
+	// signature, so re-signing the same admission, exit, bond or withdrawal
+	// cannot consume another shared mempool slot.
+	pendingMembership map[string]string
 	// bridgeLocker records locks the chain has applied, when this node has a
 	// bridge. Nil on a node with none, which still applies the escrow move.
 	bridgeLocker BridgeLocker
@@ -501,6 +518,10 @@ type Engine struct {
 	// committed or been voted down: re-offering one that is still in flight would
 	// commit the same change twice.
 	setChangeOffered map[string]time.Time
+	// lastMembershipGossip rate-limits re-announcing open membership requests.
+	// Transactions remain in the mempool until committed; periodic re-gossip
+	// makes candidate admission survive a dropped first publication.
+	lastMembershipGossip time.Time
 	// seenEquivocations dedups reports when no evidence store is configured, so a
 	// gossiped offence is not re-announced on every echo.
 	seenEquivocations map[string]struct{}
@@ -530,6 +551,28 @@ func New(cfg Config) (*Engine, error) {
 	if cfg.Ledger == nil {
 		return nil, fmt.Errorf("consensus: ledger is required")
 	}
+	membershipMode, err := ParseMembershipMode(string(cfg.MembershipMode))
+	if err != nil {
+		return nil, err
+	}
+	participateInOpenSet := true
+	if cfg.ParticipateInOpenSet != nil {
+		participateInOpenSet = *cfg.ParticipateInOpenSet
+	}
+	if membershipMode == MembershipBondedOpen {
+		if cfg.Stake == nil {
+			return nil, fmt.Errorf("consensus: bonded-open membership requires bonded stake")
+		}
+		if stakeMinBond(cfg) == 0 {
+			return nil, fmt.Errorf("consensus: bonded-open membership requires a positive minimum bond")
+		}
+		if cfg.EjectEquivocators != nil && !*cfg.EjectEquivocators {
+			return nil, fmt.Errorf("consensus: bonded-open membership requires automatic equivocation ejection")
+		}
+		if cfg.Evidence == nil {
+			return nil, fmt.Errorf("consensus: bonded-open membership requires a persistent evidence store")
+		}
+	}
 	if cfg.FeeBasisPoints > MaxFeeBasisPoints {
 		return nil, fmt.Errorf("consensus: fee of %d basis points exceeds the %d-basis-point ceiling this build allows",
 			cfg.FeeBasisPoints, MaxFeeBasisPoints)
@@ -558,44 +601,49 @@ func New(cfg Config) (*Engine, error) {
 		// justify producing blocks to get there - a node that has just booted on
 		// a quiet chain has no business emitting empty blocks - so it is a
 		// separate flag from stakeDirty.
-		stakeNeverWeighted: true,
-		minBond:            stakeMinBond(cfg),
-		unbondingPeriod:    orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
-		targetBond:         cfg.TargetBond,
-		feeBasisPoints:     cfg.FeeBasisPoints,
-		maintainerShareBPS: cfg.MaintainerFeeShareBasisPoints,
-		providers:          cfg.Providers,
-		emissionPerBlock:   cfg.ProviderEmissionPerBlock,
-		emissionHalfLife:   orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
-		approvedProviders:  make(map[string]struct{}, len(cfg.ApprovedProviders)),
-		epochLength:        orUint64C(cfg.EpochLength, DefaultEpochLength),
-		approvedChanges:    make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
-		mempoolSet:         make(map[string]struct{}),
-		committedNonces:    make(map[string]struct{}),
-		mempoolNonces:      make(map[string]struct{}),
-		bridgeLocker:       cfg.BridgeLocker,
-		burnAttestations:   make(map[string]map[string]struct{}),
-		burnUnlocker:       cfg.BurnUnlocker,
-		committedTxs:       make(map[string]struct{}),
-		appliedTxs:         make(map[string]bool),
-		settleWaiters:      make(map[string][]chan struct{}),
-		setChangeOffered:   make(map[string]time.Time),
-		proposals:          make(map[string]*Block),
-		prevotes:           make(map[uint64]map[string]map[string]Vote),
-		precommits:         make(map[uint64]map[string]map[string]Vote),
-		futureProposals:    make(map[string]*futureBlock),
-		futureVotes:        make(map[uint64]map[string]map[string]Vote),
+		stakeNeverWeighted:   true,
+		minBond:              stakeMinBond(cfg),
+		unbondingPeriod:      orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
+		targetBond:           cfg.TargetBond,
+		feeBasisPoints:       cfg.FeeBasisPoints,
+		maintainerShareBPS:   cfg.MaintainerFeeShareBasisPoints,
+		providers:            cfg.Providers,
+		emissionPerBlock:     cfg.ProviderEmissionPerBlock,
+		emissionHalfLife:     orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
+		approvedProviders:    make(map[string]struct{}, len(cfg.ApprovedProviders)),
+		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
+		membershipMode:       membershipMode,
+		participateInOpenSet: participateInOpenSet,
+		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
+		mempoolSet:           make(map[string]struct{}),
+		committedNonces:      make(map[string]struct{}),
+		mempoolNonces:        make(map[string]struct{}),
+		pendingMembership:    make(map[string]string),
+		bridgeLocker:         cfg.BridgeLocker,
+		burnAttestations:     make(map[string]map[string]struct{}),
+		burnUnlocker:         cfg.BurnUnlocker,
+		committedTxs:         make(map[string]struct{}),
+		appliedTxs:           make(map[string]bool),
+		settleWaiters:        make(map[string][]chan struct{}),
+		setChangeOffered:     make(map[string]time.Time),
+		proposals:            make(map[string]*Block),
+		prevotes:             make(map[uint64]map[string]map[string]Vote),
+		precommits:           make(map[uint64]map[string]map[string]Vote),
+		futureProposals:      make(map[string]*futureBlock),
+		futureVotes:          make(map[uint64]map[string]map[string]Vote),
 	}
-	for _, c := range cfg.ApprovedSetChanges {
-		spec, err := ParseChangeSpec(c)
-		if err != nil {
-			// Fail the node rather than ignore the entry: an operator who mistyped an
-			// approval would otherwise believe they had agreed to a change their node
-			// will in fact vote against.
-			return nil, fmt.Errorf("consensus: approved set change %q: %w", c, err)
+	if membershipMode == MembershipOperatorApproved {
+		for _, c := range cfg.ApprovedSetChanges {
+			spec, err := ParseChangeSpec(c)
+			if err != nil {
+				// Fail the node rather than ignore the entry: an operator who mistyped an
+				// approval would otherwise believe they had agreed to a change their node
+				// will in fact vote against.
+				return nil, fmt.Errorf("consensus: approved set change %q: %w", c, err)
+			}
+			e.approvedChanges[strings.ToLower(spec.String())] = struct{}{}
+			e.approvedSpecs = append(e.approvedSpecs, spec)
 		}
-		e.approvedChanges[strings.ToLower(spec.String())] = struct{}{}
-		e.approvedSpecs = append(e.approvedSpecs, spec)
 	}
 	// Evidence already on disk is still evidence. A node that recorded an
 	// offence, was restarted before the network ejected the offender, and then
@@ -759,14 +807,28 @@ func (e *Engine) Start(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("consensus: subscribe evidence: %w", err)
 	}
+	var membershipCh <-chan transport.Message
+	if e.membershipMode == MembershipBondedOpen {
+		membershipCh, err = e.transport.Subscribe(ctx, TopicMembership)
+		if err != nil {
+			return fmt.Errorf("consensus: subscribe membership: %w", err)
+		}
+	}
 
-	e.wg.Add(7)
+	workers := 7 // six receive loops plus the driver
+	if membershipCh != nil {
+		workers++
+	}
+	e.wg.Add(workers)
 	go e.runLoop(ctx, proposalCh, e.handleProposal)
 	go e.runLoop(ctx, voteCh, e.handleVote)
 	go e.runLoop(ctx, syncReqCh, e.handleSyncRequest)
 	go e.runLoop(ctx, syncRespCh, e.handleSyncResponse)
 	go e.runLoop(ctx, headCh, e.handleHeadAnnounce)
 	go e.runLoop(ctx, evidenceCh, e.handleEvidence)
+	if membershipCh != nil {
+		go e.runLoop(ctx, membershipCh, e.handleMembership)
+	}
 	go e.driver(ctx)
 	return nil
 }
@@ -815,7 +877,19 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	}
 	key := mempoolKey(tx)
 	e.mu.Lock()
-	defer e.mu.Unlock()
+	publishMembership := false
+	defer func() {
+		e.mu.Unlock()
+		if publishMembership {
+			e.publishMembership(tx)
+		}
+	}()
+	if e.membershipMode == MembershipBondedOpen {
+		// State may have changed since an entry was accepted. Reclaim stale public
+		// membership slots before applying the global cap so an overtaken request
+		// cannot crowd out otherwise valid work.
+		e.pruneStaleMembershipLocked()
+	}
 	if _, ok := e.committedTxs[key]; ok {
 		// Already committed: a replay of a finalized transaction. Ignore silently
 		// so a well-meaning re-submit is a no-op while a malicious replay cannot
@@ -825,11 +899,29 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	if _, ok := e.mempoolSet[key]; ok {
 		return nil
 	}
-	// Bounded, because Submit does not and cannot check affordability: a keypair
-	// with no balance could otherwise grow this without limit. The refusal is
-	// explicit rather than a silent drop, so an honest sender hitting a
-	// congested node knows to retry rather than believing its transfer is
-	// pending. Room is freed as blocks commit.
+
+	membershipSlot := ""
+	if e.membershipMode == MembershipBondedOpen && isOpenMembershipTransaction(tx) {
+		var err error
+		membershipSlot, _, err = e.validateOpenMembershipAdmissionLocked(tx, e.height)
+		if err != nil {
+			return err
+		}
+		if _, pending := e.pendingMembership[membershipSlot]; pending {
+			// Stable idempotence: a nonce, timestamp or signature variant of the
+			// same identity/operation does not earn another mempool slot.
+			return nil
+		}
+		limit := membershipMempoolLimit(e.maxMempoolTxs)
+		if len(e.pendingMembership) >= limit {
+			return fmt.Errorf("%w: the bonded-open membership quota is full (%d transactions); retry once membership work has committed",
+				ErrMempoolFull, limit)
+		}
+	}
+	// Bounded, because Submit does not and cannot check affordability for normal
+	// transfers: a keypair with no balance could otherwise grow this without
+	// limit. Public bonded-open operations are state-checked above before they
+	// can consume this shared quota.
 	if len(e.mempool) >= e.maxMempoolTxs {
 		return fmt.Errorf("%w: the mempool is full (%d transactions); retry once blocks have "+
 			"committed", ErrMempoolFull, e.maxMempoolTxs)
@@ -851,8 +943,178 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 		e.mempoolNonces[nk] = struct{}{}
 	}
 	e.mempoolSet[key] = struct{}{}
+	if membershipSlot != "" {
+		e.pendingMembership[membershipSlot] = key
+	}
 	e.mempool = append(e.mempool, *tx)
+	publishMembership = membershipSlot != ""
 	return nil
+}
+
+// isOpenMembershipTransaction reports whether tx belongs on the candidate
+// membership topic. Slash requests are intentionally excluded: they are
+// generated only by validators that hold objective evidence and travel inside
+// ordinary proposals.
+func isOpenMembershipTransaction(tx *token.Transaction) bool {
+	if tx == nil {
+		return false
+	}
+	if IsStakeRecipient(tx.To) {
+		return true
+	}
+	if !IsSetChangeRecipient(tx.To) {
+		return false
+	}
+	change, err := ParseSetChange(tx.To, 0)
+	return err == nil && (change.Kind == SetChangeAdd || change.Kind == SetChangeRemove)
+}
+
+// openMembershipSlot identifies one public operation for one identity without
+// using attacker-controlled nonce, timestamp or signature fields. Admission and
+// exit have separate slots, as do bond and withdrawal: a validator may queue a
+// withdrawal while its self-exit is still pending, which is the existing
+// bond-leave-wait-withdraw lifecycle.
+func openMembershipSlot(tx *token.Transaction) (slot, identity string, ok bool) {
+	if tx == nil {
+		return "", "", false
+	}
+	if IsStakeRecipient(tx.To) {
+		req, err := ParseStakeRecipient(tx.To)
+		if err != nil {
+			return "", "", false
+		}
+		return "stake:" + string(req.Op) + ":" + req.Account, req.Account, true
+	}
+	if IsSetChangeRecipient(tx.To) {
+		change, err := ParseSetChange(tx.To, 0)
+		if err != nil || (change.Kind != SetChangeAdd && change.Kind != SetChangeRemove) {
+			return "", "", false
+		}
+		return "set:" + string(change.Kind) + ":" + change.ValidatorID, change.ValidatorID, true
+	}
+	return "", "", false
+}
+
+// membershipMempoolLimit gives public membership traffic a bounded fraction of
+// the shared mempool and always reserves capacity for ordinary transactions.
+// Identity slots stop one account multiplying requests; this quota stops many
+// cheaply funded identities from collectively taking every slot. A cap of one
+// reserves that sole slot for ordinary work.
+func membershipMempoolLimit(maxMempool int) int {
+	if maxMempool <= 1 {
+		return 0
+	}
+	limit := maxMempool / 4
+	if limit < 1 {
+		limit = 1
+	}
+	if limit >= maxMempool {
+		return maxMempool - 1
+	}
+	return limit
+}
+
+// validateOpenMembershipAdmissionLocked applies the state-aware resource gate
+// at the public gossip boundary. Consensus validity remains in the existing
+// verify methods; this gate prevents operations that cannot presently make
+// progress from occupying the shared mempool. A real withdrawal is the one
+// exception: it may wait while its owner exits and serves the unbonding delay.
+// Callers must hold e.mu.
+func (e *Engine) validateOpenMembershipAdmissionLocked(tx *token.Transaction, height uint64) (slot, identity string, err error) {
+	slot, identity, ok := openMembershipSlot(tx)
+	if !ok {
+		return "", "", fmt.Errorf("%w: not a bonded-open membership operation", ErrInvalidMessage)
+	}
+
+	if IsSetChangeRecipient(tx.To) {
+		if err := e.verifySetChangeLocked(tx, height); err != nil {
+			return "", "", err
+		}
+		return slot, identity, nil
+	}
+
+	req, err := ParseStakeRecipient(tx.To)
+	if err != nil {
+		return "", "", err
+	}
+	stakeErr := e.verifyStakeTxLocked(tx, height)
+	switch req.Op {
+	case StakeOpBond:
+		if stakeErr != nil {
+			return "", "", stakeErr
+		}
+		spendable, err := e.ledger.Balance(identity)
+		if err != nil {
+			return "", "", err
+		}
+		if spendable < tx.Amount {
+			return "", "", fmt.Errorf("%w: %s has %d spendable but the bond requires %d",
+				ErrInsufficientBond, identity, spendable, tx.Amount)
+		}
+		return slot, identity, nil
+
+	case StakeOpWithdraw:
+		if stakeErr != nil && !errors.Is(stakeErr, ErrBondLocked) {
+			return "", "", stakeErr
+		}
+		bonded, err := e.stake.Bonded(identity)
+		if err != nil {
+			return "", "", err
+		}
+		if bonded == 0 {
+			return "", "", fmt.Errorf("%w: %s has no bond to withdraw", ErrInsufficientBond, identity)
+		}
+		return slot, identity, nil
+	}
+	return "", "", fmt.Errorf("%w: unknown stake operation %q", ErrInvalidMessage, req.Op)
+}
+
+// removeMempoolIndexesLocked releases every index owned by tx. Keeping this in
+// one place prevents stale membership slots from surviving a commit, proposal
+// drop or state-based eviction after the slice entry itself is gone.
+func (e *Engine) removeMempoolIndexesLocked(tx *token.Transaction) {
+	key := mempoolKey(tx)
+	delete(e.mempoolSet, key)
+	if nk, checked := nonceKey(tx); checked {
+		delete(e.mempoolNonces, nk)
+	}
+	if slot, _, ok := openMembershipSlot(tx); ok && e.pendingMembership[slot] == key {
+		delete(e.pendingMembership, slot)
+	}
+}
+
+// publishMembership announces a small, self-signed candidate transaction.
+// Publish is best-effort; maybeGossipMembership periodically retries pending
+// transactions so a dropped first message cannot strand a candidate forever.
+func (e *Engine) publishMembership(tx *token.Transaction) {
+	if e.membershipMode != MembershipBondedOpen || !isOpenMembershipTransaction(tx) {
+		return
+	}
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return
+	}
+	_ = e.transport.Publish(context.Background(), TopicMembership, data)
+}
+
+// handleMembership accepts only the narrow self-service transaction family.
+// Full state-dependent validity is still checked by block builders and voters;
+// this handler performs the cheap signature/shape gate and bounded mempool
+// insertion without trusting the publishing peer.
+func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
+	if e.membershipMode != MembershipBondedOpen {
+		return
+	}
+	var tx token.Transaction
+	if err := json.Unmarshal(msg.Payload, &tx); err != nil || !isOpenMembershipTransaction(&tx) {
+		return
+	}
+	if err := tx.Verify(); err != nil {
+		return
+	}
+	// Submit may echo a newly-seen transaction once. The mempool dedup makes
+	// subsequent echoes no-ops, so gossip converges rather than loops.
+	_ = e.Submit(&tx)
 }
 
 // mempoolKey is a stable dedup key for a transaction: sender + nonce +
@@ -897,6 +1159,8 @@ func (e *Engine) driver(ctx context.Context) {
 			e.maybeRequestSync(ctx)
 			e.maybeProposeApprovedChanges()
 			e.maybeTopUpBond()
+			e.maybeMaintainOpenMembership()
+			e.maybeGossipMembership()
 			e.maybeOfferProviderChanges()
 			e.tick(ctx)
 		}
@@ -1060,7 +1324,9 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		}
 	}
 
+	e.pruneStaleMembershipLocked()
 	txs := make([]token.Transaction, 0, len(e.mempool))
+	seenMembershipIdentities := make(map[string]struct{})
 	for i := range e.mempool {
 		if len(txs) >= e.maxBlockTxs {
 			break
@@ -1086,7 +1352,32 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		if err := e.verifyReservedRecipientLocked(&e.mempool[i], e.height); err != nil {
 			continue
 		}
+		if e.membershipMode == MembershipBondedOpen {
+			if _, identity, ok := openMembershipSlot(&e.mempool[i]); ok {
+				if _, exists := seenMembershipIdentities[identity]; exists {
+					continue
+				}
+				seenMembershipIdentities[identity] = struct{}{}
+			}
+		}
 		txs = append(txs, e.mempool[i])
+	}
+	// Individual checks all see the same committed prefix. Trim only the latest
+	// set change until the whole selected batch also respects pending targets and
+	// validator-set bounds; ordinary transactions remain in place. This mirrors
+	// block verification and preserves useful remove+add batches when valid.
+	for e.verifySetChangeBatchLocked(txs, e.height) != nil {
+		lastSetChange := -1
+		for i := len(txs) - 1; i >= 0; i-- {
+			if IsSetChangeRecipient(txs[i].To) {
+				lastSetChange = i
+				break
+			}
+		}
+		if lastSetChange < 0 {
+			break
+		}
+		txs = append(txs[:lastSetChange], txs[lastSetChange+1:]...)
 	}
 	if len(txs) == 0 && !e.mustAdvanceToEpochBoundaryLocked() {
 		return nil, nil
@@ -1179,12 +1470,7 @@ func (e *Engine) dropSetChangesFromMempool(b *Block) {
 	for i := range e.mempool {
 		k := mempoolKey(&e.mempool[i])
 		if _, remove := drop[k]; remove {
-			delete(e.mempoolSet, k)
-			// Dropped without committing, so the nonce was never spent: release
-			// the hold or the sender could never use that nonce again.
-			if nk, checked := nonceKey(&e.mempool[i]); checked {
-				delete(e.mempoolNonces, nk)
-			}
+			e.removeMempoolIndexesLocked(&e.mempool[i])
 			continue
 		}
 		kept = append(kept, e.mempool[i])
@@ -1362,6 +1648,7 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	// transfer past honest voters.
 	seenInBlock := make(map[string]struct{}, len(b.Txs))
 	seenNonceInBlock := make(map[string]struct{}, len(b.Txs))
+	seenMembershipIdentities := make(map[string]struct{})
 	for i := range b.Txs {
 		if err := b.Txs[i].Verify(); err != nil {
 			return fmt.Errorf("%w: tx %d: %v", ErrInvalidMessage, i, err)
@@ -1374,6 +1661,15 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		// reason is not flattened into a string.
 		if err := e.verifyReservedRecipientLocked(&b.Txs[i], b.Height); err != nil {
 			return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+		}
+		if e.membershipMode == MembershipBondedOpen {
+			if _, identity, ok := openMembershipSlot(&b.Txs[i]); ok {
+				if _, exists := seenMembershipIdentities[identity]; exists {
+					return fmt.Errorf("%w: tx %d repeats or conflicts with another membership operation for %s",
+						ErrInvalidMessage, i, identity)
+				}
+				seenMembershipIdentities[identity] = struct{}{}
+			}
 		}
 		key := mempoolKey(&b.Txs[i])
 		// Reject a block that replays an already-committed transaction: an honest
@@ -1405,6 +1701,13 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 			seenNonceInBlock[nk] = struct{}{}
 		}
 	}
+	// Validate validator membership operations as one batch. Per-transaction
+	// checks above all see the same committed prefix; without this pass two
+	// individually valid admissions could jointly cross MaxValidators, and two
+	// operations for one identity could acquire order-dependent meaning.
+	if err := e.verifySetChangeBatchLocked(b.Txs, b.Height); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1420,12 +1723,33 @@ func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) err
 	if err != nil {
 		return err
 	}
-	// Only a sitting validator may put a set change to the network. Without this
-	// any account could fill blocks with proposals for the set.
 	sender := tx.SenderID()
-	if !e.vset().Contains(sender) {
-		return fmt.Errorf("%w: set change submitted by %s, who is not a validator",
-			ErrNotValidator, sender)
+	switch e.membershipMode {
+	case MembershipBondedOpen:
+		switch change.Kind {
+		case SetChangeAdd:
+			if sender != change.ValidatorID {
+				return fmt.Errorf("%w: bonded-open admission must be self-signed by %s", ErrInvalidMessage, change.ValidatorID)
+			}
+		case SetChangeRemove:
+			if sender != change.ValidatorID {
+				return fmt.Errorf("%w: bonded-open exit must be self-signed by %s", ErrInvalidMessage, change.ValidatorID)
+			}
+		case SetChangeSlash:
+			if !e.vset().Contains(sender) {
+				return fmt.Errorf("%w: slash submitted by %s, who is not a validator", ErrNotValidator, sender)
+			}
+			if !e.hasStoredEvidenceLocked(change.ValidatorID) {
+				return fmt.Errorf("%w: slash of %s has no stored equivocation evidence", ErrInvalidMessage, change.ValidatorID)
+			}
+		}
+	default:
+		// In operator-approved mode only a sitting validator may put a set
+		// change to the network; the local allow-list separately decides whether
+		// this node votes for it.
+		if !e.vset().Contains(sender) {
+			return fmt.Errorf("%w: set change submitted by %s, who is not a validator", ErrNotValidator, sender)
+		}
 	}
 	// A set change is not a transfer. Requiring zero value keeps the reserved
 	// recipients from doubling as a way to move credits into an address no key
@@ -1471,9 +1795,34 @@ func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) err
 		projected = next
 	}
 	if change.InForce(projected) {
+		// Evidence may arrive after an offender voluntarily exited. Its bond
+		// remains slashable through the unbonding period, so an evidence-backed
+		// slash is still meaningful while a bond remains even though membership
+		// removal itself is already in force.
+		if change.Kind == SetChangeSlash && e.stake != nil {
+			bonded, err := e.stake.Bonded(change.ValidatorID)
+			if err != nil {
+				return err
+			}
+			if bonded > 0 {
+				return nil
+			}
+		}
 		return fmt.Errorf("%w: %s is already in force", ErrInvalidMessage, change)
 	}
 	return nil
+}
+
+// hasStoredEvidenceLocked reports whether this node has independently verified
+// and persisted equivocation evidence against validatorID. Evidence is recorded
+// only after signature and then-current membership checks, so this remains valid
+// if a voluntary exit happens before the slash transaction commits.
+func (e *Engine) hasStoredEvidenceLocked(validatorID string) bool {
+	if e.evidence == nil {
+		return false
+	}
+	records, err := e.evidence.ByValidator(validatorID)
+	return err == nil && len(records) > 0
 }
 
 // verifyStakeTxLocked decides whether a stake transaction may be in a block at
@@ -1663,9 +2012,12 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		}
 		// The SECOND reserved recipient that legitimately carries value, and the
 		// only one besides a stake bond. Moving the amount into escrow is the
-		// whole operation, and a zero-value lock would mint nothing while
-		// consuming a lock id.
-		valueAllowed = tx.Amount > 0
+		// whole operation. Apply the same minimum as block verification here so a
+		// lock that can never enter a valid block cannot poison the mempool.
+		if err := verifyBridgeLockAmount(tx.Amount); err != nil {
+			return err
+		}
+		valueAllowed = true
 	}
 
 	if tx.Amount != 0 && !valueAllowed {
@@ -1777,6 +2129,40 @@ func (e *Engine) setChangesInLocked(b *Block) []SetChange {
 	return out
 }
 
+// verifySetChangeBatchLocked applies the aggregate membership constraints that
+// individual validation cannot see: distinct requests in one block must not
+// repeat a pending target or jointly exceed the validator-set bounds. Both the
+// proposal builder and block verifier use this method so an honest leader never
+// constructs a block it would vote against itself. Callers must hold e.mu.
+func (e *Engine) verifySetChangeBatchLocked(txs []token.Transaction, height uint64) error {
+	changes := make([]SetChange, 0)
+	seenTargets := make(map[string]struct{}, len(e.pendingChanges))
+	for _, c := range e.pendingChanges {
+		seenTargets[c.ValidatorID] = struct{}{}
+	}
+	for i := range txs {
+		if !IsSetChangeRecipient(txs[i].To) {
+			continue
+		}
+		change, err := ParseSetChange(txs[i].To, height)
+		if err != nil {
+			return err
+		}
+		if _, exists := seenTargets[change.ValidatorID]; exists {
+			return fmt.Errorf("%w: block repeats or conflicts with a pending membership change for %s",
+				ErrInvalidMessage, change.ValidatorID)
+		}
+		seenTargets[change.ValidatorID] = struct{}{}
+		changes = append(changes, change)
+	}
+	if len(changes) == 0 {
+		return nil
+	}
+	combined := append(append([]SetChange(nil), e.pendingChanges...), changes...)
+	_, err := e.vset().WithChanges(combined)
+	return err
+}
+
 // approvesChangesLocked reports whether this operator has approved every change
 // in a block.
 //
@@ -1787,6 +2173,14 @@ func (e *Engine) setChangesInLocked(b *Block) []SetChange {
 // what stops one validator from proposing the removal of all the others and
 // having it wave through. Callers must hold e.mu.
 func (e *Engine) approvesChangesLocked(changes []SetChange) bool {
+	if e.membershipMode == MembershipBondedOpen {
+		for _, c := range changes {
+			if c.Kind == SetChangeSlash && !e.hasStoredEvidenceLocked(c.ValidatorID) {
+				return false
+			}
+		}
+		return true
+	}
 	for _, c := range changes {
 		if _, ok := e.approvedChanges[strings.ToLower(c.String())]; !ok {
 			return false
@@ -2954,7 +3348,7 @@ func (e *Engine) advanceHeight(committed *Block) {
 	for i := range e.mempool {
 		k := mempoolKey(&e.mempool[i])
 		if _, done := committedKeys[k]; done {
-			delete(e.mempoolSet, k)
+			e.removeMempoolIndexesLocked(&e.mempool[i])
 			continue
 		}
 		kept = append(kept, e.mempool[i])
@@ -3035,27 +3429,29 @@ func (e *Engine) advanceHeight(committed *Block) {
 	// Now that the height, the pending changes and (at a boundary) the set are
 	// all up to date, drop the set-change transactions the chain has overtaken.
 	// Left in the mempool they would make every block carrying them invalid.
-	e.pruneStaleSetChangesLocked()
+	e.pruneStaleMembershipLocked()
 	e.committing = false
 }
 
-// pruneStaleSetChangesLocked drops the set-change transactions in the mempool
-// that can no longer commit: a duplicate of a change already in force or
-// already pending, and one whose submitter has left the validator set. Such a
-// transaction makes any block carrying it invalid, so it is not merely useless
-// - left in place it would be proposed again and again by whichever node holds
-// it. Callers must hold e.mu.
-func (e *Engine) pruneStaleSetChangesLocked() {
+// pruneStaleMembershipLocked drops entries whose committed state has overtaken
+// them. In bonded-open mode this covers the entire public membership family:
+// now-unfunded bonds, admissions/exits that are no longer valid, and withdrawals
+// after their bond is gone. A real locked withdrawal is retained so it can land
+// after self-exit and the unbonding delay. Legacy operator-approved set changes
+// keep their existing stale-pruning behavior. Callers must hold e.mu.
+func (e *Engine) pruneStaleMembershipLocked() {
 	kept := e.mempool[:0]
 	for i := range e.mempool {
-		if IsSetChangeRecipient(e.mempool[i].To) {
-			if err := e.verifySetChangeLocked(&e.mempool[i], e.height); err != nil {
-				delete(e.mempoolSet, mempoolKey(&e.mempool[i]))
-				if nk, checked := nonceKey(&e.mempool[i]); checked {
-					delete(e.mempoolNonces, nk)
-				}
-				continue
-			}
+		stale := false
+		if e.membershipMode == MembershipBondedOpen && isOpenMembershipTransaction(&e.mempool[i]) {
+			_, _, err := e.validateOpenMembershipAdmissionLocked(&e.mempool[i], e.height)
+			stale = err != nil
+		} else if IsSetChangeRecipient(e.mempool[i].To) {
+			stale = e.verifySetChangeLocked(&e.mempool[i], e.height) != nil
+		}
+		if stale {
+			e.removeMempoolIndexesLocked(&e.mempool[i])
+			continue
 		}
 		kept = append(kept, e.mempool[i])
 	}
@@ -3292,7 +3688,15 @@ func (e *Engine) maybeProposeApprovedChanges() {
 	var todo []SetChange
 	for _, spec := range e.approvedSpecs {
 		key := spec.String()
-		if spec.InForce(vs) {
+		inForce := spec.InForce(vs)
+		if inForce && spec.Kind == SetChangeSlash && e.stake != nil {
+			// A voluntary exit does not erase objective equivocation. Keep offering
+			// the slash while the offender's delayed bond is still present.
+			if bonded, err := e.stake.Bonded(spec.ValidatorID); err == nil && bonded > 0 {
+				inForce = false
+			}
+		}
+		if inForce {
 			continue
 		}
 		if _, waiting := pending[key]; waiting {
@@ -3363,6 +3767,88 @@ func (e *Engine) approveRemovalLocked(validatorID string) {
 	e.approvedChanges[key] = struct{}{}
 	e.approvedSpecs = append(e.approvedSpecs, change)
 }
+
+// maybeMaintainOpenMembership turns local intent into self-signed, gossiped
+// membership transactions. A candidate joins only after its minimum bond is
+// visible in committed state; an active validator may always leave voluntarily.
+func (e *Engine) maybeMaintainOpenMembership() {
+	if e.membershipMode != MembershipBondedOpen || e.self == nil {
+		return
+	}
+
+	e.mu.Lock()
+	active := e.vset().Contains(e.selfID)
+	wantActive := e.participateInOpenSet
+	for _, c := range e.pendingChanges {
+		if c.ValidatorID == e.selfID && ((wantActive && c.Kind == SetChangeAdd) || (!wantActive && c.Kind == SetChangeRemove)) {
+			e.mu.Unlock()
+			return
+		}
+	}
+	for i := range e.mempool {
+		if !IsSetChangeRecipient(e.mempool[i].To) || e.mempool[i].SenderID() != e.selfID {
+			continue
+		}
+		c, err := ParseSetChange(e.mempool[i].To, e.height)
+		if err == nil && c.ValidatorID == e.selfID {
+			e.mu.Unlock()
+			return
+		}
+	}
+	if active == wantActive {
+		e.mu.Unlock()
+		return
+	}
+	if !e.lastSetChangeSubmit.IsZero() && time.Since(e.lastSetChangeSubmit) < offerBackoffRounds*e.roundTimeout {
+		e.mu.Unlock()
+		return
+	}
+	e.lastSetChangeSubmit = time.Now()
+	nonce := e.setChangeNonce
+	e.setChangeNonce++
+	e.mu.Unlock()
+
+	var recipient string
+	if wantActive {
+		bonded, err := e.stake.Bonded(e.selfID)
+		if err != nil || bonded < e.minBond {
+			return
+		}
+		recipient = AddValidatorRecipient(e.self.PublicKey)
+	} else {
+		recipient = RemoveValidatorRecipient(e.selfID)
+	}
+	if _, err := e.SubmitAccountTransfer(e.self, recipient, 0, nonce); err != nil {
+		fmt.Printf("consensus: could not submit bonded-open membership request: %v\n", err)
+	}
+}
+
+// maybeGossipMembership periodically re-announces pending candidate operations.
+// This is deliberately bounded by time and mempool size; it does not create new
+// transactions and stops as soon as a request commits or becomes stale.
+func (e *Engine) maybeGossipMembership() {
+	if e.membershipMode != MembershipBondedOpen {
+		return
+	}
+	e.mu.Lock()
+	if !e.lastMembershipGossip.IsZero() && time.Since(e.lastMembershipGossip) < membershipGossipInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastMembershipGossip = time.Now()
+	pending := make([]token.Transaction, 0, 4)
+	for i := range e.mempool {
+		if isOpenMembershipTransaction(&e.mempool[i]) {
+			pending = append(pending, e.mempool[i])
+		}
+	}
+	e.mu.Unlock()
+	for i := range pending {
+		e.publishMembership(&pending[i])
+	}
+}
+
+const membershipGossipInterval = 2 * time.Second
 
 // maybeTopUpBond submits a bond for the shortfall between what this node has
 // bonded and what its operator configured, so bonding is something a node does

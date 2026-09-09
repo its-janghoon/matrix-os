@@ -3,6 +3,13 @@
 // attestation as JSON so the Solidity/hardhat end-to-end flow can mint against
 // it.
 //
+// It does NOT model dynamic native validator membership. Its deterministic
+// signers stand in for the fixed EVM attestor committee selected when
+// WrappedMatrix is deployed. Production operators use `matrix bridge
+// attestor-new`, `matrix bridge lock`, `matrix bridge attestation`, and `matrix
+// bridge reconcile`; the user submits the Base mint and pays Base gas without a
+// Matrix relayer.
+//
 // It does NOT read or write any real key material: attestor secp256k1 keys are
 // derived deterministically from a plain-text seed via sha256 so the same
 // invocation always yields the same local test addresses. NEVER use this key
@@ -37,15 +44,23 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 func main() {
-	recipientHex := flag.String("recipient", "", "ethereum recipient address (0x + 40 hex)")
-	native := flag.Uint64("native", 0, "native base units to lock (9 decimals)")
-	chainID := flag.Int64("chain-id", 31337, "EVM chain id the WrappedMatrix is deployed on")
+	flag.CommandLine.SetOutput(os.Stderr)
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "bridge-attest is a LOCAL/TEST-ONLY fixed-attestor helper; never use its deterministic keys for funds.")
+		fmt.Fprintln(os.Stderr, "Production: use matrix bridge attestor-new/lock/attestation/reconcile; users pay their own Base mint gas.")
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags]\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+	recipientHex := flag.String("recipient", "", "Base recipient address (0x + 40 hex)")
+	native := flag.Uint64("native", 0, "native base units to lock (minimum 100 MATRIX = 100000000000; 9 decimals)")
+	chainID := flag.Int64("chain-id", 31337, "EVM chain id (84532 Base Sepolia rehearsal; 8453 Base production)")
 	contractHex := flag.String("contract", "", "deployed WrappedMatrix contract address")
-	threshold := flag.Int("threshold", 2, "signatures required to mint")
-	validators := flag.Int("validators", 3, "number of validator attestors")
+	threshold := flag.Int("threshold", 2, "distinct fixed EVM attestor signatures required to mint")
+	validators := flag.Int("validators", 3, "number of deterministic fixed-attestor test signers (legacy flag name)")
 	seed := flag.String("seed", "matrix-local-test", "deterministic local test-key seed (NOT a secret)")
 	consensusPath := flag.Bool("consensus", false,
 		"derive the lock the way a committed block does (transaction nonce, not a per-node counter)")
@@ -55,6 +70,11 @@ func main() {
 	if *recipientHex == "" || *contractHex == "" || *native == 0 {
 		fmt.Fprintln(os.Stderr, "recipient, contract, and native are required")
 		flag.Usage()
+		os.Exit(2)
+	}
+	if *native < token.MinBridgeLockAmount {
+		fmt.Fprintf(os.Stderr, "native amount %d is below the minimum bridge lock of %d base units (100 MATRIX)\n",
+			*native, token.MinBridgeLockAmount)
 		os.Exit(2)
 	}
 	if *threshold < 1 || *threshold > *validators {

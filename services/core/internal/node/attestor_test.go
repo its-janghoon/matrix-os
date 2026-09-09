@@ -1,6 +1,8 @@
 package node
 
 import (
+	"bytes"
+	"math/big"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,5 +109,41 @@ func TestAttestingNeedsBothHalves(t *testing.T) {
 	}
 	if got := lockAttestorFor(nil, nil); got != nil {
 		t.Fatal("a node with neither claimed it could attest")
+	}
+}
+
+func TestBridgeReadinessNeedsBothHalvesAndSignsDeployment(t *testing.T) {
+	att, err := bridge.NewAttestorFromBytes(bytes.Repeat([]byte{0x31}, 32))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bridgeReadinessFor(nil, att) != nil || bridgeReadinessFor(nil, nil) != nil {
+		t.Fatal("readiness was exposed without both bridge and key")
+	}
+	params := bridge.AttestationParams{
+		ChainID:        big.NewInt(84532),
+		BridgeContract: bridge.Address{0x22},
+	}
+	b := bridge.New(nil, nil, params)
+	if bridgeReadinessFor(b, nil) != nil {
+		t.Fatal("readiness was exposed without an attestor key")
+	}
+	signer := bridgeReadinessFor(b, att)
+	challenge := bytes.Repeat([]byte{0xa7}, bridge.ReadinessChallengeLen)
+	proof, err := signer.SignBridgeReadiness(challenge)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proof.ChainID != 84532 || proof.Contract != params.BridgeContract.Hex() || proof.Attestor != att.AddressHex() || proof.MinLockNative != token.MinBridgeLockAmount {
+		t.Fatalf("unexpected proof fields: %+v", proof)
+	}
+	var nonce [bridge.ReadinessChallengeLen]byte
+	copy(nonce[:], challenge)
+	recovered, err := bridge.RecoverAddress(bridge.ReadinessDigest(nonce, params, att.Address(), token.MinBridgeLockAmount), proof.Signature)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered != att.Address() {
+		t.Fatalf("recovered %s, want %s", recovered, att.Address())
 	}
 }

@@ -155,8 +155,8 @@ treasury. Re-running is safe: the wallet is reused and the provider re-registere
 				return mapErr(opts.Addr, err)
 			}
 			job := submitResp.GetJob()
-			fmt.Fprintf(out, "4. submitted job %s: %d units @ %d = %d (status %s)\n\n",
-				job.GetId(), job.GetUnits(), price, job.GetPrice(), jobStatusString(job.GetStatus()))
+			fmt.Fprintf(out, "4. submitted job %s: %d units, snapshotted total price %d (status %s)\n\n",
+				job.GetId(), job.GetUnits(), job.GetPrice(), jobStatusString(job.GetStatus()))
 
 			// 5. Complete/settle the job, transferring native MATRIX buyer -> provider.
 			completeResp, err := cc.market.CompleteJob(ctx, &marketv1.CompleteJobRequest{Id: job.GetId()})

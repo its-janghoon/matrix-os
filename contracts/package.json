@@ -1,7 +1,7 @@
 {
   "name": "matrix-contracts",
   "version": "1.0.0",
-  "description": "Matrix Compute Token (MATRIX) — the ERC-20 settlement and earning currency for the Matrix OS compute marketplace.",
+  "description": "Base-primary contracts and operator harness for the 1:1 native-escrow-backed wMATRIX bridge.",
   "license": "MIT",
   "private": true,
   "scripts": {
@@ -13,6 +13,18 @@
     "deploy:bridge:sepolia": "hardhat run scripts/deploy-mainnet.ts --network sepolia",
     "verify:sepolia": "hardhat run scripts/verify-mainnet.ts --network sepolia",
     "mint:sepolia": "hardhat run scripts/bridge-mint.ts --network sepolia",
+    "deploy:bridge:base-sepolia": "hardhat run scripts/deploy-mainnet.ts --network baseSepolia",
+    "verify:base-sepolia": "hardhat run scripts/verify-mainnet.ts --network baseSepolia",
+    "mint:base-sepolia": "hardhat run scripts/bridge-mint.ts --network baseSepolia",
+    "deploy:bridge:base": "hardhat run scripts/deploy-mainnet.ts --network base",
+    "verify:base": "hardhat run scripts/verify-mainnet.ts --network base",
+    "mint:base": "hardhat run scripts/bridge-mint.ts --network base",
+    "deploy:founder-vesting:base": "hardhat run scripts/deploy-founder-vesting.ts --network base",
+    "mint:founder-vesting:base": "hardhat run scripts/founder-vesting-mint.ts --network base",
+    "founder-vesting:status:base": "hardhat run scripts/founder-vesting-status.ts --network base",
+    "deploy:founder-vesting:base-sepolia": "hardhat run scripts/deploy-founder-vesting.ts --network baseSepolia",
+    "mint:founder-vesting:base-sepolia": "hardhat run scripts/founder-vesting-mint.ts --network baseSepolia",
+    "founder-vesting:status:base-sepolia": "hardhat run scripts/founder-vesting-status.ts --network baseSepolia",
     "deploy:bridge:mainnet": "hardhat run scripts/deploy-mainnet.ts --network mainnet",
     "verify:mainnet": "hardhat run scripts/verify-mainnet.ts --network mainnet"
   },

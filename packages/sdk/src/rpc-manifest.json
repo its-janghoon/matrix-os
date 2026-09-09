@@ -27,6 +27,7 @@
         "CompleteJob",
         "FundAccount",
         "GetBalance",
+        "GetBridgeReadiness",
         "GetBridgeReconciliation",
         "GetJob",
         "GetLockAttestation",
@@ -36,7 +37,8 @@
         "ListTransactions",
         "RegisterProvider",
         "SubmitJob",
-        "SubmitSignedTransfer"
+        "SubmitSignedTransfer",
+        "UpdateProviderQuote"
       ]
     }
   ]

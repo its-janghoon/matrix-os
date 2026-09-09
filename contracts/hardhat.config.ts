@@ -23,6 +23,8 @@ const accounts = PRIVATE_KEY ? [PRIVATE_KEY] : undefined;
 // undefined when unset - NEVER hardcode a credential-bearing URL here.
 const MAINNET_RPC_URL = process.env.MAINNET_RPC_URL;
 const SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL;
+const BASE_RPC_URL = process.env.BASE_RPC_URL;
+const BASE_SEPOLIA_RPC_URL = process.env.BASE_SEPOLIA_RPC_URL;
 
 // A mainnet-fork run of the in-process `hardhat` network is enabled only when
 // MAINNET_FORK_RPC_URL is set (optionally gate with FORK=1). This lets the
@@ -34,6 +36,7 @@ const FORK_ENABLED =
 
 // Etherscan API key for source verification, from env only.
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
+const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY;
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -65,8 +68,9 @@ const config: HardhatUserConfig = {
       url: "http://127.0.0.1:8545",
       accounts,
     },
-    // Ethereum mainnet - production target for the WRAPPED ERC-20 + bridge.
-    // Both the RPC URL and the deployer key are strictly env-provided.
+    // Ethereum mainnet - legacy-compatible target for the wrapped bridge.
+    // Base is the primary production launch target. Both the RPC URL and the
+    // deployer key are strictly env-provided here.
     //
     // chainId IS DECLARED, and that is a safety control rather than metadata.
     // Hardhat only verifies that the endpoint's chain matches when the network
@@ -87,11 +91,46 @@ const config: HardhatUserConfig = {
       accounts,
       chainId: 11155111,
     },
+    // Base mainnet is the primary low-cost production target for wMATRIX
+    // acquisition and redemption. Users pay their own Base ETH gas; this
+    // configuration does not provide a relayer.
+    base: {
+      url: BASE_RPC_URL ?? "",
+      accounts,
+      chainId: 8453,
+    },
+    // Base Sepolia is the full bridge rehearsal network.
+    baseSepolia: {
+      url: BASE_SEPOLIA_RPC_URL ?? "",
+      accounts,
+      chainId: 84532,
+    },
   },
   etherscan: {
-    // Reads the Etherscan API key from env only; empty string keeps the config
-    // valid when the key is unset (verification simply won't be usable).
-    apiKey: ETHERSCAN_API_KEY ?? "",
+    apiKey: {
+      mainnet: ETHERSCAN_API_KEY ?? "",
+      sepolia: ETHERSCAN_API_KEY ?? "",
+      base: BASESCAN_API_KEY ?? "",
+      baseSepolia: BASESCAN_API_KEY ?? "",
+    },
+    customChains: [
+      {
+        network: "base",
+        chainId: 8453,
+        urls: {
+          apiURL: "https://api.basescan.org/api",
+          browserURL: "https://basescan.org",
+        },
+      },
+      {
+        network: "baseSepolia",
+        chainId: 84532,
+        urls: {
+          apiURL: "https://api-sepolia.basescan.org/api",
+          browserURL: "https://sepolia.basescan.org",
+        },
+      },
+    ],
   },
 };
 

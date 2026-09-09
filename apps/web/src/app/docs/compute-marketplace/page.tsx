@@ -39,7 +39,7 @@ export default function ComputeMarketplaceDocs() {
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
                       <li>Symbol <strong>MATRIX</strong>, 9 native decimals on the Matrix L1</li>
                       <li>Supply capped at 1,000,000,000 whole MATRIX; balances live on the consensus ledger</li>
-                      <li>A genesis allocation plus a genesis-funded reward pool back earnings as capped, supply-tracked issuance (no unlimited minting)</li>
+                      <li>Public launch provider emissions are zero; providers earn user-paid MATRIX at their snapshotted quote</li>
                       <li>All settlement is applied deterministically once a consensus block commits</li>
                     </ul>
                   </div>
@@ -49,46 +49,14 @@ export default function ComputeMarketplaceDocs() {
                   <TokenBridge />
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
                     <ul className='text-gray-100 space-y-2 list-disc pl-6'>
-                      <li><strong>Lock to mint</strong> - native MATRIX is locked on the L1, and a threshold of validator secp256k1 attestations authorizes minting the matching wMATRIX</li>
-                      <li>
-                        <strong>Burn to unlock</strong> - burning wMATRIX emits an on-chain Burned event. A watcher
-                        inside the node polls Ethereum for those events past a confirmation depth and keeps a
-                        persisted scan cursor across restarts. What the watcher observes is per-node, so what it is
-                        allowed to do depends on the size of the validator set: alone it releases the escrow itself,
-                        but on a set it submits an <strong>attestation</strong> and the engine releases escrow on the
-                        block where attesting voting power crosses quorum. Either way the release happens exactly
-                        once per event, keyed by transaction hash and log index.
-                      </li>
-                      <li>
-                        <strong>How a lock actually happens.</strong> It is a signed transfer to the reserved
-                        recipient <code>bridge/lock/&lt;ethereum address&gt;</code> - <code>matrix bridge lock</code>
-                        builds it - so it is ordered by consensus like any other transfer and every node applies
-                        the same escrow move from the same committed block. The lock id is derived from the
-                        transaction itself (nonce, sender, recipient, amount) rather than from a per-node counter,
-                        which is the kind of state two nodes disagree about. A lock pays no protocol fee, and that
-                        is load-bearing: the escrow must receive the full amount, because the wrapped supply minted
-                        against it is computed from what was locked, so a fee would mint more wrapped than the
-                        escrow holds.
-                      </li>
-                      <li>
-                        <strong>Then a threshold of signatures.</strong> Each validator holds its own secp256k1
-                        attestor key, in an encrypted keystore, and answers <code>GetLockAttestation</code> with
-                        ONE signature. A client collects m of them and passes the set to
-                        <code> WrappedMatrix.mint</code>, which does the counting. Gossiping partial signatures
-                        would be a second consensus for something the contract already verifies.
-                      </li>
-                      <li>
-                        <strong>Both directions are quorum-gated.</strong> Minting always required a threshold of
-                        validator signatures; the unlock did not, and a per-node release on a validator set would
-                        move collateral on one ledger and nowhere else, splitting the 1:1 backing invariant across
-                        nodes. The attestation recipient is a pure function of the burn, so two validators attesting
-                        the same burn produce byte-identical transactions - and the tally is keyed by the whole
-                        recipient, so attestations that disagree about the account or the amount are separate tallies
-                        and neither borrows the other&apos;s power. A quorum has to agree on where the money goes, not
-                        merely that something was burned.
-                      </li>
-                      <li>Native has 9 decimals and wMATRIX has 18, so one native base unit equals 1e9 wrapped base units and the 1,000,000,000 MATRIX cap maps to the same money on both sides</li>
-                      <li>Runs against local and test networks only; it is not deployed to any public Ethereum network</li>
+                      <li><strong>Lock to mint</strong> - a consensus-ordered lock of at least 100 MATRIX moves the full native amount into escrow; bridge locks pay no protocol fee</li>
+                      <li><strong>Fixed EVM attestors</strong> - WrappedMatrix verifies a threshold of the immutable secp256k1 addresses selected at deployment. That committee is independent of the dynamic native bonded-open validator set; joining native consensus does not grant mint authority</li>
+                      <li><strong>Collect, then submit</strong> - <code>matrix bridge attestation</code> asks the configured endpoints for signatures over one committed lock. The user submits the mint transaction on Base and pays Base gas from their wallet; there is no gas relayer</li>
+                      <li><strong>Burn to unlock</strong> - a confirmed Base Burned event becomes a native-consensus attestation. Escrow release is always ordered on the native chain and, with multiple validators, occurs only in the committed block where native voting power crosses quorum</li>
+                      <li><strong>Two independent quorums</strong> - the fixed contract committee gates EVM minting, while the current native validator set gates burn release. The two sets may overlap operationally but never update each other automatically</li>
+                      <li>Native has 9 decimals and wMATRIX has 18, so one native base unit equals 1e9 wrapped base units. The production contract mint ceiling is 6% of native maximum supply, while every minted unit still requires matching locked collateral</li>
+                      <li>The 1:1 relationship is MATRIX-to-wMATRIX backing only. It is not a USD, USDC or stablecoin peg and does not stabilize market price</li>
+                      <li>Base Sepolia (84532) is the rehearsal target and Base (8453) is the production target. Configuration support is not a live-deployment claim: verify the exact contract address, code and endpoints before signing</li>
                     </ul>
                   </div>
 
@@ -132,11 +100,11 @@ export default function ComputeMarketplaceDocs() {
                       </li>
                     </ul>
                     <p className='text-gray-100 leading-relaxed mt-4 mb-0'>
-                      Jobs are submitted over the <code>matrix.inference.v1</code> InferenceService, capacity is
-                      reserved with an up-front affordability check on the reserved price, the backend runs the request,
-                      and the job settles buyer-to-provider in native MATRIX through the consensus ledger. The charge is scaled
-                      by the provider&apos;s price per unit and capped at the reserved amount, and the job is reported
-                      COMPLETED only once that settlement commits and applies on the ledger.
+                      Jobs reserve capacity against the provider&apos;s current manual MATRIX quote. The reservation
+                      snapshots price per unit, quote identity/version, observation time and expiry, so a later
+                      provider refresh cannot reprice accepted work. Stale quotes are rejected before work starts;
+                      there is no stablecoin peg or automatic DEX oracle. The backend runs, and settlement then moves
+                      native MATRIX buyer-to-provider through consensus, capped at the reserved snapshot.
                     </p>
                   </div>
 

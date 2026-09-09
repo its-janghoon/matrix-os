@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -133,17 +134,51 @@ func TestAMalformedLockRecipientIsRefusedForever(t *testing.T) {
 	}
 }
 
-// TestALockCarriesValueButAZeroLockDoesNot. This is the one reserved recipient
-// besides a stake bond that legitimately holds money, so the value guard has to
-// let it through - and still refuse the degenerate case.
-func TestALockCarriesValueButAZeroLockDoesNot(t *testing.T) {
+// TestBridgeLockMinimumIsIdenticalAtAdmissionAndBlockVerification pins the
+// boundary in both consensus gates. A transaction admitted to the mempool must
+// never be one that every validator will later refuse in a block.
+func TestBridgeLockMinimumIsIdenticalAtAdmissionAndBlockVerification(t *testing.T) {
 	to := BridgeLockRecipient(ethAddr(9))
-	if err := isPermanentlyInvalidReserved(&token.Transaction{To: to, Amount: 1_000}); err != nil {
-		t.Fatalf("a funded lock was refused: %v", err)
-	}
 	e := &Engine{}
-	if err := e.verifyBridgeLockLocked(&token.Transaction{To: to, Amount: 0}); err == nil {
-		t.Fatal("a zero lock was accepted; it would mint nothing and consume a lock id")
+	cases := []struct {
+		name   string
+		amount uint64
+		valid  bool
+	}{
+		{name: "zero", amount: 0},
+		{name: "one below minimum", amount: token.MinBridgeLockAmount - 1},
+		{name: "exact minimum", amount: token.MinBridgeLockAmount, valid: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tx := &token.Transaction{To: to, Amount: tc.amount}
+			for gate, err := range map[string]error{
+				"permanent-invalid admission": isPermanentlyInvalidReserved(tx),
+				"block verification":          e.verifyBridgeLockLocked(tx),
+			} {
+				if tc.valid && err != nil {
+					t.Fatalf("%s rejected exact-minimum lock: %v", gate, err)
+				}
+				if !tc.valid && !errors.Is(err, ErrInvalidMessage) {
+					t.Fatalf("%s error = %v, want ErrInvalidMessage", gate, err)
+				}
+			}
+		})
+	}
+}
+
+func TestBelowMinimumBridgeLockIsRejectedBeforeMempoolInsertion(t *testing.T) {
+	eng := newSubmitOnlyEngine(t, 8)
+	sender, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	tx := signedTransfer(t, sender, BridgeLockRecipient(ethAddr(7)), token.MinBridgeLockAmount-1, 0)
+	if err := eng.Submit(tx); !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("Submit error = %v, want ErrInvalidMessage", err)
+	}
+	if got := eng.MempoolLen(); got != 0 {
+		t.Fatalf("mempool holds %d transactions after permanent rejection, want 0", got)
 	}
 }
 

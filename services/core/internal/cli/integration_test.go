@@ -177,6 +177,46 @@ func TestCLI_EndToEnd(t *testing.T) {
 	}
 }
 
+func TestCLI_ProviderQuoteUpdatePreservesReservations(t *testing.T) {
+	addr, mkt, _ := startServer(t)
+	if err := mkt.RegisterProvider(market.Provider{
+		ID: "provider-refresh", Capacity: 10, PricePerUnit: 3, Models: []string{"Model-A"},
+	}); err != nil {
+		t.Fatalf("RegisterProvider: %v", err)
+	}
+	if err := mkt.Ledger().Credit("buyer", 100); err != nil {
+		t.Fatalf("Credit: %v", err)
+	}
+	job, err := mkt.SubmitJob("buyer", "provider-refresh", 4)
+	if err != nil {
+		t.Fatalf("SubmitJob: %v", err)
+	}
+
+	for i, price := range []string{"7", "9"} {
+		out, err := run(t, addr, "provider", "quote-update", "--id", "provider-refresh", "--price", price)
+		if err != nil {
+			t.Fatalf("provider quote-update %d: %v (%s)", i+1, err, out)
+		}
+		provider, ok := mkt.GetProvider("provider-refresh")
+		if !ok {
+			t.Fatal("provider missing after quote update")
+		}
+		if provider.Capacity != 10 || provider.Available != 6 {
+			t.Fatalf("refresh %d changed capacity/reservation: %+v", i+1, provider)
+		}
+		if len(provider.Models) != 1 || provider.Models[0] != "model-a" {
+			t.Fatalf("refresh %d changed models: %v", i+1, provider.Models)
+		}
+		if provider.QuoteVersion != uint64(i+2) {
+			t.Fatalf("refresh %d quote version = %d, want %d", i+1, provider.QuoteVersion, i+2)
+		}
+		reserved, ok := mkt.GetJob(job.ID)
+		if !ok || reserved.PricePerUnit != 3 || reserved.Price != 12 || reserved.QuoteVersion != 1 {
+			t.Fatalf("refresh %d changed reserved job snapshot: %+v", i+1, reserved)
+		}
+	}
+}
+
 // TestCLI_SecondTransferNonce asserts the client-derived nonce advances so a
 // second transfer from the same sender is accepted (nonce=1) rather than
 // rejected as a replay.

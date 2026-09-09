@@ -128,7 +128,7 @@ func newJobCompleteCommand(opts *globalOptions) *cobra.Command {
 	var id string
 	cmd := &cobra.Command{
 		Use:   "complete",
-		Short: "Settle a job, transferring credits buyer -> provider",
+		Short: "Settle a job, transferring native MATRIX buyer -> provider",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if id == "" {

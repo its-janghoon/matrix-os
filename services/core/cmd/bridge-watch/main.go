@@ -1,8 +1,8 @@
-// Command bridge-watch is the runnable burn->unlock relayer: it connects to an
-// Ethereum JSON-RPC endpoint, scans a WrappedMatrix contract for `Burned` events
-// in a block range, and applies each one to the native bridge (releasing
-// escrowed native MATRIX to the burn's named L1 recipient) exactly once via the
-// replay-safe internal/bridge.ProcessBurn primitive.
+// Command bridge-watch is a standalone burn->unlock DIAGNOSTIC: it connects to
+// an EVM JSON-RPC endpoint, scans a WrappedMatrix contract for `Burned` events
+// in a block range, and applies each one to the throwaway local ledger created
+// below. It is not a production relayer and never touches a running node's
+// canonical escrow.
 //
 // It is the always-on counterpart to cmd/bridge-attest (the mint half). Where
 // bridge-attest proves a Go attestation mints on-chain, bridge-watch proves a Go
@@ -26,8 +26,10 @@
 // command to inspect a block range, or to verify an endpoint and contract
 // address before enabling bridge.watch.
 //
-// Neither form reaches multi-validator consensus on the unlock; see
-// internal/bridge/watcher.go for that automation boundary.
+// The production path runs bridge.watch inside matrixd. Every confirmed burn is
+// submitted to native consensus, and escrow releases only in committed native
+// state (with voting-power quorum on a validator set). That native burn quorum
+// is separate from the fixed EVM attestor committee that authorizes mints.
 //
 // Usage:
 //
@@ -58,7 +60,14 @@ import (
 )
 
 func main() {
-	rpc := flag.String("rpc", "http://127.0.0.1:8545", "ethereum JSON-RPC endpoint")
+	flag.CommandLine.SetOutput(os.Stderr)
+	flag.Usage = func() {
+		fmt.Fprintln(os.Stderr, "bridge-watch scans one block range into a throwaway local ledger for diagnostics only.")
+		fmt.Fprintln(os.Stderr, "Production burn release runs inside matrixd and is always ordered by native consensus.")
+		fmt.Fprintf(os.Stderr, "Usage: %s [flags]\n", os.Args[0])
+		flag.PrintDefaults()
+	}
+	rpc := flag.String("rpc", "http://127.0.0.1:8545", "EVM JSON-RPC endpoint (Base uses chain 8453; Base Sepolia uses 84532)")
 	contractHex := flag.String("contract", "", "deployed WrappedMatrix contract address")
 	from := flag.Uint64("from", 0, "first block to scan")
 	toFlag := flag.String("to", "latest", "last block to scan (a number or \"latest\")")

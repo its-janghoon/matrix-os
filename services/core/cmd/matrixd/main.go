@@ -16,7 +16,7 @@ import (
 
 func main() {
 	// Parse command line flags
-	initMode := flag.Bool("init", false, "Initialize a new node")
+	initMode := flag.Bool("init", false, "Write a secure baseline config (not a production launch profile)")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
@@ -34,6 +34,7 @@ func main() {
 		// Say where the key is rather than printing it: the file is 0600, and a
 		// key echoed here lands in shell history and CI logs. Without this line
 		// the key is invisible, and a reader concludes ACLs are simply broken.
+		fmt.Println("This is a secure baseline, not a production launch profile; review origins, public access, economics, genesis, peers, and bridge settings before exposure.")
 		fmt.Println("An admin API key was generated under security.api_keys in that file.")
 		fmt.Println("Pass it to the CLI with --api-key, or export MATRIX_ADMIN_API_KEY.")
 		return

@@ -22,7 +22,7 @@ import { ethers, network } from "hardhat";
  */
 
 /** Networks that are real (non-local) and therefore require strict guards. */
-const REAL_NETWORKS = new Set(["mainnet", "sepolia"]);
+const REAL_NETWORKS = new Set(["mainnet", "sepolia", "base", "baseSepolia"]);
 
 /**
  * Local development minter keys. Deterministic, published here, and worthless:

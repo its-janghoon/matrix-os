@@ -57,6 +57,12 @@ const (
 	// this value. It is WholeSupplyCap * NativeUnit = 1e18, which fits uint64.
 	NativeMaxSupply uint64 = WholeSupplyCap * NativeUnit // 1e18
 
+	// MinBridgeLockAmount is the launch anti-dust floor for a native-to-wrapped
+	// bridge lock: exactly 100 whole MATRIX in native base units. It limits tiny
+	// lock records and relay work; it is not, and must never be interpreted as, a
+	// fiat peg or price guarantee.
+	MinBridgeLockAmount uint64 = 100 * NativeUnit
+
 	// ERC20PerNativeUnit is the exact integer number of ERC-20 base units (18
 	// decimals) that correspond to a single native base unit (9 decimals). It is
 	// 1e18 / 1e9 = 1e9. This is the one conversion factor the native<->ERC-20

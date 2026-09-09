@@ -1,6 +1,7 @@
 package marketapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"sort"
@@ -43,12 +44,15 @@ func jobStatusToProto(s market.JobStatus) marketv1.JobStatus {
 // jobToProto converts a market.Job to its proto representation.
 func jobToProto(j market.Job) *marketv1.Job {
 	pj := &marketv1.Job{
-		Id:       j.ID,
-		Buyer:    j.Buyer,
-		Provider: j.Provider,
-		Units:    j.Units,
-		Price:    j.Price,
-		Status:   jobStatusToProto(j.Status),
+		Id:           j.ID,
+		Buyer:        j.Buyer,
+		Provider:     j.Provider,
+		Units:        j.Units,
+		Price:        j.Price,
+		PricePerUnit: j.PricePerUnit,
+		QuoteId:      j.QuoteID,
+		QuoteVersion: j.QuoteVersion,
+		Status:       jobStatusToProto(j.Status),
 	}
 	if !j.CreatedAt.IsZero() {
 		pj.CreatedAt = timestamppb.New(j.CreatedAt)
@@ -56,33 +60,61 @@ func jobToProto(j market.Job) *marketv1.Job {
 	if !j.UpdatedAt.IsZero() {
 		pj.UpdatedAt = timestamppb.New(j.UpdatedAt)
 	}
+	if !j.QuoteObservedAt.IsZero() {
+		pj.QuoteObservedAt = timestamppb.New(j.QuoteObservedAt)
+	}
+	if !j.QuoteValidUntil.IsZero() {
+		pj.QuoteValidUntil = timestamppb.New(j.QuoteValidUntil)
+	}
 	return pj
 }
 
 // localProviderToProto converts a local market.Provider to proto, flagged LOCAL.
 func localProviderToProto(p market.Provider) *marketv1.Provider {
-	return &marketv1.Provider{
-		Id:           p.ID,
-		Capacity:     p.Capacity,
-		PricePerUnit: p.PricePerUnit,
-		Available:    p.Available,
-		Origin:       marketv1.ProviderOrigin_PROVIDER_ORIGIN_LOCAL,
-		Models:       p.Models,
+	out := &marketv1.Provider{
+		Id:                p.ID,
+		Capacity:          p.Capacity,
+		PricePerUnit:      p.PricePerUnit,
+		Available:         p.Available,
+		Origin:            marketv1.ProviderOrigin_PROVIDER_ORIGIN_LOCAL,
+		Models:            p.Models,
+		CostPerUnit:       p.CostPerUnit,
+		MarkupBasisPoints: p.MarkupBasisPoints,
+		QuoteId:           p.QuoteID,
+		QuoteVersion:      p.QuoteVersion,
 	}
+	if !p.ObservedAt.IsZero() {
+		out.ObservedAt = timestamppb.New(p.ObservedAt)
+	}
+	if !p.ValidUntil.IsZero() {
+		out.ValidUntil = timestamppb.New(p.ValidUntil)
+	}
+	return out
 }
 
 // remoteProviderToProto converts a discovered remote provider to proto, flagged
 // REMOTE and carrying the announcing peer ID.
 func remoteProviderToProto(rp marketexchange.RemoteProvider) *marketv1.Provider {
-	return &marketv1.Provider{
-		Id:           rp.ID,
-		Capacity:     rp.Capacity,
-		PricePerUnit: rp.PricePerUnit,
-		Available:    rp.Available,
-		Origin:       marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
-		PeerId:       rp.PeerID,
-		Models:       rp.Models,
+	out := &marketv1.Provider{
+		Id:                rp.ID,
+		Capacity:          rp.Capacity,
+		PricePerUnit:      rp.PricePerUnit,
+		Available:         rp.Available,
+		Origin:            marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
+		PeerId:            rp.PeerID,
+		Models:            rp.Models,
+		CostPerUnit:       rp.CostPerUnit,
+		MarkupBasisPoints: rp.MarkupBasisPoints,
+		QuoteId:           rp.QuoteID,
+		QuoteVersion:      rp.QuoteVersion,
 	}
+	if !rp.ObservedAt.IsZero() {
+		out.ObservedAt = timestamppb.New(rp.ObservedAt)
+	}
+	if !rp.ValidUntil.IsZero() {
+		out.ValidUntil = timestamppb.New(rp.ValidUntil)
+	}
+	return out
 }
 
 // recordToProto converts a token chain record to the proto Transaction. It is
@@ -118,16 +150,45 @@ func transferViewToProto(t TransferView) *marketv1.Transaction {
 	}
 }
 
+// requestTime validates an optional protobuf timestamp and converts it to UTC.
+// Invalid wire timestamps are client errors rather than values to normalize.
+func requestTime(ts *timestamppb.Timestamp, field string) (time.Time, error) {
+	if ts == nil {
+		return time.Time{}, nil
+	}
+	if err := ts.CheckValid(); err != nil {
+		return time.Time{}, status.Errorf(codes.InvalidArgument, "%s is invalid: %v", field, err)
+	}
+	return ts.AsTime().UTC(), nil
+}
+
 // RegisterProvider advertises local compute capacity on the order book.
 func (s *Service) RegisterProvider(ctx context.Context, req *marketv1.RegisterProviderRequest) (*marketv1.RegisterProviderResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
+	if req.GetCostPerUnit() > 0 && req.GetPricePerUnit() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "cost_per_unit is manual MATRIX-denominated metadata; price_per_unit must be a nonzero final price that already includes margin and protocol-fee gross-up")
+	}
+	observedAt, err := requestTime(req.GetObservedAt(), "observed_at")
+	if err != nil {
+		return nil, err
+	}
+	validUntil, err := requestTime(req.GetValidUntil(), "valid_until")
+	if err != nil {
+		return nil, err
+	}
 	p := market.Provider{
-		ID:           req.GetId(),
-		Capacity:     req.GetCapacity(),
-		PricePerUnit: req.GetPricePerUnit(),
-		Models:       req.GetModels(),
+		ID:                req.GetId(),
+		Capacity:          req.GetCapacity(),
+		PricePerUnit:      req.GetPricePerUnit(),
+		CostPerUnit:       req.GetCostPerUnit(),
+		MarkupBasisPoints: req.GetMarkupBasisPoints(),
+		QuoteID:           req.GetQuoteId(),
+		QuoteVersion:      req.GetQuoteVersion(),
+		ObservedAt:        observedAt,
+		ValidUntil:        validUntil,
+		Models:            req.GetModels(),
 	}
 	if err := s.market.RegisterProvider(p); err != nil {
 		return nil, mapMarketError(err)
@@ -138,6 +199,46 @@ func (s *Service) RegisterProvider(ctx context.Context, req *marketv1.RegisterPr
 		return nil, status.Error(codes.Internal, "provider registered but not found")
 	}
 	return &marketv1.RegisterProviderResponse{Provider: localProviderToProto(stored)}, nil
+}
+
+// UpdateProviderQuote refreshes only an existing provider's economic quote.
+// Market.UpdateProviderQuote preserves capacity, current reservations, and
+// advertised models.
+func (s *Service) UpdateProviderQuote(ctx context.Context, req *marketv1.UpdateProviderQuoteRequest) (*marketv1.UpdateProviderQuoteResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	if req.GetId() == "" {
+		return nil, status.Error(codes.InvalidArgument, "provider id is required")
+	}
+	if req.GetCostPerUnit() > 0 && req.GetPricePerUnit() == 0 {
+		return nil, status.Error(codes.InvalidArgument, "cost_per_unit is manual MATRIX-denominated metadata; price_per_unit must be a nonzero final price that already includes margin and protocol-fee gross-up")
+	}
+	observedAt, err := requestTime(req.GetObservedAt(), "observed_at")
+	if err != nil {
+		return nil, err
+	}
+	validUntil, err := requestTime(req.GetValidUntil(), "valid_until")
+	if err != nil {
+		return nil, err
+	}
+	quote := market.Provider{
+		PricePerUnit:      req.GetPricePerUnit(),
+		CostPerUnit:       req.GetCostPerUnit(),
+		MarkupBasisPoints: req.GetMarkupBasisPoints(),
+		QuoteID:           req.GetQuoteId(),
+		QuoteVersion:      req.GetQuoteVersion(),
+		ObservedAt:        observedAt,
+		ValidUntil:        validUntil,
+	}
+	if err := s.market.UpdateProviderQuote(req.GetId(), quote); err != nil {
+		return nil, mapMarketError(err)
+	}
+	stored, ok := s.market.GetProvider(req.GetId())
+	if !ok {
+		return nil, status.Error(codes.Internal, "provider updated but not found")
+	}
+	return &marketv1.UpdateProviderQuoteResponse{Provider: localProviderToProto(stored)}, nil
 }
 
 // ListProviders enumerates local providers and, when requested and available,
@@ -224,6 +325,12 @@ func (s *Service) ListJobs(ctx context.Context, req *marketv1.ListJobsRequest) (
 func (s *Service) CompleteJob(ctx context.Context, req *marketv1.CompleteJobRequest) (*marketv1.CompleteJobResponse, error) {
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	// Refuse legacy active jobs before either the direct or consensus settler can
+	// move funds. They remain cancellable, but their missing quote identity and
+	// price snapshot cannot be safely reconstructed.
+	if err := s.market.ValidateJobQuoteForSettlement(req.GetId()); err != nil {
+		return nil, mapMarketError(err)
 	}
 	if s.settler != nil {
 		job, err := s.settler.SettleAndCompleteJob(ctx, req.GetId())
@@ -445,6 +552,36 @@ func (s *Service) FundAccount(ctx context.Context, req *marketv1.FundAccountRequ
 		return nil, mapMarketError(err)
 	}
 	return &marketv1.FundAccountResponse{Account: req.GetAccount(), Balance: bal}, nil
+}
+
+// GetBridgeReadiness signs a caller's fresh challenge in a domain that is
+// distinct from the mint-attestation digest. It fails closed unless the node has
+// both bridge deployment parameters and a live attestor key.
+func (s *Service) GetBridgeReadiness(ctx context.Context, req *marketv1.GetBridgeReadinessRequest) (*marketv1.GetBridgeReadinessResponse, error) {
+	if s.readinessSigner == nil {
+		return nil, status.Error(codes.FailedPrecondition,
+			"bridge readiness is unavailable: this node needs both bridge.contract and bridge.attestor_keystore")
+	}
+	challenge := req.GetChallenge()
+	if len(challenge) != 32 {
+		return nil, status.Errorf(codes.InvalidArgument,
+			"challenge must be exactly 32 bytes, got %d", len(challenge))
+	}
+	proof, err := s.readinessSigner.SignBridgeReadiness(challenge)
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "sign bridge readiness: %v", err)
+	}
+	if proof == nil || len(proof.Challenge) != 32 || !bytes.Equal(proof.Challenge, challenge) || len(proof.Signature) != 65 {
+		return nil, status.Error(codes.Internal, "bridge readiness signer returned a malformed proof")
+	}
+	return &marketv1.GetBridgeReadinessResponse{
+		ChainId:       proof.ChainID,
+		Contract:      proof.Contract,
+		Attestor:      proof.Attestor,
+		MinLockNative: proof.MinLockNative,
+		Challenge:     append([]byte(nil), proof.Challenge...),
+		Signature:     append([]byte(nil), proof.Signature...),
+	}, nil
 }
 
 // GetBridgeReconciliation returns the lock-and-mint bridge backing snapshot,

@@ -18,10 +18,14 @@ package marketexchange
 
 import (
 	"crypto/ed25519"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -29,10 +33,19 @@ import (
 // compatible protocol versions rendezvous on the same pubsub topics. Bumping the
 // version suffix is how an incompatible wire change is rolled out.
 const (
-	// TopicAnnounce carries ProviderAnnouncement messages.
-	TopicAnnounce = "matrix/market/announce/v1"
-	// TopicJobs carries JobRequest messages.
-	TopicJobs = "matrix/market/jobs/v1"
+	// TopicAnnounce carries the v2 ProviderAnnouncement layout. V2 adds signed
+	// economic quote identity, provenance, and validity metadata; it intentionally
+	// does not rendezvous with v1 nodes that cannot validate those fields.
+	TopicAnnounce = "matrix/market/announce/v2"
+	// providerAnnouncementSigningDomain cryptographically separates v2 provider
+	// announcements from every other signed message and protocol version.
+	providerAnnouncementSigningDomain = "matrix/market/provider-announcement/v2"
+	// TopicJobs carries the incompatible v2 JobRequest layout. V2 binds the
+	// buyer's signature to the exact provider quote and fixed total accepted.
+	TopicJobs = "matrix/market/jobs/v2"
+	// jobRequestSigningDomain separates v2 requests from announcements, token
+	// transfers, and every prior/future job protocol version.
+	jobRequestSigningDomain = "matrix/market/job-request/v2"
 	// TopicSettle carries Settlement messages.
 	TopicSettle = "matrix/market/settle/v1"
 )
@@ -49,19 +62,26 @@ var (
 	ErrInvalidMessage = errors.New("marketexchange: invalid message")
 )
 
-// ProviderAnnouncement advertises a provider's compute capacity and pricing over
-// the announce topic. ProviderID is the announcing account's stable ID (hex of
-// PublicKey). PeerID is the libp2p peer ID string the provider is reachable at.
-// Timestamp is unix nanoseconds at announcement time and is bound into the
-// signature so a receiver can age out stale announcements. Signature is an
-// ed25519 signature by PublicKey over the canonical payload.
+// ProviderAnnouncement advertises a provider's compute capacity and complete
+// economic quote over the v2 announce topic. ProviderID is the announcing
+// account's stable ID (hex of PublicKey). PeerID is the libp2p peer ID string the
+// provider is reachable at. ObservedAt and ValidUntil use UTC instants and are
+// encoded as Unix nanoseconds in the canonical signature payload. Timestamp is
+// the announcement's Unix-nanosecond creation time. Signature is an ed25519
+// signature by PublicKey over every field plus the v2 signing domain.
 type ProviderAnnouncement struct {
-	ProviderID   string            `json:"provider_id"`
-	PublicKey    ed25519.PublicKey `json:"public_key"`
-	Capacity     uint64            `json:"capacity"`
-	PricePerUnit uint64            `json:"price_per_unit"`
-	Available    uint64            `json:"available"`
-	PeerID       string            `json:"peer_id"`
+	ProviderID        string            `json:"provider_id"`
+	PublicKey         ed25519.PublicKey `json:"public_key"`
+	Capacity          uint64            `json:"capacity"`
+	PricePerUnit      uint64            `json:"price_per_unit"`
+	CostPerUnit       uint64            `json:"cost_per_unit,omitempty"`
+	MarkupBasisPoints uint32            `json:"markup_basis_points,omitempty"`
+	QuoteID           string            `json:"quote_id"`
+	QuoteVersion      uint64            `json:"quote_version"`
+	ObservedAt        time.Time         `json:"observed_at"`
+	ValidUntil        time.Time         `json:"valid_until"`
+	Available         uint64            `json:"available"`
+	PeerID            string            `json:"peer_id"`
 	// Models are the model identifiers the announcing provider serves, so a
 	// remote provider can be routed to by model exactly like a local one. They
 	// are signed with the rest of the announcement: an unsigned model list would
@@ -76,11 +96,18 @@ type ProviderAnnouncement struct {
 // same length-prefixed layout as token.Transaction guarantees no two distinct
 // field combinations collide into the same signed payload.
 func (a *ProviderAnnouncement) signingBytes() []byte {
-	buf := make([]byte, 0, 128)
+	buf := make([]byte, 0, 256)
+	buf = appendLenPrefixed(buf, []byte(providerAnnouncementSigningDomain))
 	buf = appendLenPrefixed(buf, []byte(a.ProviderID))
 	buf = appendLenPrefixed(buf, a.PublicKey)
 	buf = appendUint64(buf, a.Capacity)
 	buf = appendUint64(buf, a.PricePerUnit)
+	buf = appendUint64(buf, a.CostPerUnit)
+	buf = appendUint32(buf, a.MarkupBasisPoints)
+	buf = appendLenPrefixed(buf, []byte(a.QuoteID))
+	buf = appendUint64(buf, a.QuoteVersion)
+	buf = appendUint64(buf, uint64(a.ObservedAt.UTC().UnixNano()))
+	buf = appendUint64(buf, uint64(a.ValidUntil.UTC().UnixNano()))
 	buf = appendUint64(buf, a.Available)
 	buf = appendLenPrefixed(buf, []byte(a.PeerID))
 	// The count is signed alongside the entries so no two distinct lists share a
@@ -103,12 +130,18 @@ func (a *ProviderAnnouncement) Sign(priv ed25519.PrivateKey) error {
 	return nil
 }
 
-// Verify validates the announcement's signature and basic structure. It returns
-// ErrInvalidMessage for a malformed key or empty ProviderID, ErrUnsignedMessage
-// when no signature is present, and ErrInvalidSignature when the signature does
-// not verify. It also confirms ProviderID is derived from PublicKey so a
-// message cannot claim an identity it does not hold the key for.
+// Verify validates the announcement at the wall clock. Receive paths should use
+// VerifyAt with their injected clock; this wrapper is convenient for callers
+// that do not need deterministic time.
 func (a *ProviderAnnouncement) Verify() error {
+	return a.VerifyAt(time.Now().UTC())
+}
+
+// VerifyAt validates the v2 signature, identity, complete quote metadata, and
+// quote validity at now. Quote expiry is independent of registry receipt TTL:
+// an announcement can be recently received while its economic quote is stale.
+func (a *ProviderAnnouncement) VerifyAt(now time.Time) error {
+	now = now.UTC()
 	if len(a.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: public key must be %d bytes", ErrInvalidMessage, ed25519.PublicKeySize)
 	}
@@ -124,35 +157,101 @@ func (a *ProviderAnnouncement) Verify() error {
 	if !ed25519.Verify(a.PublicKey, a.signingBytes(), a.Signature) {
 		return ErrInvalidSignature
 	}
+	if a.PricePerUnit == 0 {
+		return fmt.Errorf("%w: price_per_unit must be > 0", ErrInvalidMessage)
+	}
+	if a.QuoteID == "" {
+		return fmt.Errorf("%w: quote_id must not be empty", ErrInvalidMessage)
+	}
+	if a.QuoteVersion == 0 {
+		return fmt.Errorf("%w: quote_version must be > 0", ErrInvalidMessage)
+	}
+	if a.ObservedAt.IsZero() || !unixNanoRoundTrips(a.ObservedAt) {
+		return fmt.Errorf("%w: observed_at must be a Unix-nanosecond UTC instant", ErrInvalidMessage)
+	}
+	if a.ValidUntil.IsZero() || !unixNanoRoundTrips(a.ValidUntil) {
+		return fmt.Errorf("%w: valid_until must be a Unix-nanosecond UTC instant", ErrInvalidMessage)
+	}
+	if a.ObservedAt.After(now.Add(market.MaxQuoteClockSkew)) {
+		return fmt.Errorf("%w: observed_at exceeds maximum future clock skew", ErrInvalidMessage)
+	}
+	if !a.ValidUntil.After(a.ObservedAt) {
+		return fmt.Errorf("%w: valid_until must be after observed_at", ErrInvalidMessage)
+	}
+	if !a.ValidUntil.After(now) {
+		return fmt.Errorf("%w: quote expired at %s: %w", ErrInvalidMessage, a.ValidUntil.UTC().Format(time.RFC3339Nano), market.ErrStaleQuote)
+	}
+	announcementTime := time.Unix(0, a.Timestamp).UTC()
+	if announcementTime.After(now.Add(market.MaxQuoteClockSkew)) {
+		return fmt.Errorf("%w: announcement timestamp exceeds maximum future clock skew", ErrInvalidMessage)
+	}
 	return nil
 }
 
-// JobRequest is a buyer's signed request for compute from a specific remote
-// provider. BuyerID is the buyer's account ID (hex of PublicKey). Provider is
-// the target provider's account ID. Units is the requested compute units. Nonce
-// gives the buyer a per-request unique value bound into the signature so two
-// otherwise-identical requests differ. Signature is by PublicKey.
-type JobRequest struct {
-	BuyerID   string            `json:"buyer_id"`
-	PublicKey ed25519.PublicKey `json:"public_key"`
-	Provider  string            `json:"provider"`
-	Units     uint64            `json:"units"`
-	Nonce     uint64            `json:"nonce"`
-	Timestamp int64             `json:"timestamp"`
-	Signature []byte            `json:"signature"`
+// unixNanoRoundTrips rejects times outside time.Time's lossless Unix-nanosecond
+// range. Accepted timestamps therefore have one deterministic signed encoding.
+func unixNanoRoundTrips(t time.Time) bool {
+	return time.Unix(0, t.UnixNano()).UTC().Equal(t)
 }
 
-// signingBytes returns the canonical length-prefixed payload signed by the
-// buyer, covering every field except Signature.
+// JobRequest is a v2 fixed-price request for compute from a specific remote
+// provider. The buyer signs the exact quote identity, version, unit price,
+// observation/expiry interval, and Total = Units * PricePerUnit. A provider may
+// therefore reject a delayed or refreshed request rather than silently charging
+// terms the buyer never accepted.
+type JobRequest struct {
+	BuyerID         string            `json:"buyer_id"`
+	PublicKey       ed25519.PublicKey `json:"public_key"`
+	Provider        string            `json:"provider"`
+	Units           uint64            `json:"units"`
+	PricePerUnit    uint64            `json:"price_per_unit"`
+	QuoteID         string            `json:"quote_id"`
+	QuoteVersion    uint64            `json:"quote_version"`
+	QuoteObservedAt time.Time         `json:"quote_observed_at"`
+	QuoteValidUntil time.Time         `json:"quote_valid_until"`
+	Total           uint64            `json:"total"`
+	Nonce           uint64            `json:"nonce"`
+	Timestamp       int64             `json:"timestamp"`
+	Signature       []byte            `json:"signature"`
+}
+
+// signingBytes returns the canonical v2 domain-separated payload signed by the
+// buyer, covering every request and accepted-quote field except Signature.
 func (r *JobRequest) signingBytes() []byte {
-	buf := make([]byte, 0, 128)
+	buf := make([]byte, 0, 256)
+	buf = appendLenPrefixed(buf, []byte(jobRequestSigningDomain))
 	buf = appendLenPrefixed(buf, []byte(r.BuyerID))
 	buf = appendLenPrefixed(buf, r.PublicKey)
 	buf = appendLenPrefixed(buf, []byte(r.Provider))
 	buf = appendUint64(buf, r.Units)
+	buf = appendUint64(buf, r.PricePerUnit)
+	buf = appendLenPrefixed(buf, []byte(r.QuoteID))
+	buf = appendUint64(buf, r.QuoteVersion)
+	buf = appendUint64(buf, uint64(r.QuoteObservedAt.UTC().UnixNano()))
+	buf = appendUint64(buf, uint64(r.QuoteValidUntil.UTC().UnixNano()))
+	buf = appendUint64(buf, r.Total)
 	buf = appendUint64(buf, r.Nonce)
 	buf = appendUint64(buf, uint64(r.Timestamp))
 	return buf
+}
+
+// Digest returns the stable identity of this signed request payload. Providers
+// persist it with the reservation to make gossip redelivery idempotent.
+func (r *JobRequest) Digest() string {
+	digest := sha256.Sum256(r.signingBytes())
+	return hex.EncodeToString(digest[:])
+}
+
+// AcceptedQuote returns the exact fixed-price snapshot carried by the request.
+func (r *JobRequest) AcceptedQuote() market.AcceptedQuote {
+	return market.AcceptedQuote{
+		PricePerUnit: r.PricePerUnit,
+		QuoteID:      r.QuoteID,
+		QuoteVersion: r.QuoteVersion,
+		ObservedAt:   r.QuoteObservedAt.UTC(),
+		ValidUntil:   r.QuoteValidUntil.UTC(),
+		Total:        r.Total,
+	}
 }
 
 // Sign signs the job request with priv, which must correspond to PublicKey.
@@ -164,9 +263,16 @@ func (r *JobRequest) Sign(priv ed25519.PrivateKey) error {
 	return nil
 }
 
-// Verify validates the job request's signature and structure, confirming BuyerID
-// is derived from PublicKey and the target Provider and Units are set.
+// Verify validates a request against the wall clock. Receive paths use VerifyAt
+// with their injected clock so expiry races are deterministic in tests.
 func (r *JobRequest) Verify() error {
+	return r.VerifyAt(time.Now().UTC())
+}
+
+// VerifyAt validates the v2 signature and complete accepted fixed-price quote.
+// Quote expiry is exclusive: a request received exactly at ValidUntil is stale.
+func (r *JobRequest) VerifyAt(now time.Time) error {
+	now = now.UTC()
 	if len(r.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: public key must be %d bytes", ErrInvalidMessage, ed25519.PublicKeySize)
 	}
@@ -187,6 +293,35 @@ func (r *JobRequest) Verify() error {
 	}
 	if !ed25519.Verify(r.PublicKey, r.signingBytes(), r.Signature) {
 		return ErrInvalidSignature
+	}
+	if r.PricePerUnit == 0 || r.QuoteID == "" || r.QuoteVersion == 0 {
+		return fmt.Errorf("%w: accepted quote identity, version, and price are required", ErrInvalidMessage)
+	}
+	if r.QuoteObservedAt.IsZero() || !unixNanoRoundTrips(r.QuoteObservedAt) {
+		return fmt.Errorf("%w: quote_observed_at must be a Unix-nanosecond instant", ErrInvalidMessage)
+	}
+	if r.QuoteValidUntil.IsZero() || !unixNanoRoundTrips(r.QuoteValidUntil) {
+		return fmt.Errorf("%w: quote_valid_until must be a Unix-nanosecond instant", ErrInvalidMessage)
+	}
+	if r.QuoteObservedAt.After(now.Add(market.MaxQuoteClockSkew)) {
+		return fmt.Errorf("%w: quote_observed_at exceeds maximum future clock skew", ErrInvalidMessage)
+	}
+	if !r.QuoteValidUntil.After(r.QuoteObservedAt) {
+		return fmt.Errorf("%w: quote_valid_until must be after quote_observed_at", ErrInvalidMessage)
+	}
+	if !r.QuoteValidUntil.After(now) {
+		return fmt.Errorf("%w: accepted quote expired at %s: %w", ErrInvalidMessage, r.QuoteValidUntil.UTC().Format(time.RFC3339Nano), market.ErrStaleQuote)
+	}
+	requestTime := time.Unix(0, r.Timestamp).UTC()
+	if requestTime.After(now.Add(market.MaxQuoteClockSkew)) {
+		return fmt.Errorf("%w: request timestamp exceeds maximum future clock skew", ErrInvalidMessage)
+	}
+	total, err := market.CheckedMul(r.Units, r.PricePerUnit)
+	if err != nil {
+		return fmt.Errorf("%w: invalid fixed total: %v", ErrInvalidMessage, err)
+	}
+	if r.Total != total {
+		return fmt.Errorf("%w: total %d does not equal units * price_per_unit (%d)", ErrInvalidMessage, r.Total, total)
 	}
 	return nil
 }
@@ -236,5 +371,12 @@ func appendLenPrefixed(dst, b []byte) []byte {
 func appendUint64(dst []byte, v uint64) []byte {
 	var b [8]byte
 	binary.BigEndian.PutUint64(b[:], v)
+	return append(dst, b[:]...)
+}
+
+// appendUint32 appends v as 4 big-endian bytes.
+func appendUint32(dst []byte, v uint32) []byte {
+	var b [4]byte
+	binary.BigEndian.PutUint32(b[:], v)
 	return append(dst, b[:]...)
 }

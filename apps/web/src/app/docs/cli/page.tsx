@@ -32,16 +32,17 @@ const DEMO = `matrix --api-key <key> quickstart
 const PROVIDERS = `matrix status                  # endpoint + serving status
 matrix health                  # the gRPC health Check: SERVING / NOT_SERVING
 
+# --price is the final manual quote in native MATRIX base units per compute unit.
 matrix provider register --id gpu-1 --capacity 100 --price 5
 matrix provider register --id gpu-2 --capacity 100 --price 3 \\
   --models llama-3.3-70b,qwen-2.5-72b   # what a model request routes on
-matrix provider list                     # local providers
+# Refresh existing quotes this way; re-registering can reset reserved capacity.
+matrix provider quote-update --id gpu-2 --price 4
+matrix provider list                     # local providers with fresh quotes
 matrix provider list --include-remote    # plus providers discovered over p2p`;
 
-const PROVIDER_OUT = `ID                       CAPACITY  AVAILABLE  PRICE/UNIT  ORIGIN  PEER  MODELS
-demo-inference-provider  100       100        5           local
-gpu-2                    100       100        3           local         llama-3.3-70b,qwen-2.5-72b
-quickstart-provider      100       90         5           local`;
+const PROVIDER_OUT = `ID     CAPACITY  AVAILABLE  PRICE/UNIT  COST/UNIT  MARKUP(BPS)  QUOTE       VERSION  OBSERVED              VALID UNTIL           ORIGIN  PEER  MODELS
+gpu-2  100       100        3           0          0            q-8f2...     1        2026-01-01T00:00:00Z  2026-01-02T00:00:00Z local         llama-3.3-70b,qwen-2.5-72b`;
 
 const JOBS = `matrix job submit --buyer <account-id> --provider gpu-1 --units 10
 matrix job complete --id <job-id>    # settles: moves native MATRIX buyer -> provider
@@ -87,6 +88,19 @@ status:     completed
 units:      5
 completion: echo: user: one sentence about peer-to-peer compute`;
 
+const BRIDGE = `# One-time operator setup: create a fixed EVM committee key.
+matrix bridge attestor-new --out ~/.matrix/bridge-attestor.json
+
+# User flow: minimum 100 MATRIX (100000000000 native base units).
+matrix bridge lock --wallet ~/.matrix/wallet.json \
+  --to 0x<base-recipient> --amount 100000000000
+matrix bridge attestation --lock-id 0x<lock-id> \
+  --validator validator-1.example.org:9091 \
+  --validator validator-2.example.org:9091 > attestations.json
+
+# Compare native escrow accounting with WrappedMatrix.totalSupply().
+matrix bridge reconcile`;
+
 const TX = `matrix tx list --limit 20      # ascending commit order
 matrix tx list --start 10 --limit 20
 matrix tx get --index 3`;
@@ -107,8 +121,8 @@ export default function MatrixCliDocs() {
                     <h1 className='mb-4 text-4xl font-bold text-white'>The matrix CLI</h1>
                     <p className='text-xl text-gray-100'>
                       <code className='text-white'>matrix</code> drives a running node: health, providers, jobs,
-                      balances, inference, and a local wallet that signs transfers so the node never sees a private
-                      key.
+                      balances, inference, bridge lock/attestation/reconciliation, and a local wallet that signs
+                      transfers so the node never sees a private key.
                     </p>
                   </div>
 
@@ -159,6 +173,13 @@ export default function MatrixCliDocs() {
                     a model server:
                   </p>
                   <CodeSample label='output' code={PROVIDER_OUT} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>--price</code> is a manually supplied final quote in native MATRIX
+                    base units per compute unit, not credits, USD or a stablecoin peg. The marketplace gives each
+                    registration a quote identity and expiry; a submitted job snapshots the accepted price and quote
+                    metadata so a later provider refresh cannot reprice it. Refresh an expired manual quote before
+                    accepting more work.
+                  </p>
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Jobs and balances</h2>
                   <CodeSample label='shell' code={JOBS} />
@@ -217,6 +238,33 @@ export default function MatrixCliDocs() {
                     consensus - which means the node needs the buyer&apos;s signing key. It resolves one from the
                     wallet files under <code className='text-white'>~/.matrix</code>, so the wallet you created above
                     works and an arbitrary account id does not.
+                  </p>
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Base bridge</h2>
+                  <CodeSample label='shell' code={BRIDGE} />
+                  <p className='mt-4 text-gray-300'>
+                    <code className='text-white'>attestor-new</code> creates one encrypted secp256k1 key for an
+                    address in the fixed WrappedMatrix committee selected at deployment. It is not granted to every
+                    native validator, and bonded-open validator membership does not change the contract committee.
+                    <code className='text-white'> lock</code> commits native escrow,{' '}
+                    <code className='text-white'>attestation</code> emits the JSON signatures the Base mint consumes,
+                    and <code className='text-white'>reconcile</code> reports the 1:1 backing invariant.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
+                    Before the web bridge asks MetaMask to sign a native lock, it reads the exact WrappedMatrix code,
+                    threshold, attestor count, cap, supply, and conversion. It then sends one random 32-byte challenge
+                    to every configured validator&apos;s rate-limited public <code className='text-white'>GetBridgeReadiness</code>{' '}
+                    RPC, recovers unique registered signers, and requires the live threshold. A chain, contract,
+                    minimum, challenge, signature, registration, conversion, or cap mismatch stops before payment
+                    signing, local recovery storage, or native submission. Post-lock attestation and reconciliation
+                    checks remain required.
+                  </p>
+                  <p className='mt-4 text-gray-300'>
+                    Base Sepolia is chain 84532 for rehearsal and Base is 8453 for production. The user broadcasts
+                    mint, burn, approval or swap transactions and pays Base gas from their wallet; Matrix provides no
+                    gas relayer. A burn release is always ordered by native consensus. The production wrapped mint
+                    ceiling is 6% of native maximum supply, and wMATRIX remains a native-backed mirror rather than a
+                    USD or USDC stablecoin.
                   </p>
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Transactions</h2>

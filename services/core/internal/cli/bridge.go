@@ -25,10 +25,10 @@ const lockIDLen = 32
 
 // `matrix bridge` groups the operator commands for the lock-and-mint bridge.
 //
-// It is the operator's whole side of the on-ramp: generate this validator's
-// attestor key, lock native for an Ethereum address, and collect the validators'
-// signatures for that lock. The last step is the mint, which happens on
-// Ethereum and is contracts/scripts/bridge-mint.ts.
+// It is the operator and user's CLI side of the Base lock-and-mint flow: generate
+// a key only for an address in the contract's fixed EVM attestor committee, lock
+// native for a Base address, and collect that committee's signatures. The user
+// broadcasts the mint on Base and pays Base gas; there is no gas relayer.
 //
 // The attestor command exists because the key had nowhere to come from. The node
 // held no attestor at all, and the only signer in the tree was
@@ -37,7 +37,14 @@ const lockIDLen = 32
 func newBridgeCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "bridge",
-		Short: "Operator commands for the lock-and-mint bridge",
+		Short: "Base bridge attestor, lock, attestation, and reconciliation commands",
+		Long: `bridge operates the native MATRIX <-> wMATRIX flow for Base Sepolia
+(chain 84532) or Base (chain 8453).
+
+WrappedMatrix minting is authorized by the fixed secp256k1 attestor committee
+selected at contract deployment. That EVM committee is separate from the dynamic
+native bonded-open validator set. Users broadcast Base transactions and pay Base
+gas from their own wallets; this CLI does not run a gas relayer.`,
 	}
 	cmd.AddCommand(newAttestorNewCommand(opts), newBridgeLockCommand(opts),
 		newBridgeAttestationCommand(opts), newBridgeReconcileCommand(opts))
@@ -48,7 +55,7 @@ func newAttestorNewCommand(opts *globalOptions) *cobra.Command {
 	var out string
 	cmd := &cobra.Command{
 		Use:   "attestor-new",
-		Short: "Generate this validator's encrypted bridge attestor key",
+		Short: "Generate an encrypted key for a fixed WrappedMatrix attestor",
 		Long: `attestor-new generates a fresh secp256k1 attestor key and writes it as an
 encrypted keystore, the same scrypt-and-AES-GCM format a wallet key uses.
 
@@ -57,10 +64,11 @@ native MATRIX, which is why it is a keystore rather than a hex string in a confi
 file. Point bridge.attestor_keystore at the file and supply the passphrase in
 MATRIX_ATTESTOR_PASSPHRASE; the node refuses to start if it cannot unlock it.
 
-The printed ADDRESS is what goes in the WrappedMatrix contract's registered
-attestor set. A node whose address is not registered signs attestations the
-contract rejects, and on a threshold bridge that looks like mints simply never
-reaching quorum.
+The printed ADDRESS must be one of the immutable addresses selected in the
+WrappedMatrix contract's registered attestor set at deployment. The contract
+committee does not follow native bonded-open validator membership: do not create
+or configure a key merely because a node joined native consensus. A node whose
+address is not registered produces signatures the contract rejects.
 
 The passphrase is read from MATRIX_ATTESTOR_PASSPHRASE - the same variable the
 NODE uses to unlock the file - falling back to MATRIX_WALLET_PASSPHRASE, and
@@ -127,6 +135,18 @@ file.`,
 // derived from this transaction (nonce, sender, recipient, amount), and a client
 // that recomputes it differently asks every validator about a lock that does not
 // exist.
+func validateBridgeLockAmount(amount uint64) error {
+	if amount == 0 {
+		return fmt.Errorf("--amount must be greater than zero; a zero lock would mint " +
+			"nothing and still consume a lock id")
+	}
+	if amount < token.MinBridgeLockAmount {
+		return fmt.Errorf("--amount %d is below the minimum bridge lock of %d native base units (100 MATRIX)",
+			amount, token.MinBridgeLockAmount)
+	}
+	return nil
+}
+
 func newBridgeLockCommand(opts *globalOptions) *cobra.Command {
 	var (
 		walletPath string
@@ -135,9 +155,11 @@ func newBridgeLockCommand(opts *globalOptions) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "lock",
-		Short: "Lock native MATRIX for an Ethereum address, to be minted as wMATRIX",
+		Short: "Lock at least 100 native MATRIX for a Base address",
 		Long: `lock moves native MATRIX into the bridge escrow so wMATRIX can be minted
-against it on Ethereum.
+against it on Base. The minimum is 100 MATRIX (100000000000 native base
+units). The user later broadcasts WrappedMatrix.mint and pays Base gas from
+that wallet; there is no relayer.
 
 It is a signed transfer to a reserved recipient, so it is ordered by consensus
 like any other: every node applies the same escrow move from the same committed
@@ -154,9 +176,8 @@ pass the collected set to WrappedMatrix.mint.`,
 			if err != nil {
 				return fmt.Errorf("--to must be a 0x ethereum address: %w", err)
 			}
-			if amount == 0 {
-				return fmt.Errorf("--amount must be greater than zero; a zero lock would mint " +
-					"nothing and still consume a lock id")
+			if err := validateBridgeLockAmount(amount); err != nil {
+				return err
 			}
 			path, err := resolveWalletPath(walletPath)
 			if err != nil {
@@ -245,18 +266,20 @@ func newBridgeAttestationCommand(opts *globalOptions) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "attestation",
-		Short: "Collect validators' mint authorizations for a committed lock",
+		Short: "Collect the fixed EVM committee's mint authorizations",
 		Long: `attestation gathers one signature per validator for a lock the chain has
 already committed, and prints them as the JSON array the mint step reads.
 
-This is the middle step of the on-ramp, and doing it by hand is where a mint
-goes wrong. Each validator holds its own secp256k1 key and signs the same digest
-independently, so an m-of-n mint needs m of these collected from m different
-nodes; there is no gossip of partial signatures, deliberately, because gossiping
-them would be a second consensus for something the contract already checks.
+This is the middle step of the on-ramp. Each queried endpoint must hold a key
+whose address belongs to the fixed EVM attestor committee selected when this
+WrappedMatrix contract was deployed. That committee is not the dynamic native
+validator set: bonded-open joins and exits do not add or remove contract
+attestors. An m-of-n mint needs m signatures from distinct registered addresses.
 
-Pass --validator once per node. With none given it asks the single node --addr
-points at, which is a 1-of-1 bridge or a rehearsal.
+Pass --validator once per market endpoint that serves a distinct registered
+attestor. The flag keeps the RPC's existing name; it does not imply every native
+validator is in the EVM committee. With none given it asks --addr, suitable for
+a 1-of-1 rehearsal.
 
 It refuses to print a set whose members disagree about the lock. Two validators
 naming different recipients or amounts for one lock id means they are not on the
@@ -266,9 +289,12 @@ by a revert.
 A lock that is not yet committed is a not_found, which is the honest answer:
 there is nothing to sign for until a block carries it.
 
+Submitting a valid set to WrappedMatrix.mint is the user's Base transaction, so
+the user needs Base ETH and pays its gas; Matrix does not supply a relayer.
+
   matrix bridge attestation --lock-id 0x5b5a... > atts.json
   CONTRACT=0x... ATTESTATIONS=./atts.json \
-    npx hardhat run scripts/bridge-mint.ts --network sepolia`,
+    npx hardhat run scripts/bridge-mint.ts --network baseSepolia`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			id := strings.TrimPrefix(strings.TrimPrefix(lockID, "0x"), "0X")
@@ -373,7 +399,7 @@ func newBridgeReconcileCommand(opts *globalOptions) *cobra.Command {
 		Use:   "reconcile",
 		Short: "Check that escrowed native still backs the wrapped supply 1:1",
 		Long: `reconcile reads the node's bridge accounting and its actual escrow balance,
-and reports what the Ethereum contract's total supply must be if the bridge is
+and reports what the Base contract's total supply must be if the bridge is
 correctly backed.
 
 This is the invariant the whole bridge rests on: every wMATRIX in existence is
@@ -382,11 +408,11 @@ refuses to return a snapshot at all when its own accounting and its escrow
 balance disagree, so an error here is not a reporting problem - it means the two
 halves have diverged and something has minted or released outside the rules.
 
-The number to compare against the chain is OUTSTANDING (erc20): read
-totalSupply() on the WrappedMatrix contract and require the two to be equal. They
-are allowed to differ only while a lock is committed and its mint has not been
-broadcast yet, and then only in one direction - escrow ahead of supply, never
-behind.`,
+The number to compare against Base is OUTSTANDING (erc20): read totalSupply()
+on the configured WrappedMatrix contract and require equality. The production
+mint ceiling is 6% of native maximum supply, but every unit still needs locked
+backing; wMATRIX is not a USD or USDC stablecoin. Escrow may lead supply while a
+committed lock awaits its user-paid mint transaction, but must never lag it.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cc, err := dial(opts)

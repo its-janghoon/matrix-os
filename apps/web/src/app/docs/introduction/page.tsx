@@ -35,7 +35,7 @@ for (const p of await matrix.listProviders({ includeRemote: true })) {
 const REAL = [
   {
     title: 'A market for compute',
-    body: 'A node advertises capacity at a price. A buyer reserves units, the work is done, and the buyer pays the provider. Providers found over libp2p appear alongside local ones.',
+    body: 'A node advertises capacity with a manual MATRIX-denominated quote and expiry. A buyer reservation snapshots the quote, the work is done, and the buyer pays the provider. Providers found over libp2p appear alongside local ones.',
   },
   {
     title: 'LLM inference on that market',
@@ -50,16 +50,16 @@ const REAL = [
     body: 'An ed25519 validator set, a leader that rotates every commit, two voting phases, and a quorum of more than two thirds. Committed blocks are hash-linked; a node that misses one fetches it with the quorum that committed it.',
   },
   {
-    title: 'Bonded stake, optionally',
-    body: 'Turn it on and voting power becomes an account’s bonded MATRIX, so a quorum costs two thirds of what is bonded rather than two thirds of the identities. Admission requires a minimum bond, and a validator proven to have equivocated loses that bond to the reward pool.',
+    title: 'Bonded-open validators',
+    body: 'The generated profile uses a positive bond and self-signed admission and voluntary exit. Voting power is bonded MATRIX, and a validator proven to have equivocated loses that bond.',
   },
   {
-    title: 'A fee, and an emission',
-    body: 'A capped cut of each committed transfer pays the validator set, so a bond earns as well as risks. A fixed per-block budget from the genesis pool pays the registered providers a block paid, halving on a schedule until it is spent. Both off unless an operator turns them on.',
+    title: 'A fee, with zero launch emissions',
+    body: 'A 100-basis-point cut of each committed transfer pays the validator set and configured maintainer. Public launch rewards.per_block is zero: providers earn user payments, not new provider emissions.',
   },
   {
-    title: 'A wrapped ERC-20 mirror',
-    body: 'Native MATRIX locks into escrow and a threshold of validator attestations authorizes minting wMATRIX; burning it releases the escrow, and on a validator set that release needs a quorum of attestations too, so neither direction rests on one node. Against local and test networks only - it is not deployed to public Ethereum.',
+    title: 'A wrapped ERC-20 mirror for Base',
+    body: 'Native MATRIX locks into escrow and the fixed EVM attestor committee selected at contract deployment authorizes wMATRIX minting. Native burn release is separately ordered by consensus. Base Sepolia is the rehearsal target and Base is production-capable configuration, not a claim that a public contract is live.',
   },
   {
     title: 'A WebAssembly agent runtime',
@@ -68,10 +68,12 @@ const REAL = [
 ];
 
 const NOT_YET = [
-  'A permissionless validator set is still ahead. Bonded stake, a fee that pays it and an emission that pays providers all exist, but they are off unless an operator turns them on, and the set is still one a quorum of operators admits you to rather than one you buy into.',
+  'No verified public bridge deployment is claimed by these docs. The web app must be configured with an exact WrappedMatrix address and credential-free HTTPS validator endpoints before controls appear.',
+  'wMATRIX is a 1:1 native-to-wrapped representation, not a stablecoin and not a peg to USD or USDC. The production mint ceiling is 6% of native maximum supply, not permission to mint without locked backing.',
+  'There is no gas relayer. A user who submits a Base mint, burn, approval or swap pays Base gas from their own wallet.',
   'No zero-knowledge proofs and no secure enclaves. A provider sees the work it runs.',
   'No agent deployment path over the network, and no agent-to-agent collaboration primitive. The runtime runs a module you hand it.',
-  'The bridge is not on public Ethereum, and the SDK is not on npm.',
+  'The SDK is not on npm.',
 ];
 
 export default function MatrixOsIntroduction() {

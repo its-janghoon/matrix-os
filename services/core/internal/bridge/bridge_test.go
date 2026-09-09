@@ -29,29 +29,64 @@ func newTestBridge(t *testing.T, userStart uint64) (*Bridge, *market.Ledger, str
 	return b, ledger, "user"
 }
 
+func TestLockMinimumBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		amount uint64
+		want   error
+	}{
+		{name: "zero preserves sentinel", amount: 0, want: ErrZeroAmount},
+		{name: "one below minimum", amount: token.MinBridgeLockAmount - 1, want: ErrLockAmountBelowMinimum},
+		{name: "exact minimum", amount: token.MinBridgeLockAmount},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b, ledger, user := newTestBridge(t, token.MinBridgeLockAmount)
+			ev, err := b.Lock(user, Address{0x01}, tc.amount)
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("Lock error = %v, want %v", err, tc.want)
+				}
+				if ev != nil {
+					t.Fatalf("rejected lock returned event %+v", ev)
+				}
+				if bal, _ := ledger.Balance(user); bal != token.MinBridgeLockAmount {
+					t.Fatalf("rejected lock changed sender balance to %d", bal)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("exact-minimum Lock: %v", err)
+			}
+			if ev.NativeAmount != token.MinBridgeLockAmount {
+				t.Fatalf("locked %d, want %d", ev.NativeAmount, token.MinBridgeLockAmount)
+			}
+		})
+	}
+}
+
 func TestLockEscrowsAndRecords(t *testing.T) {
-	b, ledger, user := newTestBridge(t, 10*token.NativeUnit)
+	b, ledger, user := newTestBridge(t, 10*token.MinBridgeLockAmount)
 	recipient := Address{0xaa, 0xbb}
 
-	ev, err := b.Lock(user, recipient, 3*token.NativeUnit)
+	ev, err := b.Lock(user, recipient, 3*token.MinBridgeLockAmount)
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
-	if ev.NativeAmount != 3*token.NativeUnit {
+	if ev.NativeAmount != 3*token.MinBridgeLockAmount {
 		t.Fatalf("unexpected native amount %d", ev.NativeAmount)
 	}
 
 	userBal, _ := ledger.Balance(user)
-	if userBal != 7*token.NativeUnit {
-		t.Fatalf("user balance = %d, want %d", userBal, 7*token.NativeUnit)
+	if userBal != 7*token.MinBridgeLockAmount {
+		t.Fatalf("user balance = %d, want %d", userBal, 7*token.MinBridgeLockAmount)
 	}
 	escrow, _ := ledger.Balance(EscrowAccount)
-	if escrow != 3*token.NativeUnit {
-		t.Fatalf("escrow = %d, want %d", escrow, 3*token.NativeUnit)
+	if escrow != 3*token.MinBridgeLockAmount {
+		t.Fatalf("escrow = %d, want %d", escrow, 3*token.MinBridgeLockAmount)
 	}
 
 	// ERC20 amount must be native * 1e9.
-	want := token.NativeToERC20(3 * token.NativeUnit)
+	want := token.NativeToERC20(3 * token.MinBridgeLockAmount)
 	if ev.ERC20Amount().Cmp(want) != 0 {
 		t.Fatalf("erc20 amount = %s, want %s", ev.ERC20Amount(), want)
 	}
@@ -66,13 +101,13 @@ func TestLockEscrowsAndRecords(t *testing.T) {
 }
 
 func TestLockInsufficientFunds(t *testing.T) {
-	b, ledger, user := newTestBridge(t, token.NativeUnit)
-	_, err := b.Lock(user, Address{0x01}, 5*token.NativeUnit)
+	b, ledger, user := newTestBridge(t, token.MinBridgeLockAmount)
+	_, err := b.Lock(user, Address{0x01}, 5*token.MinBridgeLockAmount)
 	if !errors.Is(err, market.ErrInsufficientFunds) {
 		t.Fatalf("expected ErrInsufficientFunds, got %v", err)
 	}
 	// Nothing should have moved.
-	if bal, _ := ledger.Balance(user); bal != token.NativeUnit {
+	if bal, _ := ledger.Balance(user); bal != token.MinBridgeLockAmount {
 		t.Fatalf("user balance changed to %d", bal)
 	}
 	if esc, _ := ledger.Balance(EscrowAccount); esc != 0 {
@@ -81,12 +116,12 @@ func TestLockInsufficientFunds(t *testing.T) {
 }
 
 func TestLockUniqueIDs(t *testing.T) {
-	b, _, user := newTestBridge(t, 10*token.NativeUnit)
-	ev1, err := b.Lock(user, Address{0x01}, token.NativeUnit)
+	b, _, user := newTestBridge(t, 2*token.MinBridgeLockAmount)
+	ev1, err := b.Lock(user, Address{0x01}, token.MinBridgeLockAmount)
 	if err != nil {
 		t.Fatalf("lock1: %v", err)
 	}
-	ev2, err := b.Lock(user, Address{0x01}, token.NativeUnit)
+	ev2, err := b.Lock(user, Address{0x01}, token.MinBridgeLockAmount)
 	if err != nil {
 		t.Fatalf("lock2: %v", err)
 	}
@@ -99,8 +134,8 @@ func TestLockUniqueIDs(t *testing.T) {
 }
 
 func TestProcessBurnUnlocks(t *testing.T) {
-	b, ledger, user := newTestBridge(t, 10*token.NativeUnit)
-	if _, err := b.Lock(user, Address{0x01}, 5*token.NativeUnit); err != nil {
+	b, ledger, user := newTestBridge(t, token.MinBridgeLockAmount)
+	if _, err := b.Lock(user, Address{0x01}, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 
@@ -113,18 +148,18 @@ func TestProcessBurnUnlocks(t *testing.T) {
 		t.Fatalf("process burn: %v", err)
 	}
 
-	// escrow 5 -> 3, user 5 -> 7.
-	if esc, _ := ledger.Balance(EscrowAccount); esc != 3*token.NativeUnit {
-		t.Fatalf("escrow = %d, want %d", esc, 3*token.NativeUnit)
+	// Unlock two MATRIX from the exact-minimum lock.
+	if esc, _ := ledger.Balance(EscrowAccount); esc != token.MinBridgeLockAmount-2*token.NativeUnit {
+		t.Fatalf("escrow = %d, want %d", esc, token.MinBridgeLockAmount-2*token.NativeUnit)
 	}
-	if ub, _ := ledger.Balance(user); ub != 7*token.NativeUnit {
-		t.Fatalf("user = %d, want %d", ub, 7*token.NativeUnit)
+	if ub, _ := ledger.Balance(user); ub != 2*token.NativeUnit {
+		t.Fatalf("user = %d, want %d", ub, 2*token.NativeUnit)
 	}
 }
 
 func TestProcessBurnReplayRejected(t *testing.T) {
-	b, _, user := newTestBridge(t, 10*token.NativeUnit)
-	if _, err := b.Lock(user, Address{0x01}, 5*token.NativeUnit); err != nil {
+	b, _, user := newTestBridge(t, token.MinBridgeLockAmount)
+	if _, err := b.Lock(user, Address{0x01}, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	burn := BurnEvent{ID: "burn-1", ToAccount: user, ERC20Amount: token.NativeToERC20(token.NativeUnit)}
@@ -138,8 +173,8 @@ func TestProcessBurnReplayRejected(t *testing.T) {
 }
 
 func TestProcessBurnNonMultipleRejected(t *testing.T) {
-	b, _, user := newTestBridge(t, 10*token.NativeUnit)
-	if _, err := b.Lock(user, Address{0x01}, 5*token.NativeUnit); err != nil {
+	b, _, user := newTestBridge(t, token.MinBridgeLockAmount)
+	if _, err := b.Lock(user, Address{0x01}, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("lock: %v", err)
 	}
 	// Not an exact multiple of ERC20PerNativeUnit (1e9).
@@ -150,7 +185,7 @@ func TestProcessBurnNonMultipleRejected(t *testing.T) {
 }
 
 func TestReconciliation(t *testing.T) {
-	b, _, user := newTestBridge(t, 100*token.NativeUnit)
+	b, _, user := newTestBridge(t, 10*token.MinBridgeLockAmount)
 
 	// A sequence of locks and unlocks; reconciliation must hold at each step.
 	steps := []struct {
@@ -158,10 +193,10 @@ func TestReconciliation(t *testing.T) {
 		amount uint64
 		burnID string
 	}{
-		{lock: true, amount: 10 * token.NativeUnit},
-		{lock: true, amount: 5 * token.NativeUnit},
+		{lock: true, amount: token.MinBridgeLockAmount},
+		{lock: true, amount: 2 * token.MinBridgeLockAmount},
 		{lock: false, amount: 4 * token.NativeUnit, burnID: "b1"},
-		{lock: true, amount: 20 * token.NativeUnit},
+		{lock: true, amount: 3 * token.MinBridgeLockAmount},
 		{lock: false, amount: 11 * token.NativeUnit, burnID: "b2"},
 	}
 
@@ -198,12 +233,12 @@ func TestReconciliation(t *testing.T) {
 }
 
 func TestLockThenAttestVerifies(t *testing.T) {
-	b, _, user := newTestBridge(t, 10*token.NativeUnit)
+	b, _, user := newTestBridge(t, token.MinBridgeLockAmount)
 	v1 := newTestAttestor(t)
 	v2 := newTestAttestor(t)
 	attestors := map[Address]bool{v1.Address(): true, v2.Address(): true}
 
-	ev, err := b.Lock(user, Address{0x0a, 0x0b, 0x0c}, 4*token.NativeUnit)
+	ev, err := b.Lock(user, Address{0x0a, 0x0b, 0x0c}, token.MinBridgeLockAmount)
 	if err != nil {
 		t.Fatalf("lock: %v", err)
 	}
@@ -215,7 +250,7 @@ func TestLockThenAttestVerifies(t *testing.T) {
 		t.Fatalf("attestation should verify: %v", err)
 	}
 	// The attested amount is the wrapped conversion of the locked native.
-	if att.Amount.Cmp(token.NativeToERC20(4*token.NativeUnit)) != 0 {
+	if att.Amount.Cmp(token.NativeToERC20(token.MinBridgeLockAmount)) != 0 {
 		t.Fatalf("attested amount mismatch")
 	}
 }

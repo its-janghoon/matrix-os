@@ -5,9 +5,11 @@ import { Footer } from '@/components/Footer';
 import Navigation from '@/components/Navigation';
 import { TokenBridge } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
+import { bridgeConfigState } from '@/lib/bridge/config';
 import { FiArrowRight, FiBookOpen, FiLayers, FiShoppingCart } from 'react-icons/fi';
 
 export default function TokenPage() {
+  const bridgeConfigured = bridgeConfigState.config !== null;
   return (
     <>
       <Navigation />
@@ -57,8 +59,8 @@ export default function TokenPage() {
               <h3 className='text-xl font-semibold'>Native first, one currency end to end</h3>
             </div>
             <p className='mt-4 text-grayscale-300'>
-              One coin end to end. Provider earnings come from a genesis allocation and a genesis-funded reward pool -
-              capped, supply-tracked issuance rather than minting at will.
+              Public launch provider emissions are zero. Providers publish MATRIX-denominated quotes and earn buyer
+              payments; no stablecoin peg, oracle or per-block token emission subsidizes the price.
             </p>
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
               <CheckItem>Native coin of the Matrix L1: the single source of truth for balances and supply</CheckItem>
@@ -75,18 +77,22 @@ export default function TokenPage() {
             </div>
             <p className='mt-4 text-grayscale-300'>
               wMATRIX is not the settlement token. It is a mirror, minted only against native MATRIX locked in escrow,
-              so it can be represented on Ethereum. The bridge runs against local and test networks only:{' '}
-              <strong className='font-semibold text-white'>it is not deployed to any public Ethereum network</strong>,
-              so there is no wMATRIX to buy or sell yet.
+              so it can be represented on Base. {bridgeConfigured ? (
+                <strong className='font-semibold text-white'>This build contains an explicit Base target; configuration alone does not prove the contract is deployed, verified or live. Inspect its chain and address before signing.</strong>
+              ) : (
+                <strong className='font-semibold text-white'>This site has no public bridge deployment configured, so no contract address or validator endpoint is assumed and active bridge controls remain unavailable.</strong>
+              )}
             </p>
 
             <TokenBridge />
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
-              <CheckItem>Native lock to wrapped mint: minting requires a threshold of validator secp256k1 attestations that native was locked</CheckItem>
-              <CheckItem>Wrapped burn to native unlock: a burn emits an on-chain Burned event that is decoded into an authorization to release the escrowed native MATRIX, applied exactly once per event</CheckItem>
-              <CheckItem>Both directions are quorum-gated: on a validator set the unlock is consensus-ordered, so escrow is released on the block where attesting voting power crosses quorum rather than by whichever node saw the burn</CheckItem>
-              <CheckItem>Backed 1:1 by locked native, reconciled through the exact 1e9 conversion factor</CheckItem>
-              <CheckItem>Local and test networks only, not deployed to a public Ethereum network</CheckItem>
+              <CheckItem>Native lock to wrapped mint: a lock is at least 100 MATRIX, and minting requires a threshold of the fixed secp256k1 attestors registered at WrappedMatrix deployment</CheckItem>
+              <CheckItem>Fixed EVM attestors are separate from the dynamic native bonded-open validator set; validator joins and exits do not update the contract committee</CheckItem>
+              <CheckItem>Wrapped burn to native unlock: confirmed Burned events are always ordered through native consensus and applied exactly once</CheckItem>
+              <CheckItem>The user submits Base transactions and pays Base gas from their own wallet; there is no relayer</CheckItem>
+              <CheckItem>Backed 1:1 by locked native with an exact 1e9 decimal conversion; this is not a USD, USDC or stablecoin peg</CheckItem>
+              <CheckItem>Production mint ceiling: 6% of native maximum supply, while every minted unit still needs collateral</CheckItem>
+              <CheckItem>{bridgeConfigured ? 'A Base target is configured; verify its chain, contract code and endpoints independently before use' : 'No public bridge target is configured; the site does not invent a contract address or validator endpoint'}</CheckItem>
             </ul>
           </Card>
         </Section>

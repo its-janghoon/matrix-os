@@ -358,8 +358,9 @@ function Funding({ account }: { account: string }) {
   return (
     <div className='mt-4 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4'>
       <p className='mb-2 text-sm text-yellow-100'>
-        This account holds nothing, so a provider will refuse the job before doing any work. There is no on-ramp yet -
-        buying MATRIX with USDC over the bridge is built but undeployed - so on a node you run, fund it yourself:
+        This account holds nothing, so a provider will refuse the job before doing any work. MATRIX is not pegged to
+        USDC, and this page does not claim a live public on-ramp. On a node you run, fund the account yourself. If a
+        verified Base bridge is offered separately, its user pays Base gas and uses only the exact configured contract:
       </p>
       <pre className='overflow-x-auto rounded bg-black/60 p-3 text-xs text-gray-200'>
         <code>{`matrix --api-key <key> fund --account ${account} --amount 1000000`}</code>

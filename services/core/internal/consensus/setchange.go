@@ -68,6 +68,35 @@ const (
 	DefaultEpochLength = 100
 )
 
+// MembershipMode controls who may authorize validator-set changes.
+type MembershipMode string
+
+const (
+	// MembershipOperatorApproved preserves the legacy quorum-of-operator
+	// allow-list. It is suitable for private validator sets.
+	MembershipOperatorApproved MembershipMode = "operator-approved"
+	// MembershipBondedOpen admits any account that self-signs its admission and
+	// has committed the configured minimum bond. Voluntary exits must likewise
+	// be self-signed; slashing is accepted only when objective equivocation
+	// evidence is stored locally and independently verifiable.
+	MembershipBondedOpen MembershipMode = "bonded-open"
+)
+
+// ParseMembershipMode validates a configured mode. Empty preserves the legacy
+// operator-approved behavior for existing configurations.
+func ParseMembershipMode(raw string) (MembershipMode, error) {
+	mode := MembershipMode(strings.ToLower(strings.TrimSpace(raw)))
+	if mode == "" {
+		return MembershipOperatorApproved, nil
+	}
+	switch mode {
+	case MembershipOperatorApproved, MembershipBondedOpen:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("%w: membership mode %q must be %q or %q", ErrInvalidMessage, raw, MembershipOperatorApproved, MembershipBondedOpen)
+	}
+}
+
 // SetChangeKind is what a change does.
 type SetChangeKind string
 

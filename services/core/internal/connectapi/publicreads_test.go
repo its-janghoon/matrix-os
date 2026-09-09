@@ -25,6 +25,10 @@ func TestReadClassificationIsPinned(t *testing.T) {
 	wantReads := []string{
 		"GetAgent",
 		"GetBalance",
+		// GetBridgeReadiness is a challenge-bound secp256k1 signature over public
+		// deployment facts. It moves no value, is required by a keyless browser
+		// before locking, and remains behind the shared per-caller rate limiter.
+		"GetBridgeReadiness",
 		"GetBridgeReconciliation",
 		"GetInferenceJob",
 		"GetJob",
@@ -58,6 +62,7 @@ func TestReadClassificationIsPinned(t *testing.T) {
 		"SubmitInferenceJob",
 		"SubmitJob",
 		"SubmitSignedTransfer",
+		"UpdateProviderQuote",
 	}
 
 	var reads, writes []string
@@ -133,6 +138,7 @@ func TestPublicReadsOpensReadsAndOnlyReads(t *testing.T) {
 		{"/matrix.market.v1.MarketService/SubmitSignedTransfer", `{"to":"bob","amount":"1"}`},
 		{"/matrix.market.v1.MarketService/FundAccount", `{"account":"alice","amount":"1"}`},
 		{"/matrix.market.v1.MarketService/RegisterProvider", `{"id":"p","capacity":"1","pricePerUnit":"1"}`},
+		{"/matrix.market.v1.MarketService/UpdateProviderQuote", `{"id":"p","pricePerUnit":"1"}`},
 		{"/matrix.market.v1.MarketService/SubmitJob", `{"buyer":"a","provider":"p","units":"1"}`},
 		{"/matrix.market.v1.MarketService/CompleteJob", `{"id":"j"}`},
 	} {
@@ -140,6 +146,37 @@ func TestPublicReadsOpensReadsAndOnlyReads(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("%s = %d, want 401: public reads must never open a write", write.path, resp.StatusCode)
 		}
+	}
+}
+
+func TestUpdateProviderQuoteAlwaysRequiresAPIKey(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		publicReads  bool
+		signedWrites bool
+	}{
+		{name: "public reads", publicReads: true},
+		{name: "signed writes", signedWrites: true},
+		{name: "public reads and signed writes", publicReads: true, signedWrites: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, err := NewHandler(Config{
+				Bindings:       []Binding{{Desc: &marketv1.MarketService_ServiceDesc, Impl: &fakeMarket{}}},
+				Auth:           denyAll{},
+				PublicReads:    tc.publicReads,
+				SignedWrites:   tc.signedWrites,
+				AllowedOrigins: []string{"*"},
+			})
+			if err != nil {
+				t.Fatalf("NewHandler: %v", err)
+			}
+
+			resp := post(t, h, "/matrix.market.v1.MarketService/UpdateProviderQuote",
+				`{"id":"p","pricePerUnit":"1"}`, nil)
+			if resp.StatusCode != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401: UpdateProviderQuote must require an API key", resp.StatusCode)
+			}
+		})
 	}
 }
 

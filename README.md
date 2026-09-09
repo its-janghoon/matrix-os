@@ -15,7 +15,7 @@ document describes the layout and how to build and test each piece.
 - [`proto`](proto/README.md) - Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
 - [`apps/web`](apps/web) - the Next.js marketing website (ecirlabs-web).
 - [`apps/console`](apps/console/README.md) - Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
-- [`contracts`](contracts/README.md) - the Hardhat project for wMATRIX, the bridged ERC-20 mirror of the native MATRIX coin that lets the asset list on exchanges (the native coin on the Go L1 remains the single source of truth for balances).
+- [`contracts`](contracts/README.md) - the Base-primary Hardhat project for wMATRIX, the 1:1 escrow-backed EVM mirror of native MATRIX. Base Sepolia (`84532`) is rehearsed before Base production (`8453`); the native Go L1 remains the source of truth.
 - [`packages/protocol`](packages/protocol) - the one TypeScript implementation of the wire byte layouts a client signs over (payment digests, run authorizations, message digests). It exists because those layouts were copied into three places and a drift between any copy and the Go verifier is a signature the node rejects for no visible reason.
 - [`packages/sdk`](packages/sdk) - the TypeScript client SDK. Its layout-parity test signs randomized inputs through both this package and the Go encoder and fails on a single differing byte.
 
@@ -125,6 +125,20 @@ corepack yarn build
 `packages/protocol` has no build of its own: it is consumed as TypeScript source
 by the web app and mirrored by the SDK, and the parity test above is what keeps
 the mirror honest.
+
+## Launch and operator documentation
+
+Base is the primary EVM launch target. The authoritative procedure is the
+[Base launch runbook](docs/runbooks/base-launch.md): first rehearse on Base
+Sepolia (`84532`), then perform the reviewed Base production (`8453`) ceremony.
+It covers the immutable 6% wMATRIX cap, exact-backed 5% founder vault, dynamic
+native validators versus immutable EVM attestors, bonded-open stake, zero
+emission, fee/maintainer policy, user-paid Base gas, and reconciliation evidence.
+
+Start every node from `matrixd -init` and merge—do not run standalone—the
+[Base launch overlay example](services/core/configs/base-launch.overlay.yaml.example).
+The example intentionally contains unresolved deployment inputs and no real
+accounts, addresses, origins, RPC credentials, or secrets.
 
 ## License
 

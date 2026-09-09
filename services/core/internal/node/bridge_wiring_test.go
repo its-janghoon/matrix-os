@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"os"
 	"path/filepath"
@@ -97,6 +98,22 @@ func burnedLog(nativeRecipient string, erc20 *big.Int, txHash string, logIndex u
 func zeroConfirmations() *uint64 {
 	v := uint64(0)
 	return &v
+}
+
+func TestConfiguredBridgeIsConsensusOrderedForEverySetSize(t *testing.T) {
+	cfg := BridgeConfig{Contract: testContract, ChainID: testChainID}
+	for _, validators := range []int{0, 1, 2, 7} {
+		t.Run(fmt.Sprintf("%d validators", validators), func(t *testing.T) {
+			store, ledger := newBridgeTestLedger(t)
+			b, err := newConfiguredBridgeForSet(ledger, store, cfg, validators)
+			if err != nil {
+				t.Fatalf("newConfiguredBridgeForSet: %v", err)
+			}
+			if b == nil || !b.IsConsensusOrdered() {
+				t.Fatalf("configured bridge for %d validators is not consensus-ordered", validators)
+			}
+		})
+	}
 }
 
 // TestBridgeConfig_OffByDefault asserts the subsystem is genuinely opt-in: a
@@ -250,18 +267,11 @@ func TestInitialize_LeavesBridgeDisabled(t *testing.T) {
 	}
 }
 
-// TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger is the test that justifies
-// this whole wiring. It builds the bridge the way Node.Start does -- over the
-// node's OWN market ledger and KV store -- locks native MATRIX through it (so
-// escrow is backed by a real lock rather than a seeded demo balance, which is
-// exactly what cmd/bridge-watch cannot do), then lets the watcher observe the
-// matching on-chain Burned event and asserts:
-//
-//   - the unlock lands on the SAME ledger that holds the lock,
-//   - Reconcile agrees (escrow balance == locked - unlocked), which is only a
-//     meaningful check because both halves share one ledger,
-//   - re-observing the burn changes nothing (replay-safe).
-func TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger(t *testing.T) {
+// TestDirectBridgeHelper_BurnUnlocksOnTheSameLedger covers the explicit
+// library/test-helper mode that remains available outside matrixd. A configured
+// daemon bridge is always consensus-ordered; this direct helper still exercises
+// local lock, burn, reconciliation, and replay behavior on one ledger.
+func TestDirectBridgeHelper_BurnUnlocksOnTheSameLedger(t *testing.T) {
 	store, ledger := newBridgeTestLedger(t)
 
 	user, err := token.GenerateAccount()
@@ -269,8 +279,8 @@ func TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger(t *testing.T) {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
 	userID := user.AccountID()
-	const funded = uint64(1_000)
-	const locked = uint64(400)
+	const funded = 2 * token.MinBridgeLockAmount
+	const locked = token.MinBridgeLockAmount
 	if err := ledger.Credit(userID, funded); err != nil {
 		t.Fatalf("Credit: %v", err)
 	}
@@ -286,13 +296,14 @@ func TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger(t *testing.T) {
 		},
 	}
 
-	b, err := newConfiguredBridge(ledger, store, cfg)
+	contract, err := bridge.ParseAddress(testContract)
 	if err != nil {
-		t.Fatalf("newConfiguredBridge: %v", err)
+		t.Fatalf("ParseAddress: %v", err)
 	}
-	if b == nil {
-		t.Fatal("expected a bridge for a configured contract")
-	}
+	b := bridge.New(ledger, store, bridge.AttestationParams{
+		ChainID:        big.NewInt(testChainID),
+		BridgeContract: contract,
+	})
 
 	// The native->wrapped half, on this node's ledger: escrow the user's MATRIX.
 	var l1Recipient bridge.Address
@@ -315,7 +326,7 @@ func TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger(t *testing.T) {
 		t.Fatalf("GenerateAccount(recipient): %v", err)
 	}
 	recipientID := recipient.AccountID()
-	const unlockNative = uint64(150)
+	const unlockNative = token.MinBridgeLockAmount / 4
 	fake := &fakeNodeEthClient{
 		head: 4,
 		logsByBlock: map[uint64][]bridge.EthLog{
@@ -398,13 +409,11 @@ func TestNodeBridgeWiring_BurnUnlocksOnTheNodeLedger(t *testing.T) {
 	}
 }
 
-// TestNodeBridgeWiring_ResumesFromPersistedCursorAcrossRestart asserts the
-// wiring's cursor persistence works through the node's real KV store: a
-// simulated matrixd restart resumes at the next unscanned block instead of
-// re-scanning from start_block. Without this, an in-node watcher pointed at a
-// contract deployed far behind head would re-scan that entire range on every
-// node restart.
-func TestNodeBridgeWiring_ResumesFromPersistedCursorAcrossRestart(t *testing.T) {
+// TestBridgeWatcher_ResumesFromPersistedCursorAcrossRestart asserts cursor
+// persistence through the node's real KV store using the explicit direct bridge
+// test helper. A simulated restart resumes at the next unscanned block instead
+// of re-scanning from start_block.
+func TestBridgeWatcher_ResumesFromPersistedCursorAcrossRestart(t *testing.T) {
 	dir := t.TempDir()
 	cfg := BridgeConfig{
 		Contract: testContract,
@@ -441,10 +450,14 @@ func TestNodeBridgeWiring_ResumesFromPersistedCursorAcrossRestart(t *testing.T) 
 		if err := ledger.Credit(bridge.EscrowAccount, 100); err != nil {
 			t.Fatalf("Credit escrow: %v", err)
 		}
-		b, err := newConfiguredBridge(ledger, store, cfg)
+		contract, err := bridge.ParseAddress(cfg.Contract)
 		if err != nil {
-			t.Fatalf("newConfiguredBridge (boot 1): %v", err)
+			t.Fatalf("ParseAddress (boot 1): %v", err)
 		}
+		b := bridge.New(ledger, store, bridge.AttestationParams{
+			ChainID:        big.NewInt(cfg.ChainID),
+			BridgeContract: contract,
+		})
 		w, err := newConfiguredBridgeWatcher(b, store, fake, cfg, nil, nil)
 		if err != nil {
 			t.Fatalf("newConfiguredBridgeWatcher (boot 1): %v", err)
@@ -469,10 +482,14 @@ func TestNodeBridgeWiring_ResumesFromPersistedCursorAcrossRestart(t *testing.T) 
 		}
 		defer func() { _ = store.Close() }()
 		ledger := market.NewLedger(store)
-		b, err := newConfiguredBridge(ledger, store, cfg)
+		contract, err := bridge.ParseAddress(cfg.Contract)
 		if err != nil {
-			t.Fatalf("newConfiguredBridge (boot 2): %v", err)
+			t.Fatalf("ParseAddress (boot 2): %v", err)
 		}
+		b := bridge.New(ledger, store, bridge.AttestationParams{
+			ChainID:        big.NewInt(cfg.ChainID),
+			BridgeContract: contract,
+		})
 		w, err := newConfiguredBridgeWatcher(b, store, fake, cfg, nil, nil)
 		if err != nil {
 			t.Fatalf("newConfiguredBridgeWatcher (boot 2): %v", err)

@@ -24,7 +24,25 @@ import type { WrappedMatrix } from "../typechain-types";
  */
 
 /** Networks that are real (non-local) and therefore require strict guards. */
-const REAL_NETWORKS = new Set(["mainnet", "sepolia"]);
+const REAL_NETWORKS = new Set(["mainnet", "sepolia", "base", "baseSepolia"]);
+/** Production networks may never inherit the full-supply contract default. */
+const PRODUCTION_NETWORKS = new Set(["mainnet", "base"]);
+const EXPECTED_CHAIN_IDS: Record<string, bigint> = {
+  mainnet: 1n,
+  sepolia: 11155111n,
+  base: 8453n,
+  baseSepolia: 84532n,
+};
+
+/** Refuse an RPC endpoint whose eth_chainId does not match the selected name. */
+export function assertExpectedChain(networkName: string, chainId: bigint): void {
+  const expected = EXPECTED_CHAIN_IDS[networkName];
+  if (expected !== undefined && chainId !== expected) {
+    throw new Error(
+      `refusing '${networkName}' deployment: RPC reports chain id ${chainId}, expected ${expected}`
+    );
+  }
+}
 
 export interface DeployConfig {
   /** Validator secp256k1 attestor addresses (the n in m-of-n). */
@@ -75,6 +93,7 @@ export interface DeployResult {
  */
 export async function resolveDeployConfig(networkName: string): Promise<DeployConfig> {
   const isReal = REAL_NETWORKS.has(networkName);
+  const isProduction = PRODUCTION_NETWORKS.has(networkName);
   const threshold = Number(process.env.THRESHOLD ?? "2");
 
   if (!Number.isInteger(threshold) || threshold < 1) {
@@ -96,6 +115,14 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
     if (mintCap < 0n) {
       throw new Error(`MINT_CAP must not be negative (got '${rawCap}')`);
     }
+  }
+
+  if (PRODUCTION_NETWORKS.has(networkName) && mintCap === 0n) {
+    throw new Error(
+      `refusing to deploy to '${networkName}' without an explicit non-zero MINT_CAP. ` +
+        `The contract's 0 value resolves to the full 1e27 wrapped-supply ceiling; ` +
+        `the recommended Base launch cap is 60000000000000000000000000 (6% of supply).`
+    );
   }
 
   if (isReal && !process.env.PRIVATE_KEY) {
@@ -127,17 +154,27 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
   if (attestors.length === 0) {
     throw new Error("attestor set is empty");
   }
+  const unique = new Set(attestors.map((a) => a.toLowerCase()));
+  if (unique.size !== attestors.length) {
+    throw new Error("ATTESTORS contains duplicate addresses");
+  }
+  if (threshold > attestors.length) {
+    throw new Error(
+      `THRESHOLD (${threshold}) must be <= the number of attestors (${attestors.length})`
+    );
+  }
+  if (isProduction && attestors.length < 2) {
+    throw new Error(
+      `refusing to deploy to production network '${networkName}' with fewer than two attestors; ` +
+        `ALLOW_SINGLE_ATTESTOR is only available for disposable real-testnet rehearsals`
+    );
+  }
   if (isReal && attestors.length === 1) {
-    // The same rule deploy.ts applies to MatrixToken's minters, applied here
-    // because this is the side that holds real collateral. A 1-of-1 bridge is
-    // one key able to mint the entire cap against escrow it does not own, which
-    // is the whole thing an m-of-n set exists to prevent. Escapable only by
-    // saying out loud that the deployment is disposable.
     if (process.env.ALLOW_SINGLE_ATTESTOR !== "1") {
       throw new Error(
         `refusing to deploy to '${networkName}' with a single attestor: that one key can ` +
           `mint the entire cap on its own. Give at least two attestors and a THRESHOLD of ` +
-          `2 or more. If this is deliberately a throwaway rehearsal, set ` +
+          `2 or more. If this is deliberately a throwaway testnet rehearsal, set ` +
           `ALLOW_SINGLE_ATTESTOR=1 and treat the deployment as disposable.`
       );
     }
@@ -147,13 +184,10 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
         `is a rehearsal and must never be treated as production.`
     );
   }
-  const unique = new Set(attestors.map((a) => a.toLowerCase()));
-  if (unique.size !== attestors.length) {
-    throw new Error("ATTESTORS contains duplicate addresses");
-  }
-  if (threshold > attestors.length) {
+  if (isReal && 3 * threshold <= 2 * attestors.length) {
     throw new Error(
-      `THRESHOLD (${threshold}) must be <= the number of attestors (${attestors.length})`
+      `refusing to deploy to '${networkName}' with THRESHOLD ${threshold} of ${attestors.length}: ` +
+        `real networks require a threshold strictly greater than two thirds (3*m > 2*n)`
     );
   }
 
@@ -168,6 +202,7 @@ export async function resolveDeployConfig(networkName: string): Promise<DeployCo
 export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResult> {
   const [deployer] = await ethers.getSigners();
   const net = await ethers.provider.getNetwork();
+  assertExpectedChain(network.name, net.chainId);
 
   const factory = await ethers.getContractFactory("WrappedMatrix");
 
@@ -185,6 +220,10 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
   await wmatrix.waitForDeployment();
 
   const address = await wmatrix.getAddress();
+  const code = await ethers.provider.getCode(address);
+  if (code === "0x") {
+    throw new Error(`deployment at ${address} has no contract code on chain ${net.chainId}`);
+  }
   const deployReceipt = await wmatrix.deploymentTransaction()?.wait();
 
   return {
@@ -251,7 +290,7 @@ async function main() {
 
   // Emit the exact verify command for the recorded constructor args.
   const argsCsv = result.args.attestors.join(",");
-  console.log("\nTo verify on Etherscan (ETHERSCAN_API_KEY must be set):");
+  console.log("\nTo verify on the configured block explorer API:");
   console.log(
     // args.mintCap, not result.mintCap: verification re-encodes the CONSTRUCTOR
     // ARGUMENT and compares it to the deploy calldata, and those differ whenever

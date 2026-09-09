@@ -12,16 +12,10 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
-// TestInitialize_GeneratedConsensusMonetaryPolicy pins the monetary policy a
-// generated config (matrixd -init) ships with to the operator's (CTO's) explicit
-// decisions: a 100 basis-point protocol fee, the recommended provider-emission
-// schedule (280,000,000,000 base units per block, halving every 1,000,000
-// blocks), and bonded stake OFF (permissioned for the first release).
-//
-// These live in the generated config, not in the engine defaults: the point of
-// TestConsensusNew_ZeroValueIsFeeAndEmissionFree below is that consensus.New with
-// an all-zero monetary config still runs fee-free and emission-free, so this test
-// is about what Initialize writes for a fresh node, not what the protocol forces.
+// TestInitialize_GeneratedConsensusMonetaryPolicy pins matrixd -init's launch
+// economics: one-percent protocol fee, no provider emission, bonded-open stake,
+// and no maintainer assignment or share unless a later launch config explicitly
+// supplies a real account.
 func TestInitialize_GeneratedConsensusMonetaryPolicy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	if err := Initialize(path); err != nil {
@@ -34,55 +28,45 @@ func TestInitialize_GeneratedConsensusMonetaryPolicy(t *testing.T) {
 	}
 	cfg := n.config
 
-	if got := cfg.Consensus.FeeBasisPoints; got != 100 {
-		t.Errorf("generated fee_basis_points = %d, want 100", got)
+	if consensus.MaxFeeBasisPoints != 100 {
+		t.Fatalf("consensus.MaxFeeBasisPoints = %d, want launch fee cap 100", consensus.MaxFeeBasisPoints)
 	}
 	if got := cfg.Consensus.FeeBasisPoints; got != consensus.MaxFeeBasisPoints {
-		t.Errorf("generated fee_basis_points = %d, want the code cap consensus.MaxFeeBasisPoints (%d)",
-			got, consensus.MaxFeeBasisPoints)
+		t.Errorf("generated fee_basis_points = %d, want %d", got, consensus.MaxFeeBasisPoints)
 	}
-	if got := cfg.Consensus.Rewards.PerBlock; got != 280_000_000_000 {
-		t.Errorf("generated rewards.per_block = %d, want 280000000000", got)
+	if got := cfg.Consensus.Rewards.PerBlock; got != 0 {
+		t.Errorf("generated rewards.per_block = %d, want 0", got)
 	}
-	if got := cfg.Consensus.Rewards.HalfLife; got != 1_000_000 {
-		t.Errorf("generated rewards.half_life = %d, want 1000000", got)
+	if got := cfg.Consensus.Rewards.HalfLife; got != consensus.DefaultProviderEmissionHalfLife {
+		t.Errorf("generated rewards.half_life = %d, want %d", got, consensus.DefaultProviderEmissionHalfLife)
 	}
-	if cfg.Consensus.Stake.Enabled {
-		t.Error("generated stake.enabled = true, want false (permissioned first release)")
+	if cfg.Consensus.MembershipMode != string(consensus.MembershipBondedOpen) {
+		t.Errorf("generated membership_mode = %q, want %q", cfg.Consensus.MembershipMode, consensus.MembershipBondedOpen)
 	}
-	// The registry is deliberately empty: a registration needs a quorum of
-	// operators, so the armed emission pays nothing until this operator adds a
-	// provider. A generated config that pre-listed providers would be deciding
-	// who earns on the operator's behalf.
+	if cfg.Consensus.ParticipateInOpenSet == nil || !*cfg.Consensus.ParticipateInOpenSet {
+		t.Error("generated participate_in_open_set is not explicitly true")
+	}
+	if !cfg.Consensus.Stake.Enabled {
+		t.Error("generated stake.enabled = false, want true for bonded-open membership")
+	}
+	if cfg.Consensus.Stake.MinBond == nil || *cfg.Consensus.Stake.MinBond != consensus.DefaultMinBond {
+		t.Errorf("generated stake.min_bond = %v, want %d", cfg.Consensus.Stake.MinBond, consensus.DefaultMinBond)
+	}
+	if cfg.Consensus.Stake.Bond != consensus.DefaultMinBond {
+		t.Errorf("generated stake.bond = %d, want %d", cfg.Consensus.Stake.Bond, consensus.DefaultMinBond)
+	}
+	if got := effectiveUnbonding(cfg.Consensus.Stake); got != consensus.DefaultUnbondingPeriod {
+		t.Errorf("effective unbonding period = %d, want %d", got, consensus.DefaultUnbondingPeriod)
+	}
+	if cfg.Consensus.MaintainerAccount != "" {
+		t.Errorf("generated maintainer_account = %q, want empty", cfg.Consensus.MaintainerAccount)
+	}
+	if cfg.Consensus.MaintainerFeeShareBasisPoints != 0 {
+		t.Errorf("generated maintainer share = %d, want 0 without an explicit account",
+			cfg.Consensus.MaintainerFeeShareBasisPoints)
+	}
 	if len(cfg.Consensus.Rewards.ApprovedProviders) != 0 {
 		t.Errorf("generated rewards.approved_providers = %v, want empty", cfg.Consensus.Rewards.ApprovedProviders)
-	}
-}
-
-// TestGeneratedProviderEmissionMatchesProposalAllocation checks the recommended
-// per-block figure really does target ~40% of the native supply cap over its
-// half-life, so the documented arithmetic in node.go stays honest if someone
-// edits the constant.
-//
-// The total ever paid by a halving (right-shift) schedule is about
-// 1.44 * PerBlock * HalfLife. We assert that lands within a couple percent of
-// 40% of token.NativeMaxSupply.
-func TestGeneratedProviderEmissionMatchesProposalAllocation(t *testing.T) {
-	const (
-		perBlock = uint64(280_000_000_000)
-		halfLife = consensus.DefaultProviderEmissionHalfLife // 1,000,000
-	)
-	if recommendedProviderEmissionPerBlock != perBlock {
-		t.Fatalf("recommendedProviderEmissionPerBlock = %d, want %d", recommendedProviderEmissionPerBlock, perBlock)
-	}
-	// 1.44 ~= 1 / ln(2), the sum of a halving series relative to its first term.
-	totalPaid := 1.44 * float64(perBlock) * float64(halfLife)
-	target := 0.40 * float64(token.NativeMaxSupply)
-
-	ratio := totalPaid / target
-	if ratio < 0.98 || ratio > 1.02 {
-		t.Fatalf("total emission ~= %.3e base units is %.1f%% of the 40%%-of-cap target (%.3e); "+
-			"expected within 2%%", totalPaid, ratio*100, target)
 	}
 }
 

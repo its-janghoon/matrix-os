@@ -295,3 +295,16 @@ func TestTheCredentialIsNotStoredInTheClear(t *testing.T) {
 		t.Fatal("limit key is empty")
 	}
 }
+
+func TestBridgeReadinessUsesTheSharedRateLimit(t *testing.T) {
+	c := &clock{t: time.Unix(1_700_000_000, 0)}
+	h := limitedHandler(t, RateLimit{RequestsPerMinute: 60, Burst: 1}, c.now)
+	first := callAs(h, http.MethodPost, "/matrix.market.v1.MarketService/GetBridgeReadiness", "", "10.0.0.9:1")
+	if first.Code == http.StatusTooManyRequests {
+		t.Fatal("first readiness request was unexpectedly rate limited")
+	}
+	second := callAs(h, http.MethodPost, "/matrix.market.v1.MarketService/GetBridgeReadiness", "", "10.0.0.9:1")
+	if second.Code != http.StatusTooManyRequests {
+		t.Fatalf("second readiness request = %d, want 429", second.Code)
+	}
+}

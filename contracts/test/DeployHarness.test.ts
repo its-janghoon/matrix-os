@@ -1,6 +1,7 @@
 import { expect } from "chai";
 import { ethers, network } from "hardhat";
 import {
+  assertExpectedChain,
   deployWrappedMatrix,
   resolveDeployConfig,
 } from "../scripts/deploy-mainnet";
@@ -22,8 +23,14 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
   // Forked runs pull remote state and can be slow.
   this.timeout(120_000);
 
+  it("checks Base chain IDs before signing", () => {
+    expect(() => assertExpectedChain("base", 8453n)).not.to.throw();
+    expect(() => assertExpectedChain("baseSepolia", 84532n)).not.to.throw();
+    expect(() => assertExpectedChain("base", 1n)).to.throw(/expected 8453/);
+  });
+
   it("runs the production deploy path and deploys WrappedMatrix with expected params", async () => {
-    if (network.name === "mainnet" || network.name === "sepolia") {
+    if (["mainnet", "sepolia", "base", "baseSepolia"].includes(network.name)) {
       // Guard: this simulation must never run against a real network.
       this.skip();
     }
@@ -57,7 +64,7 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
   });
 
   it("exercises a representative bridge mint path on the deployed contract", async () => {
-    if (network.name === "mainnet" || network.name === "sepolia") {
+    if (["mainnet", "sepolia", "base", "baseSepolia"].includes(network.name)) {
       this.skip();
     }
 
@@ -99,8 +106,10 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
     // Simulate resolving config as if targeting mainnet, without secrets set.
     const savedKey = process.env.PRIVATE_KEY;
     const savedAttestors = process.env.ATTESTORS;
+    const savedMintCap = process.env.MINT_CAP;
     delete process.env.PRIVATE_KEY;
     delete process.env.ATTESTORS;
+    process.env.MINT_CAP = "60000000000000000000000000";
     try {
       await expect(resolveDeployConfig("mainnet")).to.be.rejectedWith(/PRIVATE_KEY/);
 
@@ -112,6 +121,66 @@ describe("Deploy harness (dry-run / fork simulation)", function () {
       else process.env.PRIVATE_KEY = savedKey;
       if (savedAttestors === undefined) delete process.env.ATTESTORS;
       else process.env.ATTESTORS = savedAttestors;
+      if (savedMintCap === undefined) delete process.env.MINT_CAP;
+      else process.env.MINT_CAP = savedMintCap;
+    }
+  });
+
+  it("enforces a strict real-network attestor quorum", async () => {
+    const names = ["PRIVATE_KEY", "ATTESTORS", "THRESHOLD", "MINT_CAP", "ALLOW_SINGLE_ATTESTOR"] as const;
+    const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
+    const attestors = [
+      "0xad42459bdc6d4e2761461788239fcc995e42cce7",
+      "0x709fca731675b619cc24c284eeb5aef1d7527c77",
+      "0x90f79bf6eb2c4f870365e785982e1f101e93b906",
+    ];
+    process.env.PRIVATE_KEY = "0x" + "1".repeat(64);
+    process.env.ATTESTORS = attestors.join(",");
+    process.env.MINT_CAP = "60000000000000000000000000";
+    delete process.env.ALLOW_SINGLE_ATTESTOR;
+    try {
+      process.env.THRESHOLD = "1";
+      await expect(resolveDeployConfig("mainnet")).to.be.rejectedWith(/strictly greater than two thirds/);
+
+      process.env.THRESHOLD = "2";
+      await expect(resolveDeployConfig("mainnet")).to.be.rejectedWith(/strictly greater than two thirds/);
+
+      process.env.THRESHOLD = "3";
+      const cfg = await resolveDeployConfig("mainnet");
+      expect(cfg.attestors).to.have.length(3);
+      expect(cfg.threshold).to.equal(3);
+
+      process.env.ATTESTORS = attestors[0];
+      process.env.THRESHOLD = "1";
+      process.env.ALLOW_SINGLE_ATTESTOR = "1";
+      await expect(resolveDeployConfig("base")).to.be.rejectedWith(/fewer than two attestors/);
+    } finally {
+      for (const name of names) {
+        if (saved[name] === undefined) delete process.env[name];
+        else process.env[name] = saved[name];
+      }
+    }
+  });
+
+  it("refuses Base mainnet without an explicit non-zero mint cap", async () => {
+    const savedKey = process.env.PRIVATE_KEY;
+    const savedAttestors = process.env.ATTESTORS;
+    const savedThreshold = process.env.THRESHOLD;
+    const savedCap = process.env.MINT_CAP;
+    process.env.PRIVATE_KEY = "0x" + "1".repeat(64);
+    process.env.ATTESTORS = [
+      "0xad42459bdc6d4e2761461788239fcc995e42cce7",
+      "0x709fca731675b619cc24c284eeb5aef1d7527c77",
+    ].join(",");
+    process.env.THRESHOLD = "2";
+    delete process.env.MINT_CAP;
+    try {
+      await expect(resolveDeployConfig("base")).to.be.rejectedWith(/explicit non-zero MINT_CAP/);
+    } finally {
+      if (savedKey === undefined) delete process.env.PRIVATE_KEY; else process.env.PRIVATE_KEY = savedKey;
+      if (savedAttestors === undefined) delete process.env.ATTESTORS; else process.env.ATTESTORS = savedAttestors;
+      if (savedThreshold === undefined) delete process.env.THRESHOLD; else process.env.THRESHOLD = savedThreshold;
+      if (savedCap === undefined) delete process.env.MINT_CAP; else process.env.MINT_CAP = savedCap;
     }
   });
 });

@@ -49,6 +49,18 @@ var (
 	// provider account, which would settle native MATRIX from an account to
 	// itself.
 	ErrSelfDealing = errors.New("market: buyer and provider must differ")
+	// ErrStaleQuote is returned before work starts when a provider's manual
+	// MATRIX quote has expired or is otherwise not valid at the current time.
+	ErrStaleQuote = errors.New("market: provider quote is stale")
+	// ErrPriceOverflow is returned when unit pricing cannot be represented in
+	// uint64 native base units. Overflow is a refusal, never a wrapped cheap job.
+	ErrPriceOverflow = errors.New("market: price arithmetic overflow")
+	// ErrQuoteMismatch is returned when a remote buyer requests terms other than
+	// the provider's current exact signed quote snapshot.
+	ErrQuoteMismatch = errors.New("market: accepted quote does not match provider quote")
+	// ErrRemoteRequestConflict is returned when a buyer reuses a persisted remote
+	// request nonce with a different signed payload.
+	ErrRemoteRequestConflict = errors.New("market: remote request nonce conflict")
 )
 
 // balanceKeyPrefix namespaces native MATRIX balances in the KV store.

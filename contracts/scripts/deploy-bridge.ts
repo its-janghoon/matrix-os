@@ -1,7 +1,8 @@
 import { ethers, network } from "hardhat";
 
 /** Networks that are real (non-local) and therefore require strict guards. */
-const REAL_NETWORKS = new Set(["mainnet", "sepolia"]);
+const REAL_NETWORKS = new Set(["mainnet", "sepolia", "base", "baseSepolia"]);
+const PRODUCTION_NETWORKS = new Set(["mainnet", "base"]);
 
 /**
  * Deploys the WrappedMatrix bridge token against the configured network.
@@ -34,6 +35,10 @@ export function resolveAttestors(
   env: { ATTESTORS?: string; ALLOW_SINGLE_ATTESTOR?: string } = process.env
 ): { attestors: string[]; singleAttestorWarning?: string } {
   const isReal = REAL_NETWORKS.has(networkName);
+  const isProduction = PRODUCTION_NETWORKS.has(networkName);
+  if (!Number.isInteger(threshold) || threshold < 1) {
+    throw new Error(`THRESHOLD must be a positive integer (got ${threshold})`);
+  }
 
   let attestors: string[];
   const raw = (env.ATTESTORS ?? "").trim();
@@ -71,19 +76,22 @@ export function resolveAttestors(
     throw new Error(`THRESHOLD must be between 1 and ${attestors.length}`);
   }
 
+  if (isProduction && attestors.length < 2) {
+    throw new Error(
+      `refusing to deploy to production network '${networkName}' with fewer than two attestors; ` +
+        `ALLOW_SINGLE_ATTESTOR is only available for disposable real-testnet rehearsals`
+    );
+  }
+
   let singleAttestorWarning: string | undefined;
   if (isReal && attestors.length === 1) {
-    // A 1-of-1 bridge on a real chain is one key away from unbacked wMATRIX,
-    // which is the whole thing an m-of-n set exists to prevent. Allowed on a
-    // local chain, where a rehearsal wants exactly one signer and nothing is at
-    // stake. Refused here, with an override, because a THROWAWAY testnet
-    // rehearsal is a legitimate reason to want one and being unable to say so
-    // would just push the operator into editing the script.
+    // A disposable real-testnet rehearsal may deliberately use one key. This
+    // escape hatch never applies to production (rejected above).
     if (env.ALLOW_SINGLE_ATTESTOR !== "1") {
       throw new Error(
         `refusing to deploy to '${networkName}' with a single attestor: that one key ` +
           `can mint the entire cap on its own. Give at least two attestors and a ` +
-          `THRESHOLD of 2 or more. If this is deliberately a throwaway rehearsal, set ` +
+          `THRESHOLD of 2 or more. If this is deliberately a throwaway testnet rehearsal, set ` +
           `ALLOW_SINGLE_ATTESTOR=1 and treat the deployment as disposable.`
       );
     }
@@ -91,6 +99,12 @@ export function resolveAttestors(
       `WARNING: deploying to '${networkName}' with ONE attestor, because ` +
       `ALLOW_SINGLE_ATTESTOR=1. That key alone can mint the whole cap. This ` +
       `deployment is a rehearsal and must never be treated as production.`;
+  }
+  if (isReal && 3 * threshold <= 2 * attestors.length) {
+    throw new Error(
+      `refusing to deploy to '${networkName}' with THRESHOLD ${threshold} of ${attestors.length}: ` +
+        `real networks require a threshold strictly greater than two thirds (3*m > 2*n)`
+    );
   }
   return { attestors, singleAttestorWarning };
 }
@@ -116,7 +130,13 @@ async function main() {
   // unset (or 0) selects the contract's documented DEFAULT_MINT_CAP.
   const rawCap = process.env.MINT_CAP;
   const mintCap = rawCap && rawCap.trim() !== "" ? BigInt(rawCap.trim()) : 0n;
-  console.log("  mintCap (0=default):", mintCap.toString());
+  if (PRODUCTION_NETWORKS.has(network.name) && mintCap === 0n) {
+    throw new Error(
+      `refusing to deploy to '${network.name}' without an explicit non-zero MINT_CAP; ` +
+        `0 selects the full wrapped-supply ceiling`
+    );
+  }
+  console.log("  mintCap (0=default on local/testnet only):", mintCap.toString());
 
   const factory = await ethers.getContractFactory("WrappedMatrix");
   const wmatrix = await factory.deploy(attestors, threshold, mintCap);

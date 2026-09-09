@@ -1,5 +1,6 @@
 import { ethers, network } from "hardhat";
 import { readFileSync } from "node:fs";
+import { assertExpectedChain } from "./deploy-mainnet";
 
 /**
  * Mints wMATRIX from attestations produced by running Matrix OS validators.
@@ -64,12 +65,14 @@ function hex0x(s: string): string {
  * tested rather than only reachable by attempting a real mint, which needs a
  * funded key and a deployed contract.
  */
-export function parseAttestations(raw: string): {
+export interface ParsedAttestations {
   recipient: string;
   amount: bigint;
   lockId: string;
   signatures: string[];
-} {
+}
+
+export function parseAttestations(raw: string): ParsedAttestations {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -158,7 +161,7 @@ export function orderSignatures(
   );
 }
 
-async function main() {
+export async function main() {
   const contractAddr = process.env.CONTRACT;
   if (!contractAddr) throw new Error("CONTRACT is required: the WrappedMatrix address");
   const source = process.env.ATTESTATIONS;
@@ -169,11 +172,25 @@ async function main() {
     );
   }
 
-  const { recipient, amount, lockId, signatures } = parseAttestations(readFileSync(source, "utf8"));
-  const w = await ethers.getContractAt("WrappedMatrix", ethers.getAddress(contractAddr));
+  const attested = parseAttestations(readFileSync(source, "utf8"));
+  await mintAttestations(attested);
+}
+
+/** Execute the mint from one already-validated immutable input snapshot. */
+export async function mintAttestations(attested: ParsedAttestations) {
+  const { recipient, amount, lockId, signatures } = attested;
+  const contractAddr = process.env.CONTRACT;
+  if (!contractAddr) throw new Error("CONTRACT is required: the WrappedMatrix address");
+  const contract = ethers.getAddress(contractAddr);
+  const net = await ethers.provider.getNetwork();
+  assertExpectedChain(network.name, net.chainId);
+  if ((await ethers.provider.getCode(contract)) === "0x") {
+    throw new Error(`CONTRACT ${contract} has no code on chain ${net.chainId}`);
+  }
+  const w = await ethers.getContractAt("WrappedMatrix", contract);
   const [sender] = await ethers.getSigners();
 
-  console.log(`network:   ${network.name} (chainId ${(await ethers.provider.getNetwork()).chainId})`);
+  console.log(`network:   ${network.name} (chainId ${net.chainId})`);
   console.log(`contract:  ${await w.getAddress()}`);
   console.log(`sender:    ${sender.address} (pays gas only)`);
   console.log(`lock:      ${lockId}`);

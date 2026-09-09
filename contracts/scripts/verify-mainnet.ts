@@ -69,11 +69,20 @@ function resolveVerifyInput(): VerifyInput {
 }
 
 async function main() {
-  if (!process.env.ETHERSCAN_API_KEY) {
-    throw new Error("ETHERSCAN_API_KEY is not set; cannot verify on Etherscan.");
+  const explorerKey = network.name === "base" || network.name === "baseSepolia"
+    ? process.env.BASESCAN_API_KEY
+    : process.env.ETHERSCAN_API_KEY;
+  if (!explorerKey) {
+    throw new Error(
+      `${network.name === "base" || network.name === "baseSepolia" ? "BASESCAN_API_KEY" : "ETHERSCAN_API_KEY"} is not set; cannot verify.`
+    );
   }
 
   const input = resolveVerifyInput();
+  const code = await ethers.provider.getCode(input.address);
+  if (code === "0x") {
+    throw new Error(`address ${input.address} has no contract code on ${network.name}`);
+  }
   console.log("Verifying WrappedMatrix on", network.name);
   console.log("  address:  ", input.address);
   console.log("  attestors:", input.attestors);

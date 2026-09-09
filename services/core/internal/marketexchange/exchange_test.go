@@ -57,6 +57,28 @@ func mustAccount(t *testing.T) *token.Account {
 	return acct
 }
 
+// validProviderAnnouncement returns a complete v2 quote at a deterministic
+// instant. Individual tests may override fields before signing.
+func validProviderAnnouncement(acct *token.Account, now time.Time) ProviderAnnouncement {
+	now = now.UTC()
+	return ProviderAnnouncement{
+		ProviderID:        acct.AccountID(),
+		PublicKey:         acct.PublicKey,
+		Capacity:          100,
+		PricePerUnit:      5,
+		CostPerUnit:       4,
+		MarkupBasisPoints: 250,
+		QuoteID:           "quote-1",
+		QuoteVersion:      7,
+		ObservedAt:        now.Add(-time.Minute),
+		ValidUntil:        now.Add(time.Hour),
+		Available:         100,
+		PeerID:            "peer-A",
+		Models:            []string{"llama-3.3-70b"},
+		Timestamp:         now.UnixNano(),
+	}
+}
+
 // fakeTransport is an in-memory Transport that lets tests drive the receive
 // handlers directly and observe published messages without a real network. Each
 // topic has a fan-out channel to subscribers; Publish delivers to all of them.
@@ -107,36 +129,36 @@ func (f *fakeTransport) publishCount(topic string) int {
 	return len(f.published[topic])
 }
 
-// TestProviderAnnouncement_SignVerify covers the announcement sign/verify
-// round-trip: a validly-signed announcement is accepted, and tampered, unsigned,
-// or identity-mismatched announcements are rejected.
+func (f *fakeTransport) lastPublished(topic string) []byte {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	messages := f.published[topic]
+	if len(messages) == 0 {
+		return nil
+	}
+	return append([]byte(nil), messages[len(messages)-1]...)
+}
+
+// TestProviderAnnouncement_SignVerify covers the v2 announcement signature and
+// identity checks. Economic and temporal policy has dedicated tests below.
 func TestProviderAnnouncement_SignVerify(t *testing.T) {
 	acct := mustAccount(t)
-	base := func() ProviderAnnouncement {
-		return ProviderAnnouncement{
-			ProviderID:   acct.AccountID(),
-			PublicKey:    acct.PublicKey,
-			Capacity:     100,
-			PricePerUnit: 5,
-			Available:    100,
-			PeerID:       "peer-A",
-			Timestamp:    time.Now().UnixNano(),
-		}
-	}
+	now := time.Date(2025, time.January, 2, 3, 4, 5, 6, time.UTC)
+	base := func() ProviderAnnouncement { return validProviderAnnouncement(acct, now) }
 
 	t.Run("valid accepted", func(t *testing.T) {
 		ann := base()
 		if err := ann.Sign(acct.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if err := ann.Verify(); err != nil {
+		if err := ann.VerifyAt(now); err != nil {
 			t.Fatalf("expected valid announcement, got %v", err)
 		}
 	})
 
 	t.Run("unsigned rejected", func(t *testing.T) {
 		ann := base()
-		if err := ann.Verify(); !errors.Is(err, ErrUnsignedMessage) {
+		if err := ann.VerifyAt(now); !errors.Is(err, ErrUnsignedMessage) {
 			t.Fatalf("expected ErrUnsignedMessage, got %v", err)
 		}
 	})
@@ -146,8 +168,8 @@ func TestProviderAnnouncement_SignVerify(t *testing.T) {
 		if err := ann.Sign(acct.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		ann.PricePerUnit = 1 // mutate a signed field after signing
-		if err := ann.Verify(); !errors.Is(err, ErrInvalidSignature) {
+		ann.PricePerUnit = 6
+		if err := ann.VerifyAt(now); !errors.Is(err, ErrInvalidSignature) {
 			t.Fatalf("expected ErrInvalidSignature, got %v", err)
 		}
 	})
@@ -155,11 +177,11 @@ func TestProviderAnnouncement_SignVerify(t *testing.T) {
 	t.Run("identity mismatch rejected", func(t *testing.T) {
 		other := mustAccount(t)
 		ann := base()
-		ann.ProviderID = other.AccountID() // claim an ID that does not match the key
+		ann.ProviderID = other.AccountID()
 		if err := ann.Sign(acct.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if err := ann.Verify(); !errors.Is(err, ErrInvalidMessage) {
+		if err := ann.VerifyAt(now); !errors.Is(err, ErrInvalidMessage) {
 			t.Fatalf("expected ErrInvalidMessage, got %v", err)
 		}
 	})
@@ -173,18 +195,110 @@ func TestProviderAnnouncement_SignVerify(t *testing.T) {
 	})
 }
 
-// TestJobRequest_SignVerify covers the job-request sign/verify round-trip.
-func TestJobRequest_SignVerify(t *testing.T) {
+func TestProviderAnnouncement_V2QuoteFieldsAreSigned(t *testing.T) {
+	acct := mustAccount(t)
+	now := time.Date(2025, time.February, 3, 4, 5, 6, 7, time.UTC)
+	base := validProviderAnnouncement(acct, now)
+	if err := base.Sign(acct.PrivateKey); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*ProviderAnnouncement)
+	}{
+		{name: "cost per unit", mutate: func(a *ProviderAnnouncement) { a.CostPerUnit++ }},
+		{name: "markup basis points", mutate: func(a *ProviderAnnouncement) { a.MarkupBasisPoints++ }},
+		{name: "quote id", mutate: func(a *ProviderAnnouncement) { a.QuoteID = "quote-2" }},
+		{name: "quote version", mutate: func(a *ProviderAnnouncement) { a.QuoteVersion++ }},
+		{name: "observed at", mutate: func(a *ProviderAnnouncement) { a.ObservedAt = a.ObservedAt.Add(time.Nanosecond) }},
+		{name: "valid until", mutate: func(a *ProviderAnnouncement) { a.ValidUntil = a.ValidUntil.Add(time.Nanosecond) }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tampered := base
+			tt.mutate(&tampered)
+			if err := tampered.VerifyAt(now); !errors.Is(err, ErrInvalidSignature) {
+				t.Fatalf("tampered field gave %v, want ErrInvalidSignature", err)
+			}
+		})
+	}
+}
+
+func TestProviderAnnouncement_QuoteValidationAt(t *testing.T) {
+	acct := mustAccount(t)
+	now := time.Date(2025, time.March, 4, 5, 6, 7, 8, time.UTC)
+
+	tests := []struct {
+		name      string
+		mutate    func(*ProviderAnnouncement)
+		wantStale bool
+	}{
+		{name: "zero final price", mutate: func(a *ProviderAnnouncement) { a.PricePerUnit = 0 }},
+		{name: "empty quote id", mutate: func(a *ProviderAnnouncement) { a.QuoteID = "" }},
+		{name: "zero quote version", mutate: func(a *ProviderAnnouncement) { a.QuoteVersion = 0 }},
+		{name: "future observation beyond skew", mutate: func(a *ProviderAnnouncement) {
+			a.ObservedAt = now.Add(market.MaxQuoteClockSkew + time.Nanosecond)
+			a.ValidUntil = a.ObservedAt.Add(time.Hour)
+		}},
+		{name: "equal interval", mutate: func(a *ProviderAnnouncement) { a.ValidUntil = a.ObservedAt }},
+		{name: "reversed interval", mutate: func(a *ProviderAnnouncement) { a.ValidUntil = a.ObservedAt.Add(-time.Nanosecond) }},
+		{name: "expired quote", mutate: func(a *ProviderAnnouncement) { a.ValidUntil = now }, wantStale: true},
+		{name: "future announcement beyond skew", mutate: func(a *ProviderAnnouncement) {
+			a.Timestamp = now.Add(market.MaxQuoteClockSkew + time.Nanosecond).UnixNano()
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ann := validProviderAnnouncement(acct, now)
+			tt.mutate(&ann)
+			if err := ann.Sign(acct.PrivateKey); err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			err := ann.VerifyAt(now)
+			if !errors.Is(err, ErrInvalidMessage) {
+				t.Fatalf("VerifyAt() error = %v, want ErrInvalidMessage", err)
+			}
+			if tt.wantStale && !errors.Is(err, market.ErrStaleQuote) {
+				t.Fatalf("VerifyAt() error = %v, want market.ErrStaleQuote", err)
+			}
+		})
+	}
+
+	t.Run("maximum future skew accepted", func(t *testing.T) {
+		ann := validProviderAnnouncement(acct, now)
+		ann.ObservedAt = now.Add(market.MaxQuoteClockSkew)
+		ann.ValidUntil = ann.ObservedAt.Add(time.Hour)
+		ann.Timestamp = now.Add(market.MaxQuoteClockSkew).UnixNano()
+		if err := ann.Sign(acct.PrivateKey); err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		if err := ann.VerifyAt(now); err != nil {
+			t.Fatalf("maximum allowed future skew rejected: %v", err)
+		}
+	})
+}
+
+// TestJobRequest_V2SignVerify proves every accepted fixed-price quote field is
+// signed and that malformed or expired totals fail closed.
+func TestJobRequest_V2SignVerify(t *testing.T) {
 	buyer := mustAccount(t)
 	provider := mustAccount(t)
+	now := time.Date(2025, time.July, 8, 9, 10, 11, 12, time.UTC)
 	base := func() JobRequest {
 		return JobRequest{
-			BuyerID:   buyer.AccountID(),
-			PublicKey: buyer.PublicKey,
-			Provider:  provider.AccountID(),
-			Units:     10,
-			Nonce:     1,
-			Timestamp: time.Now().UnixNano(),
+			BuyerID:         buyer.AccountID(),
+			PublicKey:       buyer.PublicKey,
+			Provider:        provider.AccountID(),
+			Units:           10,
+			PricePerUnit:    7,
+			QuoteID:         "accepted-quote",
+			QuoteVersion:    3,
+			QuoteObservedAt: now.Add(-time.Minute),
+			QuoteValidUntil: now.Add(time.Hour),
+			Total:           70,
+			Nonce:           1,
+			Timestamp:       now.UnixNano(),
 		}
 	}
 
@@ -193,37 +307,77 @@ func TestJobRequest_SignVerify(t *testing.T) {
 		if err := req.Sign(buyer.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if err := req.Verify(); err != nil {
+		if err := req.VerifyAt(now); err != nil {
 			t.Fatalf("expected valid request, got %v", err)
 		}
 	})
 
 	t.Run("unsigned rejected", func(t *testing.T) {
 		req := base()
-		if err := req.Verify(); !errors.Is(err, ErrUnsignedMessage) {
+		if err := req.VerifyAt(now); !errors.Is(err, ErrUnsignedMessage) {
 			t.Fatalf("expected ErrUnsignedMessage, got %v", err)
 		}
 	})
 
-	t.Run("tampered rejected", func(t *testing.T) {
+	mutations := []struct {
+		name   string
+		mutate func(*JobRequest)
+	}{
+		{name: "provider", mutate: func(r *JobRequest) { r.Provider = "other" }},
+		{name: "units", mutate: func(r *JobRequest) { r.Units++ }},
+		{name: "price", mutate: func(r *JobRequest) { r.PricePerUnit++ }},
+		{name: "quote id", mutate: func(r *JobRequest) { r.QuoteID = "other" }},
+		{name: "quote version", mutate: func(r *JobRequest) { r.QuoteVersion++ }},
+		{name: "observed", mutate: func(r *JobRequest) { r.QuoteObservedAt = r.QuoteObservedAt.Add(time.Nanosecond) }},
+		{name: "expiry", mutate: func(r *JobRequest) { r.QuoteValidUntil = r.QuoteValidUntil.Add(time.Nanosecond) }},
+		{name: "total", mutate: func(r *JobRequest) { r.Total++ }},
+		{name: "nonce", mutate: func(r *JobRequest) { r.Nonce++ }},
+		{name: "timestamp", mutate: func(r *JobRequest) { r.Timestamp++ }},
+	}
+	for _, tt := range mutations {
+		t.Run("signed "+tt.name, func(t *testing.T) {
+			req := base()
+			if err := req.Sign(buyer.PrivateKey); err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			tt.mutate(&req)
+			if err := req.VerifyAt(now); !errors.Is(err, ErrInvalidSignature) {
+				t.Fatalf("tampered field gave %v, want ErrInvalidSignature", err)
+			}
+		})
+	}
+
+	t.Run("mismatched total rejected", func(t *testing.T) {
 		req := base()
+		req.Total++
 		if err := req.Sign(buyer.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		req.Units = 9999
-		if err := req.Verify(); !errors.Is(err, ErrInvalidSignature) {
-			t.Fatalf("expected ErrInvalidSignature, got %v", err)
+		if err := req.VerifyAt(now); !errors.Is(err, ErrInvalidMessage) {
+			t.Fatalf("expected invalid total, got %v", err)
 		}
 	})
 
-	t.Run("zero units rejected", func(t *testing.T) {
+	t.Run("exact expiry rejected", func(t *testing.T) {
 		req := base()
-		req.Units = 0
 		if err := req.Sign(buyer.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
-		if err := req.Verify(); !errors.Is(err, ErrInvalidMessage) {
-			t.Fatalf("expected ErrInvalidMessage, got %v", err)
+		if err := req.VerifyAt(req.QuoteValidUntil); !errors.Is(err, market.ErrStaleQuote) {
+			t.Fatalf("expected stale quote at exact expiry, got %v", err)
+		}
+	})
+
+	t.Run("overflow rejected", func(t *testing.T) {
+		req := base()
+		req.Units = 2
+		req.PricePerUnit = ^uint64(0)
+		req.Total = ^uint64(0)
+		if err := req.Sign(buyer.PrivateKey); err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		if err := req.VerifyAt(now); !errors.Is(err, ErrInvalidMessage) {
+			t.Fatalf("expected overflow rejection, got %v", err)
 		}
 	})
 }
@@ -344,15 +498,11 @@ func TestExchange_Registry(t *testing.T) {
 	}
 
 	makeAnn := func() []byte {
-		ann := ProviderAnnouncement{
-			ProviderID:   provider.AccountID(),
-			PublicKey:    provider.PublicKey,
-			Capacity:     50,
-			PricePerUnit: 3,
-			Available:    50,
-			PeerID:       "peer-B",
-			Timestamp:    nowFn().UnixNano(),
-		}
+		ann := validProviderAnnouncement(provider, nowFn())
+		ann.Capacity = 50
+		ann.PricePerUnit = 3
+		ann.Available = 50
+		ann.PeerID = "peer-B"
 		if err := ann.Sign(provider.PrivateKey); err != nil {
 			t.Fatalf("sign ann: %v", err)
 		}
@@ -372,7 +522,10 @@ func TestExchange_Registry(t *testing.T) {
 	if !ok {
 		t.Fatal("expected provider to be discoverable")
 	}
-	if rp.PricePerUnit != 3 || rp.Capacity != 50 || rp.PeerID != "peer-B" {
+	if rp.PricePerUnit != 3 || rp.CostPerUnit != 4 || rp.MarkupBasisPoints != 250 ||
+		rp.QuoteID != "quote-1" || rp.QuoteVersion != 7 ||
+		!rp.ObservedAt.Equal(current.Add(-time.Minute)) || !rp.ValidUntil.Equal(current.Add(time.Hour)) ||
+		rp.Capacity != 50 || rp.PeerID != "peer-B" {
 		t.Fatalf("registry entry mismatch: %+v", rp)
 	}
 
@@ -401,6 +554,168 @@ func TestExchange_Registry(t *testing.T) {
 	}
 }
 
+func TestExchange_QuoteExpiryIsIndependentFromReceiptTTL(t *testing.T) {
+	settled, _ := newSettled(t)
+	provider := mustAccount(t)
+	current := time.Date(2025, time.April, 5, 6, 7, 8, 9, time.UTC)
+	ex, err := New(Config{
+		Transport:   newFakeTransport(),
+		Settled:     settled,
+		ProviderTTL: 24 * time.Hour,
+		Now:         func() time.Time { return current },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+
+	ann := validProviderAnnouncement(provider, current)
+	ann.ValidUntil = current.Add(30 * time.Minute)
+	if err := ann.Sign(provider.PrivateKey); err != nil {
+		t.Fatalf("sign: %v", err)
+	}
+	data, err := marshalJSON(ann)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: data})
+	if _, ok := ex.LookupRemoteProvider(provider.AccountID()); !ok {
+		t.Fatal("fresh quote should be discoverable")
+	}
+
+	current = ann.ValidUntil
+	if _, ok := ex.LookupRemoteProvider(provider.AccountID()); ok {
+		t.Fatal("quote at its exact expiry must not be routable")
+	}
+	if got := ex.ListRemoteProviders(); len(got) != 0 {
+		t.Fatalf("expired quote returned from listing: %+v", got)
+	}
+
+	// Receipt of an already-expired but correctly signed quote must not recreate
+	// the entry, even though its independent announcement TTL would be fresh.
+	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: data})
+	if got := ex.ListRemoteProviders(); len(got) != 0 {
+		t.Fatalf("expired quote accepted at receipt: %+v", got)
+	}
+}
+
+func TestExchange_RegistryRejectsQuoteRollback(t *testing.T) {
+	settled, _ := newSettled(t)
+	provider := mustAccount(t)
+	current := time.Date(2025, time.April, 20, 6, 7, 8, 9, time.UTC)
+	ex, err := New(Config{
+		Transport: newFakeTransport(),
+		Settled:   settled,
+		Now:       func() time.Time { return current },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+	receive := func(ann ProviderAnnouncement) {
+		if err := ann.Sign(provider.PrivateKey); err != nil {
+			t.Fatalf("sign: %v", err)
+		}
+		data, err := marshalJSON(ann)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: data})
+	}
+
+	newer := validProviderAnnouncement(provider, current)
+	newer.QuoteID = "quote-v2"
+	newer.QuoteVersion = 2
+	newer.PricePerUnit = 20
+	receive(newer)
+
+	older := validProviderAnnouncement(provider, current)
+	older.QuoteID = "quote-v1"
+	older.QuoteVersion = 1
+	older.PricePerUnit = 10
+	receive(older)
+
+	conflictingSameVersion := newer
+	conflictingSameVersion.PricePerUnit = 99
+	receive(conflictingSameVersion)
+
+	rp, ok := ex.LookupRemoteProvider(provider.AccountID())
+	if !ok {
+		t.Fatal("newer quote should remain discoverable")
+	}
+	if rp.QuoteVersion != newer.QuoteVersion || rp.QuoteID != newer.QuoteID || rp.PricePerUnit != newer.PricePerUnit {
+		t.Fatalf("registry quote rolled back or changed at equal version: %+v", rp.Provider)
+	}
+
+	// A periodic announcement may refresh operational fields without inventing
+	// a new economic quote version.
+	refresh := newer
+	refresh.Available = 7
+	refresh.PeerID = "peer-refreshed"
+	current = current.Add(time.Minute)
+	refresh.Timestamp = current.UnixNano()
+	receive(refresh)
+	rp, ok = ex.LookupRemoteProvider(provider.AccountID())
+	if !ok || rp.Available != 7 || rp.PeerID != "peer-refreshed" || !rp.ReceivedAt.Equal(current) {
+		t.Fatalf("consistent equal-version refresh was not preserved: %+v", rp)
+	}
+}
+
+func TestExchange_AnnounceProviderQuoteRoundTrip(t *testing.T) {
+	settled, _ := newSettled(t)
+	ft := newFakeTransport()
+	provider := mustAccount(t)
+	now := time.Date(2025, time.May, 6, 7, 8, 9, 10, time.UTC)
+	ex, err := New(Config{
+		Transport: ft,
+		Settled:   settled,
+		PeerID:    "peer-v2",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+	want := market.Provider{
+		Capacity:          42,
+		PricePerUnit:      17,
+		CostPerUnit:       13,
+		MarkupBasisPoints: 325,
+		QuoteID:           "quote-round-trip",
+		QuoteVersion:      11,
+		ObservedAt:        now.Add(-2 * time.Minute),
+		ValidUntil:        now.Add(45 * time.Minute),
+		Available:         21,
+		Models:            []string{"llama-3.3-70b", "qwen-2.5"},
+	}
+	if err := ex.AnnounceProvider(context.Background(), provider, want); err != nil {
+		t.Fatalf("announce provider: %v", err)
+	}
+	if TopicAnnounce != "matrix/market/announce/v2" {
+		t.Fatalf("announcement topic = %q, want explicit v2", TopicAnnounce)
+	}
+	payload := ft.lastPublished(TopicAnnounce)
+	if len(payload) == 0 {
+		t.Fatal("no v2 announcement was published")
+	}
+	var ann ProviderAnnouncement
+	if err := json.Unmarshal(payload, &ann); err != nil {
+		t.Fatalf("unmarshal announcement: %v", err)
+	}
+	if err := ann.VerifyAt(now); err != nil {
+		t.Fatalf("published announcement does not verify: %v", err)
+	}
+	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
+	rp, ok := ex.LookupRemoteProvider(provider.AccountID())
+	if !ok {
+		t.Fatal("round-tripped provider not discoverable")
+	}
+	if rp.ID != provider.AccountID() || rp.Capacity != want.Capacity || rp.PricePerUnit != want.PricePerUnit ||
+		rp.CostPerUnit != want.CostPerUnit || rp.MarkupBasisPoints != want.MarkupBasisPoints ||
+		rp.QuoteID != want.QuoteID || rp.QuoteVersion != want.QuoteVersion ||
+		!rp.ObservedAt.Equal(want.ObservedAt) || !rp.ValidUntil.Equal(want.ValidUntil) ||
+		rp.Available != want.Available || rp.PeerID != "peer-v2" {
+		t.Fatalf("round-trip mismatch: got %+v, want provider %+v", rp, want)
+	}
+}
+
 // TestExchange_SubmitRemoteJob checks that a buyer can only submit against a
 // discovered provider, and that a successful submit publishes a signed request.
 func TestExchange_SubmitRemoteJob(t *testing.T) {
@@ -420,11 +735,11 @@ func TestExchange_SubmitRemoteJob(t *testing.T) {
 	}
 
 	// Discover the provider via a received announcement, then submit succeeds.
-	ann := ProviderAnnouncement{
-		ProviderID: provider.AccountID(), PublicKey: provider.PublicKey,
-		Capacity: 100, PricePerUnit: 2, Available: 100, PeerID: "peer-B",
-		Timestamp: time.Now().UnixNano(),
-	}
+	ann := validProviderAnnouncement(provider, time.Now().UTC())
+	ann.Capacity = 100
+	ann.PricePerUnit = 2
+	ann.Available = 100
+	ann.PeerID = "peer-B"
 	if err := ann.Sign(provider.PrivateKey); err != nil {
 		t.Fatalf("sign: %v", err)
 	}
@@ -441,8 +756,220 @@ func TestExchange_SubmitRemoteJob(t *testing.T) {
 	if err := req.Verify(); err != nil {
 		t.Fatalf("published request should verify: %v", err)
 	}
+	if TopicJobs != "matrix/market/jobs/v2" {
+		t.Fatalf("job topic = %q, want explicit v2", TopicJobs)
+	}
+	if req.PricePerUnit != ann.PricePerUnit || req.QuoteID != ann.QuoteID || req.QuoteVersion != ann.QuoteVersion ||
+		!req.QuoteObservedAt.Equal(ann.ObservedAt) || !req.QuoteValidUntil.Equal(ann.ValidUntil) || req.Total != 10 {
+		t.Fatalf("request did not bind discovered quote: %+v", req)
+	}
 	if ft.publishCount(TopicJobs) != 1 {
 		t.Fatalf("expected 1 published job request, got %d", ft.publishCount(TopicJobs))
+	}
+	if _, err := ex.SubmitRemoteJob(context.Background(), buyer, provider.AccountID(), ann.Available+1, 1); !errors.Is(err, market.ErrInsufficientCapacity) {
+		t.Fatalf("over-capacity remote submit error = %v, want ErrInsufficientCapacity", err)
+	}
+}
+
+func setupProviderExchange(t *testing.T, capacity, price uint64) (*Exchange, *market.Market, *token.Account, *token.Account, *time.Time) {
+	t.Helper()
+	settled, mkt := newSettled(t)
+	provider := mustAccount(t)
+	buyer := mustAccount(t)
+	now := time.Now().UTC().Truncate(time.Millisecond)
+	if err := mkt.RegisterProvider(market.Provider{
+		ID:           provider.AccountID(),
+		Capacity:     capacity,
+		PricePerUnit: price,
+		QuoteID:      "provider-quote-1",
+		QuoteVersion: 1,
+		ObservedAt:   now.Add(-time.Minute),
+		ValidUntil:   now.Add(time.Hour),
+	}); err != nil {
+		t.Fatalf("register provider: %v", err)
+	}
+	if err := mkt.Ledger().Credit(buyer.AccountID(), 1_000_000); err != nil {
+		t.Fatalf("credit buyer: %v", err)
+	}
+	ex, err := New(Config{
+		Transport: newFakeTransport(),
+		Settled:   settled,
+		Market:    mkt,
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+	return ex, mkt, provider, buyer, &now
+}
+
+func signedRequestForProvider(t *testing.T, mkt *market.Market, buyer *token.Account, providerID string, units, nonce uint64, now time.Time) JobRequest {
+	t.Helper()
+	provider, ok := mkt.GetProvider(providerID)
+	if !ok {
+		t.Fatalf("provider %q not found", providerID)
+	}
+	total, err := market.CheckedMul(units, provider.PricePerUnit)
+	if err != nil {
+		t.Fatalf("price request: %v", err)
+	}
+	req := JobRequest{
+		BuyerID:         buyer.AccountID(),
+		PublicKey:       buyer.PublicKey,
+		Provider:        providerID,
+		Units:           units,
+		PricePerUnit:    provider.PricePerUnit,
+		QuoteID:         provider.QuoteID,
+		QuoteVersion:    provider.QuoteVersion,
+		QuoteObservedAt: provider.ObservedAt,
+		QuoteValidUntil: provider.ValidUntil,
+		Total:           total,
+		Nonce:           nonce,
+		Timestamp:       now.UnixNano(),
+	}
+	if err := req.Sign(buyer.PrivateKey); err != nil {
+		t.Fatalf("sign request: %v", err)
+	}
+	return req
+}
+
+func TestExchange_ProviderPersistsExactAcceptedSnapshot(t *testing.T) {
+	ex, mkt, provider, buyer, now := setupProviderExchange(t, 5, 7)
+	req := signedRequestForProvider(t, mkt, buyer, provider.AccountID(), 3, 11, *now)
+	job, err := ex.acceptJobRequest(&req)
+	if err != nil {
+		t.Fatalf("accept request: %v", err)
+	}
+	if job.Price != req.Total || job.PricePerUnit != req.PricePerUnit || job.QuoteID != req.QuoteID ||
+		job.QuoteVersion != req.QuoteVersion || !job.QuoteObservedAt.Equal(req.QuoteObservedAt) ||
+		!job.QuoteValidUntil.Equal(req.QuoteValidUntil) || job.RemoteRequestDigest != req.Digest() || job.RemoteRequestNonce != req.Nonce {
+		t.Fatalf("persisted job is not exact accepted snapshot: %+v", job)
+	}
+	stored, ok := mkt.GetJob(job.ID)
+	if !ok || stored.RemoteRequestDigest != req.Digest() || stored.Price != 21 {
+		t.Fatalf("accepted snapshot was not persisted: %+v", stored)
+	}
+	remaining, _ := mkt.GetProvider(provider.AccountID())
+	if remaining.Available != 2 {
+		t.Fatalf("available = %d, want 2", remaining.Available)
+	}
+
+	// The identical gossip redelivery is idempotent and does not reserve twice.
+	replayed, err := ex.acceptJobRequest(&req)
+	if err != nil || replayed.ID != job.ID {
+		t.Fatalf("idempotent replay = job %+v err %v", replayed, err)
+	}
+	remaining, _ = mkt.GetProvider(provider.AccountID())
+	if remaining.Available != 2 || len(mkt.ListJobs()) != 1 {
+		t.Fatalf("replay changed reservation: provider %+v jobs %d", remaining, len(mkt.ListJobs()))
+	}
+
+	// A distinct signed payload cannot reuse the persisted buyer nonce.
+	conflict := req
+	conflict.Timestamp++
+	if err := conflict.Sign(buyer.PrivateKey); err != nil {
+		t.Fatalf("sign conflict: %v", err)
+	}
+	if _, err := ex.acceptJobRequest(&conflict); !errors.Is(err, market.ErrRemoteRequestConflict) {
+		t.Fatalf("nonce conflict error = %v, want ErrRemoteRequestConflict", err)
+	}
+}
+
+func TestExchange_ProviderRejectsQuoteRefreshAndExpiryRaces(t *testing.T) {
+	t.Run("quote refresh after buyer discovery", func(t *testing.T) {
+		ex, mkt, provider, buyer, now := setupProviderExchange(t, 5, 7)
+		oldRequest := signedRequestForProvider(t, mkt, buyer, provider.AccountID(), 2, 1, *now)
+		if err := mkt.UpdateProviderQuote(provider.AccountID(), market.Provider{
+			PricePerUnit: 9,
+			QuoteID:      "provider-quote-2",
+			QuoteVersion: 2,
+			ObservedAt:   now.Add(time.Minute),
+			ValidUntil:   now.Add(2 * time.Hour),
+		}); err != nil {
+			t.Fatalf("refresh quote: %v", err)
+		}
+		if _, err := ex.acceptJobRequest(&oldRequest); !errors.Is(err, market.ErrQuoteMismatch) {
+			t.Fatalf("old quote request error = %v, want ErrQuoteMismatch", err)
+		}
+		current, _ := mkt.GetProvider(provider.AccountID())
+		if current.Available != 5 || len(mkt.ListJobs()) != 0 {
+			t.Fatalf("mismatched request reserved work: provider %+v jobs %d", current, len(mkt.ListJobs()))
+		}
+	})
+
+	t.Run("expiry before receipt", func(t *testing.T) {
+		ex, mkt, provider, buyer, now := setupProviderExchange(t, 5, 7)
+		req := signedRequestForProvider(t, mkt, buyer, provider.AccountID(), 2, 1, *now)
+		*now = req.QuoteValidUntil
+		if _, err := ex.acceptJobRequest(&req); !errors.Is(err, market.ErrStaleQuote) {
+			t.Fatalf("expired request error = %v, want ErrStaleQuote", err)
+		}
+		current, _ := mkt.GetProvider(provider.AccountID())
+		if current.Available != 5 || len(mkt.ListJobs()) != 0 {
+			t.Fatalf("expired request reserved work: provider %+v jobs %d", current, len(mkt.ListJobs()))
+		}
+	})
+
+	t.Run("expiry after reservation does not reprice settlement", func(t *testing.T) {
+		ex, mkt, provider, buyer, now := setupProviderExchange(t, 5, 7)
+		req := signedRequestForProvider(t, mkt, buyer, provider.AccountID(), 2, 1, *now)
+		job, err := ex.acceptJobRequest(&req)
+		if err != nil {
+			t.Fatalf("accept request: %v", err)
+		}
+		*now = req.QuoteValidUntil.Add(time.Hour)
+		if err := mkt.UpdateProviderQuote(provider.AccountID(), market.Provider{
+			PricePerUnit: 100,
+			QuoteID:      "provider-quote-2",
+			QuoteVersion: 2,
+			ObservedAt:   time.Now().UTC(),
+			ValidUntil:   time.Now().UTC().Add(time.Hour),
+		}); err != nil {
+			t.Fatalf("refresh quote: %v", err)
+		}
+		if err := mkt.CompleteJob(job.ID); err != nil {
+			t.Fatalf("settle accepted expired snapshot: %v", err)
+		}
+		providerBalance, _ := mkt.Ledger().Balance(provider.AccountID())
+		if providerBalance != 14 {
+			t.Fatalf("provider settled %d, want accepted total 14", providerBalance)
+		}
+	})
+}
+
+func TestExchange_ConcurrentProviderReceiptNeverOverbooks(t *testing.T) {
+	ex, mkt, provider, _, now := setupProviderExchange(t, 3, 5)
+	const requests = 12
+	var wg sync.WaitGroup
+	results := make(chan error, requests)
+	for i := 0; i < requests; i++ {
+		buyer := mustAccount(t)
+		if err := mkt.Ledger().Credit(buyer.AccountID(), 100); err != nil {
+			t.Fatalf("credit buyer %d: %v", i, err)
+		}
+		req := signedRequestForProvider(t, mkt, buyer, provider.AccountID(), 1, uint64(i), *now)
+		wg.Add(1)
+		go func(req JobRequest) {
+			defer wg.Done()
+			_, err := ex.acceptJobRequest(&req)
+			results <- err
+		}(req)
+	}
+	wg.Wait()
+	close(results)
+	accepted := 0
+	for err := range results {
+		if err == nil {
+			accepted++
+			continue
+		}
+		if !errors.Is(err, market.ErrInsufficientCapacity) {
+			t.Fatalf("unexpected receipt error: %v", err)
+		}
+	}
+	current, _ := mkt.GetProvider(provider.AccountID())
+	if accepted != 3 || current.Available != 0 || len(mkt.ListJobs()) != 3 {
+		t.Fatalf("accepted=%d available=%d jobs=%d, want 3/0/3", accepted, current.Available, len(mkt.ListJobs()))
 	}
 }
 
@@ -526,8 +1053,20 @@ func TestExchange_TwoHostGossip(t *testing.T) {
 	// discovers it or we time out.
 	deadline := time.Now().Add(15 * time.Second)
 	discovered := false
+	quoteNow := time.Now().UTC()
+	providerQuote := market.Provider{
+		Capacity:          10,
+		PricePerUnit:      4,
+		CostPerUnit:       3,
+		MarkupBasisPoints: 250,
+		QuoteID:           "gossip-quote",
+		QuoteVersion:      1,
+		ObservedAt:        quoteNow,
+		ValidUntil:        quoteNow.Add(time.Hour),
+		Available:         10,
+	}
 	for time.Now().Before(deadline) {
-		if err := exA.AnnounceProvider(ctx, provider, market.Provider{Capacity: 10, PricePerUnit: 4, Available: 10}); err != nil {
+		if err := exA.AnnounceProvider(ctx, provider, providerQuote); err != nil {
 			t.Fatalf("announce: %v", err)
 		}
 		time.Sleep(300 * time.Millisecond)

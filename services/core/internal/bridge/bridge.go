@@ -46,6 +46,9 @@ var (
 	// ErrZeroAmount is returned when a lock or unlock is attempted for zero
 	// native base units.
 	ErrZeroAmount = errors.New("bridge: amount must be positive")
+	// ErrLockAmountBelowMinimum is returned when a positive lock amount is below
+	// token.MinBridgeLockAmount. Zero keeps its historical ErrZeroAmount sentinel.
+	ErrLockAmountBelowMinimum = errors.New("bridge: lock amount below minimum")
 	// ErrEmptyID is returned when a burn event carries an empty id.
 	ErrEmptyID = errors.New("bridge: id must not be empty")
 	// ErrConsensusOrdered is returned when ProcessBurn is called on a bridge
@@ -218,6 +221,10 @@ func writeLP(h interface{ Write([]byte) (int, error) }, b []byte) {
 func (b *Bridge) Lock(from string, recipient Address, amount uint64) (*LockEvent, error) {
 	if amount == 0 {
 		return nil, ErrZeroAmount
+	}
+	if amount < token.MinBridgeLockAmount {
+		return nil, fmt.Errorf("%w: got %d native base units, require at least %d",
+			ErrLockAmountBelowMinimum, amount, token.MinBridgeLockAmount)
 	}
 	if from == "" {
 		return nil, fmt.Errorf("bridge: lock source account must not be empty: %w", token.ErrInvalidAccountID)
@@ -559,6 +566,10 @@ func (b *Bridge) RecordLock(ltx market.LedgerTx, lockID [LockIDLen]byte, from st
 	_ = ltx // held for the contract above, not written through
 	if nativeAmount == 0 {
 		return ErrZeroAmount
+	}
+	if nativeAmount < token.MinBridgeLockAmount {
+		return fmt.Errorf("%w: got %d native base units, require at least %d",
+			ErrLockAmountBelowMinimum, nativeAmount, token.MinBridgeLockAmount)
 	}
 	key := lockPrefix + hex.EncodeToString(lockID[:])
 	if existing, err := b.store.Get([]byte(key)); err == nil && len(existing) > 0 {

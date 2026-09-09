@@ -4,8 +4,8 @@
 running node over its gRPC market API
 (`matrix.market.v1.MarketService`, served on the node's market port, default
 `127.0.0.1:9091`): check node health, manage compute providers and jobs, read
-balances and the token chain, and manage an ed25519 wallet to sign and submit
-native MATRIX transfers.
+balances and committed consensus transfer history, operate the Base bridge, and
+manage an ed25519 wallet that signs native MATRIX transfers locally.
 
 ## Install / build
 
@@ -29,9 +29,10 @@ single copy-paste block. From `services/core`:
 go build -o matrixd ./cmd/matrixd
 go build -o matrix  ./cmd/matrix
 
-# 2. start a local dev node (writes ./config.yaml with a genesis reward pool,
-#    then boots on 127.0.0.1). For a local dev node, disable ACLs so the market
-#    API is open; leave them on and pass --api-key for anything exposed.
+# 2. start a local dev node. -init writes a secure baseline, not a production
+#    launch profile: ACLs stay on, public browser access is off, no maintainer is
+#    invented, provider emissions are zero, and the bridge is disabled.
+#    For this local-only demo, disable ACLs; exposed nodes must keep them on.
 ./matrixd --init
 sed -i 's/enable_acls: true/enable_acls: false/' config.yaml   # dev only
 ./matrixd &
@@ -50,6 +51,9 @@ each step and the resulting balances:
 3. registers a demo provider on the order book;
 4. submits a demo job (buyer buys compute units at the provider's price);
 5. completes/settles the job, moving native MATRIX buyer -> provider.
+
+The submitted job's returned total is the reservation snapshot; quickstart prints
+that server-returned value rather than recomputing it from the CLI flags.
 
 Re-running is safe: the wallet is reused and the provider re-registered. Tune the
 demo with `--fund`, `--provider`, `--price`, `--capacity`, and `--units`, or point
@@ -94,18 +98,33 @@ matrix --json health
 ### Providers
 
 ```sh
-# Advertise local compute capacity on the order book.
-matrix provider register --id provider-1 --capacity 100 --price 5
+# Advertise local compute capacity with a final manual quote in native MATRIX
+# base units per compute unit. This is not a USD/stablecoin price.
+matrix provider register --id provider-1 --capacity 100 --price 5 \
+  --models llama-3.3-70b
 
-# List providers (add --include-remote for P2P-discovered providers).
+# Refresh before expiry without resetting capacity or active reservations.
+matrix provider quote-update --id provider-1 --price 6
+
+# List providers with fresh quotes (add --include-remote for P2P-discovered providers).
 matrix provider list
 matrix provider list --include-remote --json
 ```
 
+A provider registration receives quote identity, observation and expiry metadata
+inside the marketplace. Use `provider quote-update`—not `provider register`—as
+the refresh path for an existing provider. It atomically preserves total and
+available capacity, active reservations, and advertised models while advancing
+the quote for future reservations. Run or schedule it before the quote expires;
+expired local offers are omitted from buyer-facing lists until refreshed.
+Provider commands print quote metadata (and include it in `--json`). Job output
+prints the immutable unit price, quote ID/version, observed time, and valid-until
+time snapshotted at reservation.
+
 ### Jobs
 
 ```sh
-# Reserve provider capacity for a paid compute job (no credits move yet).
+# Reserve provider capacity for a paid compute job (no MATRIX moves yet).
 matrix job submit --buyer <account-id> --provider provider-1 --units 10
 
 matrix job get --id <job-id>
@@ -131,7 +150,7 @@ for buyer: "b8cba113..."
 ```
 
 That refusal is the point. Settling with a direct ledger write instead would
-charge an account without its owner's signature, and would move credits on this
+charge an account without its owner's signature, and would move MATRIX on this
 node's copy of the ledger only, where no other node would ever see them.
 
 ### Funding
@@ -209,6 +228,42 @@ settles through consensus:
 
 The private key stays in the local wallet file the entire time; only the public
 key, signature, and transfer fields are sent to the node.
+
+## Base bridge
+
+The bridge CLI covers setup, native lock, fixed-committee attestations, and
+reconciliation. Base Sepolia rehearsal uses chain ID `84532`; Base production
+uses `8453`. These commands do not claim a public deployment exists: verify the
+exact WrappedMatrix address and code first.
+
+```sh
+# One-time, only for an operator assigned to the fixed EVM attestor committee.
+matrix bridge attestor-new --out ~/.matrix/bridge-attestor.json
+
+# Lock the minimum 100 MATRIX (100000000000 native base units) or more.
+matrix bridge lock --wallet ~/.matrix/wallet.json \
+  --to 0x<base-recipient> --amount 100000000000
+
+# Query endpoints serving distinct registered contract attestors. JSON goes to
+# stdout; progress goes to stderr, so redirection remains machine-readable.
+matrix bridge attestation --lock-id 0x<lock-id> \
+  --validator validator-1.example.org:9091 \
+  --validator validator-2.example.org:9091 > attestations.json
+
+# Compare node escrow accounting with WrappedMatrix.totalSupply().
+matrix bridge reconcile
+```
+
+`attestor-new` creates a secp256k1 key for the immutable committee chosen when
+WrappedMatrix was deployed. That EVM committee is separate from the dynamic
+native bonded-open validator set; native admission or exit never updates the
+contract. The user submits the Base mint/burn/approval/swap and pays Base gas
+from their wallet. There is no gas relayer.
+
+Burn release is always ordered through native consensus and is applied exactly
+once. The production WrappedMatrix mint ceiling is 6% of native maximum supply,
+but each minted unit still requires matching escrow. The 1:1 relationship is
+MATRIX-to-wMATRIX backing, not a USD, USDC, or stablecoin peg.
 
 ## Authentication
 

@@ -3,6 +3,8 @@ package cli
 import (
 	"strings"
 	"testing"
+
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // The disagreement guards exist because the failure they prevent is expensive
@@ -66,5 +68,27 @@ func TestASingleAttestationNeedsNoAgreement(t *testing.T) {
 		{Validator: "a:9091", LockID: "ab", Recipient: "0xaa", ERC20Amount: "1", Attestor: "0x01"},
 	}); err != nil {
 		t.Fatalf("a one-validator set was refused: %v", err)
+	}
+}
+
+func TestBridgeLockAmountPreflight(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		amount  uint64
+		wantErr string
+	}{
+		{name: "zero", amount: 0, wantErr: "greater than zero"},
+		{name: "one below minimum", amount: token.MinBridgeLockAmount - 1, wantErr: "below the minimum"},
+		{name: "exact minimum", amount: token.MinBridgeLockAmount},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBridgeLockAmount(tc.amount)
+			if tc.wantErr == "" && err != nil {
+				t.Fatalf("preflight rejected exact minimum: %v", err)
+			}
+			if tc.wantErr != "" && (err == nil || !strings.Contains(err.Error(), tc.wantErr)) {
+				t.Fatalf("preflight error = %v, want text %q", err, tc.wantErr)
+			}
+		})
 	}
 }

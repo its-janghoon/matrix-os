@@ -1,8 +1,156 @@
 # Handoff
 
+> **Launch-policy supersession (current).** This is a chronological engineering
+> handoff, so many later sections preserve claims that were true or proposed at
+> an earlier commit. All launch/operator claims below are superseded by
+> [`docs/runbooks/base-launch.md`](docs/runbooks/base-launch.md). Current policy
+> is Base Sepolia (`84532`) before Base production (`8453`); 100 MATRIX minimum
+> lock; immutable 60M/6% cap; exact-backed immutable 50M/5% founder vault with a
+> 1-year cliff and 5-year total linear vesting (20% at cliff); fee 100 bp; an
+> explicit maintainer account receiving 5000 bp of that fee (maximum 0.5% of
+> transfer value); emission 0; and bonded-open stake. Users pay their own Base
+> gas, there is no relayer, and a DEX price is not a stablecoin peg.
+>
+> Dynamic native validators and immutable per-deployment EVM mint attestors are
+> separate security domains. Native join/ejection does not rotate attestors; a
+> removed validator can remain an attestor. Changing the EVM committee requires
+> a new `WrappedMatrix` deployment and migration. Production requires at least 2
+> attestors and threshold strictly greater than two thirds, enforced by the
+> deploy script. Every configured `matrixd` bridge, singleton included, uses
+> consensus-ordered burn unlock. No unlinked statement below that contracts are
+> deployed or undeployed is current evidence; require published on-chain facts.
+
 State of `main` as of `cb4db0c`, plus the product-surface work on
 `claude/handoff-md-checklist-s0ptw1` through `4c7eb0d`. Everything below was run, not inferred; where
 something is unverified it says so.
+
+## Current uncommitted checkpoint: pre-lock bridge deployment readiness
+
+Work is paused at the user's request after completing the remaining pre-lock
+bridge deployment-domain blocker on branch
+`feature/base-permissionless-marketplace`. **No commit was created.** The
+worktree already contained the much larger Base/permissionless-marketplace
+change set before this checkpoint; do not reset, clean, or selectively discard
+files based only on this section. `proto/gen/**` is gitignored and was generated
+locally for compilation.
+
+### What is implemented
+
+**Challenge-response RPC.** `GetBridgeReadiness` accepts exactly 32 caller-random
+bytes and returns the echoed challenge plus signed `chain_id`, normalized
+lowercase `contract`, `attestor`, and `min_lock_native`. A node exposes the
+capability only when both `bridge.contract` and a successfully unlocked
+`bridge.attestor_keystore` exist; otherwise it returns `FailedPrecondition`.
+Malformed challenges return `InvalidArgument`, and malformed signer output fails
+as `Internal`.
+
+The secp256k1 proof uses a readiness-only digest, not the mint digest:
+
+```text
+keccak256(
+  "MATRIX_BRIDGE_READINESS_V1" ||
+  challenge[32] ||
+  chain_id[uint256] ||
+  contract[20] ||
+  attestor[20] ||
+  min_lock_native[uint256]
+)
+```
+
+The response signature is Ethereum `r || s || v` (65 bytes). Tests prove each
+advertised field is bound, the signer recovers to the live attestor key, and a
+readiness signature is not valid as a WrappedMatrix mint signature.
+`GetBridgeReadiness` is pinned as a `Get*` public read when
+`connect.public_reads` is enabled and consumes the same per-caller HTTP rate
+limit as every other route.
+
+**Browser irreversible-boundary gate.** `submitBridgeLock` now performs all of
+the following before `wallet.signPayment`, before any pending-intent
+`localStorage` write, and before `SubmitSignedTransfer`:
+
+1. Read the wallet chain live and require the configured Base/Base Sepolia ID.
+2. Require deployed bytecode at the configured WrappedMatrix address.
+3. Read live `threshold`, `attestorCount`, `mintCap`, `totalSupply`, and
+   `ERC20_PER_NATIVE_UNIT`.
+4. Require a positive satisfiable threshold, the exact `1e9` conversion, and
+   enough cap headroom for the exact native lock amount.
+5. Generate one random 32-byte challenge and query **all** configured validator
+   endpoints concurrently.
+6. Require every non-transport response to echo the challenge and match chain,
+   normalized contract, and the protocol minimum.
+7. Recover each claimed signer from the readiness digest, reject malformed or
+   invalid signatures and duplicates, require on-chain `isAttestor`, and require
+   the unique registered live signer count to meet the live threshold.
+8. Tolerate only `unreachable`/`deadline_exceeded` endpoint failures, and only
+   when the remaining valid signer set still reaches threshold. Any semantic,
+   deployment, or signature mismatch fails the whole preflight.
+9. Read the wallet chain again immediately before opening the payment-signature
+   prompt, closing the chain-change race.
+
+All existing post-sign/post-lock safeguards remain: persist the exact signed
+intent before native submission for recovery, require committed+applied
+settlement, match returned transfer fields, validate lock attestations against
+the persisted lock, re-check registered mint signers/threshold/replay/cap,
+simulate mint, re-check chain before EVM write, wait for a successful receipt,
+and verify `mintedLockId` afterward.
+
+### Tests added for this blocker
+
+Go coverage includes readiness-domain separation and field binding, bridge/key
+fail-closed wiring, malformed challenge/proof behavior, exact response fields,
+public-read classification, and explicit shared rate-limit coverage.
+
+Web coverage includes no-code and contract-read failures, wrong readiness
+domain, malformed/invalid signatures, duplicate and unregistered responders,
+below-threshold responders, conversion and cap insufficiency, transport-only
+tolerance, challenge codec/deadline behavior, the immediate pre-sign chain
+re-check, and proof that readiness failure invokes **no** payment signing,
+`localStorage.setItem`, or native submission fetch.
+
+SDK coverage pins the RPC path, 32-byte challenge encoding, lossless integer and
+proof-byte decoding, malformed challenge refusal before transport, and
+manifest-to-wrapper parity.
+
+### Files in this checkpoint
+
+- RPC and node: `proto/matrix/market/v1/market.proto`,
+  `services/core/internal/bridge/readiness.go`,
+  `services/core/internal/marketapi/{server.go,handlers.go}`,
+  `services/core/internal/node/{bridge_watch.go,node.go}`,
+  `services/core/internal/connectapi/{publicreads_test.go,ratelimit_test.go}`.
+- Go tests: `services/core/internal/bridge/readiness_test.go`,
+  `services/core/internal/marketapi/readiness_test.go`, and readiness additions
+  in `services/core/internal/node/attestor_test.go`.
+- Browser: `apps/web/src/lib/bridge/{abi.ts,evm.ts,lock.ts}` and their tests,
+  plus `apps/web/src/lib/wallet/{node.ts,node.bridge.test.ts}`.
+- SDK: `packages/sdk/src/{index.ts,index.test.ts,bridge.test.ts,rpc-manifest.json}`
+  and `packages/sdk/README.md`.
+- Operator/browser docs: `docs/runbooks/base-launch.md`,
+  `apps/web/src/app/docs/cli/page.tsx`, and
+  `apps/web/src/app/docs/configuration/page.tsx`.
+
+### Verification completed
+
+```text
+buf 1.72.0 lint + generate                         PASS
+focused Go tests: bridge, marketapi, node,          PASS
+  connectapi, connectapi/manifest
+gofmt on all touched Go files                       PASS
+web ESLint                                          PASS
+web TypeScript                                      PASS
+web Vitest: 10 files / 80 tests                     PASS
+web Next production build                           PASS
+SDK TypeScript                                      PASS
+SDK Vitest: 4 files / 61 tests                      PASS
+SDK build                                            PASS
+relevant-file git diff --check                      PASS
+```
+
+The generated SDK manifest includes `GetBridgeReadiness`, and generated local Go
+stubs expose `MarketService_GetBridgeReadiness_FullMethodName`. No source commit
+or push was made. The next person should review the combined pre-existing
+worktree rather than treating these files as an isolated clean diff; if they
+continue implementation, rerun the verification block above after any change.
 
 ## Build and check
 
@@ -68,17 +216,16 @@ blocks after leaving the set, and a proven offence moves the whole bond to the
 reward pool. A bond is a balance in `consensus/stake/bond/<id>` on the same
 ledger everything else settles on.
 
-**A fee and an emission** (`consensus.fee_basis_points`, `consensus.rewards`).
-The engine's zero-value config is still fee-free and emission-free; what changed
-is that a *generated* config (`matrixd -init`) now ships the operator's chosen
-policy. The fee is a cut of each committed value transfer paid to the validator
-set pro rata by power, capped at 100 basis points *in code*, and the generated
-config sets it to that 100bp cap. The emission is a fixed halving per-block
-budget from the genesis pool, shared among registered providers a block paid;
-the generated config arms the recommended schedule (`per_block` 280,000,000,000,
-`half_life` 1,000,000, about `1.44 x per_block x half_life` ≈ 4e17 base units,
-~40% of the 1e18 native cap). It pays nobody yet: `rewards.approved_providers`
-is empty and a registration needs an operator quorum.
+**A fee and zero launch emission** (`consensus.fee_basis_points`,
+`consensus.rewards`). The engine's zero-value config remains fee-free and
+emission-free, while `matrixd -init` writes the launch baseline: a 100-basis-
+point fee and `rewards.per_block: 0`. The generated maintainer account/share
+remain empty/zero because initialization must not invent an account; the Base
+launch overlay requires operators to resolve a real account and assigns it 5000
+basis points of the fee. The generated membership policy is bonded-open with
+stake enabled. Earlier revisions of this handoff described a 280,000,000,000
+per-block emission and permissioned stake-off launch; those statements are
+superseded and must not be copied into a launch config.
 
 **Signed value transfers settle through consensus.** `matrix wallet transfer`
 and `matrix.market.v1 SubmitSignedTransfer` no longer append to the per-node
@@ -297,48 +444,43 @@ was intentionally not built. `bridge.Reconcile()` is exposed as a node endpoint
 `GetBridgeReconciliation` (gRPC + connectapi HTTP), backed by the node's own
 bridge over its ledger.
 
-## Decisions the CTO has made
+## Launch decisions (supersedes earlier policy in this handoff)
 
-The monetary-policy numbers are decided and wired into the generated config
-(`ffc6320`; the engine's zero-value defaults stay neutral, so the protocol still
-forces nothing):
+The authoritative values are documented and ordered in
+[`docs/runbooks/base-launch.md`](docs/runbooks/base-launch.md):
 
-- **Fee rate: 100 basis points,** the code cap.
-- **Emission: the recommended schedule** - `per_block` 280,000,000,000,
-  `half_life` 1,000,000, about `1.44 x per_block x half_life` ≈ 4e17 base units,
-  ~40% of the 1e18 native cap, matching the proposal's provider allocation.
-- **Stake off** - permissioned for the first release.
-- **Fundraising:** solo, no raise, which is why the bridge mint cap is immutable
-  rather than raisable.
+- **Fee:** 100 basis points.
+- **Maintainer:** an explicit real Matrix account receives 5000 basis points of
+  the fee, which is at most 0.5% of ordinary transferred value.
+- **Emission:** `rewards.per_block: 0`.
+- **Membership:** bonded-open with stake enabled.
+- **Bridge cap:** immutable 60,000,000 wMATRIX (6%).
+- **Founder:** immutable 50,000,000 wMATRIX (5%) vault, minted only after exact
+  1:1 native escrow; 1-year cliff and 5-year total linear vesting from start.
 
-## Still the operator's to turn
+The former 280,000,000,000-per-block emission and permissioned/stake-off launch
+recorded here were point-in-time decisions and are superseded.
 
-Runtime monetary policy that is armed in config but inert until the operator
-acts:
+## Still the operator's to resolve
 
-- **The emission pays nobody yet.** `rewards.approved_providers` is empty;
-  registering a provider needs an operator quorum. Until then the emission is
-  armed and pays nothing.
-- **Agent metering price is 0** (unmetered) until set.
-- **The HTTP rate limit is armed at 600/minute, burst 120** in a generated
-  config (`connect.rate_limit_per_minute` / `rate_limit_burst`). Raise it for an
-  endpoint serving many callers; zero turns it off.
-- **`MATRIX_WALLET_PASSPHRASE`** is read before prompting, and a
-  non-interactive caller must set it: the tool refuses to read a passphrase off
-  a pipe, where it would land in a log.
-- **An API key spends from no account until one is set.** `account` under
-  `security.api_keys` is what makes a key usable on `/v1/chat/completions`, and
-  the node must hold that account's signing key to settle for it. Leaving it
-  empty is the safe default and means that key cannot buy inference.
-- **`connect.public_reads` and `connect.signed_writes` are both off.** A node
-  serving a browser needs both; a node its own operator drives needs neither.
-- **Permissioned vs. open launch is a config switch** - currently permissioned,
-  stake off. Turning on stake means choosing `min_bond` / `unbonding_period`.
+`matrixd -init` remains safe: it generates an admin key, exact local origins,
+positive 600/minute and 120-burst limits, a 100-basis-point fee, zero emission,
+bonded-open stake, and no invented maintainer. The Base launch overlay must be
+merged into that generated config; it is not standalone. Operators still must:
 
-Also still open from the proposal: headcount and vesting, jurisdiction for the
-issuing entity, and the audit budget. A real mainnet/testnet bridge deploy still
-needs the operator's funded key, an RPC endpoint, and an external audit; the
-contracts are undeployed by design (45 hardhat tests pass locally).
+- Resolve the real maintainer account before setting its 5000-basis-point share.
+- Resolve exact public origins and explicitly enable `connect.public_reads` and
+  `connect.signed_writes`; never use a production wildcard.
+- Resolve production peers, validator IDs, stake funding, Base RPC/address/block,
+  and per-node attestor keystores.
+- Keep runtime wallet/attestor passphrases out of config and logs.
+- Complete the Base Sepolia rehearsal, source verification, founder backing
+  ceremony, and public reconciliation evidence before Base production.
+
+Deployment status cannot be inferred from this repository. Do not repeat the
+old "undeployed by design" claim or claim a public deployment without a
+published address, transaction/block, verified source, immutable constructor
+values, attestor ceremony, and reconciliation snapshot.
 
 ## The product surface: what landed
 
@@ -567,19 +709,18 @@ a guard.
 
 **Client-streaming** is refused by `connectapi` by design; nothing needs it.
 
-**No vesting contract, and no vesting of any kind.** Still open, and worth
-stating precisely because a model built on this repo got it wrong: a grep for
-vest/cliff/lockup across the Go and Solidity trees returns nothing.
-`GenesisAllocation` is `{Account, Amount}` and `ApplyGenesis` credits balances
-once at first start - that is the whole mechanism. The "12-month cliff, 36 months
-linear" in `docs/proposals/token-and-bridge-policy.md` is a document, not code.
+**Superseded vesting note.** This section originally said no vesting contract
+existed. The current tree includes `FounderVestingVault` plus deploy and status
+scripts. Current policy is an immutable 50,000,000-wMATRIX (5%) founder vault,
+linear from the start over 5 years total with a 1-year cliff (20% vested at the
+cliff), and no founder mint before exact 1:1 native escrow. Use the Base launch
+runbook for the verification and backing ceremony.
 
-Also worth knowing before anyone plans a cap table against that proposal: a
-genesis allocation is applied from each node's OWN config at first start, and the
-chain carries transactions rather than the balances they started from. So an
-allocation exists only if every operator writes the identical genesis into their
-own file. A node with a different one agrees on history while disagreeing about
-money.
+The genesis warning remains valid: a genesis allocation is applied from each
+node's own config at first start, and the chain carries transactions rather than
+the balances they started from. An allocation exists only if every operator
+uses the identical genesis. Once genesis is applied, changing YAML does not
+move funds.
 
 The multisig half is done. `MatrixToken.mint` was `onlyOwner`: one address could
 issue up to the 1e27 cap in a single transaction, sitting next to
@@ -599,9 +740,11 @@ altering any of them means redeploying. `scripts/deploy.ts` requires `MINTERS` o
 mainnet or sepolia and refuses a threshold below 2 or a set smaller than 2: a
 1-of-1 set satisfies the m-of-n code and is exactly the key this replaced.
 
-## Product decisions made this session
+## Historical product decisions from that session (superseded for launch)
 
-Policy, not engineering. Recorded so they are not re-litigated.
+This material is preserved as engineering history, not current launch policy.
+The Base runbook's zero emission and bonded-open stake supersede the emission
+and permissioned/stake-off analysis below.
 
 **Two servers, two names, deliberately.**
 
@@ -637,10 +780,10 @@ is checkable: the buyer holds the prompt and the completion and can recount the
 tokens with the model's tokeniser, so an inflated `usage` is detectable. Keep
 trying cheap - do not add a minimum job size.
 
-**Self-dealing is not blocked, because the emission already prices it.**
-`distributeEmissionLocked` splits the per-block budget pro rata by
-`credited[id]`, the amount that provider was actually paid in that block, not by
-headcount. With self-dealt volume V, honest volume H, per-block emission E and
+**Historical emission analysis (superseded; launch emission is zero).**
+Self-dealing was not blocked under the former emission design because
+`distributeEmissionLocked` split the per-block budget pro rata by `credited[id]`,
+the amount that provider was actually paid in that block, not by headcount. With self-dealt volume V, honest volume H, per-block emission E and
 fee rate f, a farmer pays `f*V` and collects `E*V/(V+H)`:
 
 - the optimum is finite (`V = sqrt(E*H/f) - H`), so looping does not scale;
@@ -656,9 +799,9 @@ raise it once real volume exists. No reputation system is needed; repeat purchas
 from distinct buyers is already visible in committed settlements if we ever want
 to weight by it.
 
-**Permissioned now, permissionless as a stated destination.** Stake is off and
-`approved_changes` gates admission, so this is permissioned with capital at risk.
-That is the standard launch posture (Ethereum's beacon genesis set, Solana, Sui,
+**Historical permissioned-launch analysis (superseded; launch is bonded-open).**
+Stake was off and `approved_changes` gated admission in the configuration
+recorded here, making it permissioned with capital at risk. That was the standard launch posture (Ethereum's beacon genesis set, Solana, Sui,
 Aptos and the Cosmos hub all started this way) and it is where DePIN compute
 networks tend to stay: an open settlement layer with a gated service layer. What
 blocks opening the set is technical rather than political - only equivocation is

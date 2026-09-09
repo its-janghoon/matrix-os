@@ -33,9 +33,17 @@ inference:
   echo_provider: local    # GPU-free backend, for trying the flow
 connect:
   addr: 0.0.0.0:9093      # HTTP/JSON for the same services; "off" disables it
-  allowed_origins: ["*"]  # browser origins allowed to call it
+  public_reads: true       # keyless Get*/List* only
+  signed_writes: true      # client-signature-authorized writes only
+  rate_limit_per_minute: 600
+  rate_limit_burst: 120
+  allowed_origins: ["https://matrix.example.org"] # exact public origin, never "*"
 consensus:
-  validators: []          # hex account IDs; empty = solo validator`;
+  membership_mode: bonded-open
+  validators: []          # genesis ids; empty creates a solo/dev genesis set
+  stake:
+    enabled: true
+    min_bond: 1000000000000000`;
 
 const subsystems = [
   {
@@ -52,11 +60,15 @@ const subsystems = [
   },
   {
     name: 'Compute marketplace',
-    body: 'The provider order book and the job records. Registering announces capacity and a price; submitting a job reserves that capacity.',
+    body: 'The provider order book and job records. Registering publishes a manually observed MATRIX-denominated quote with an expiry; submitting a job snapshots the accepted unit price and quote metadata so later refreshes cannot reprice work already reserved.',
   },
   {
     name: 'Consensus engine',
-    body: 'An ed25519 validator set, a round-robin leader, and two voting phases per height. The set is chain state: a change rides in a committed block and takes effect at an epoch boundary, so every node switches at the same height. Committed blocks are hash-linked, and a node that misses one fetches it from a peer with the precommit quorum that committed it.',
+    body: 'An ed25519 validator set, a round-robin leader, and two voting phases per height. Bonded-open candidates self-sign admission after a positive bond; the set is chain state and changes at epoch boundaries. Burn-to-native bridge releases are always ordered here and require native voting-power consensus.',
+  },
+  {
+    name: 'Base bridge boundary',
+    body: 'WrappedMatrix minting is checked by the fixed secp256k1 attestor committee embedded at EVM deployment. That immutable committee is separate from the dynamic native bonded-open validator set; validator joins do not silently gain EVM mint authority.',
   },
   {
     name: 'Inference backends',
@@ -64,7 +76,7 @@ const subsystems = [
   },
   {
     name: 'Pebble store',
-    body: 'One embedded key-value store per node, holding the market ledger, the per-node token chain and the committed block chain under disjoint key prefixes.',
+    body: 'One embedded key-value store per node, holding the marketplace ledger, bridge accounting and committed consensus blocks under disjoint key prefixes.',
   },
   {
     name: 'gRPC services',
@@ -109,8 +121,10 @@ export default function ArchitecturePage() {
 
                   <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>How it is configured</h2>
                   <p className='mb-4 text-gray-300'>
-                    One YAML file, written by <code className='text-white'>matrix init</code> and read at startup.
-                    Every field below is real; see{' '}
+                    One YAML file, written initially by <code className='text-white'>matrixd -init</code> and read at
+                    startup. The generated file is a secure baseline, not a production launch profile. The excerpt
+                    below shows an explicit public overlay; replace its origin and copy consensus values exactly
+                    across the network. See{' '}
                     <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                       configuration
                     </a>{' '}

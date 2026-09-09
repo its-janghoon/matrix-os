@@ -45,7 +45,7 @@ func lockCommitsOn(t *testing.T, size int) {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
 	for _, nd := range nodes {
-		if err := nd.ledger.Credit(payer.AccountID(), 10_000); err != nil {
+		if err := nd.ledger.Credit(payer.AccountID(), 2*token.MinBridgeLockAmount); err != nil {
 			t.Fatalf("credit: %v", err)
 		}
 	}
@@ -57,7 +57,7 @@ func lockCommitsOn(t *testing.T, size int) {
 	tx := &token.Transaction{
 		From:      payer.PublicKey,
 		To:        BridgeLockRecipient(addr),
-		Amount:    4_000,
+		Amount:    token.MinBridgeLockAmount,
 		Nonce:     1,
 		Timestamp: time.Now().UnixNano(),
 		PrevHash:  make([]byte, 32),
@@ -71,7 +71,7 @@ func lockCommitsOn(t *testing.T, size int) {
 
 	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
-		if bal, err := nodes[0].ledger.Balance(bridge.EscrowAccount); err == nil && bal == 4_000 {
+		if bal, err := nodes[0].ledger.Balance(bridge.EscrowAccount); err == nil && bal == token.MinBridgeLockAmount {
 			if calls, _, _ := locker.snapshot(); calls == 0 {
 				t.Fatal("escrow moved but the lock was never recorded, so nothing could attest to it")
 			}
@@ -136,7 +136,7 @@ func TestARealBridgeDoesNotWedgeTheNode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
-	if err := nodes[0].ledger.Credit(payer.AccountID(), 10_000); err != nil {
+	if err := nodes[0].ledger.Credit(payer.AccountID(), 2*token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("credit: %v", err)
 	}
 
@@ -144,7 +144,7 @@ func TestARealBridgeDoesNotWedgeTheNode(t *testing.T) {
 	for i := range addr {
 		addr[i] = 0xa1
 	}
-	lock := signedTx(t, payer, BridgeLockRecipient(addr), 4_000, 1)
+	lock := signedTx(t, payer, BridgeLockRecipient(addr), token.MinBridgeLockAmount, 1)
 	if err := nodes[0].engine.Submit(lock); err != nil {
 		t.Fatalf("Submit refused the lock outright: %v", err)
 	}
@@ -153,16 +153,16 @@ func TestARealBridgeDoesNotWedgeTheNode(t *testing.T) {
 	// against is a HANG: with the ledger write lock held forever, ledger.Balance
 	// blocks in RLock and a plain poll loop would sit here until the package
 	// timeout with a 1500-line stack dump instead of a sentence.
-	if bal := balanceWithin(t, nodes[0].ledger, bridge.EscrowAccount, 4_000, 15*time.Second); bal != 4_000 {
-		t.Fatalf("escrow holds %d, want 4000: the lock did not commit", bal)
+	if bal := balanceWithin(t, nodes[0].ledger, bridge.EscrowAccount, token.MinBridgeLockAmount, 15*time.Second); bal != token.MinBridgeLockAmount {
+		t.Fatalf("escrow holds %d, want %d: the lock did not commit", bal, token.MinBridgeLockAmount)
 	}
-	id := DeriveLockID(1, payer.AccountID(), addr, 4_000)
+	id := DeriveLockID(1, payer.AccountID(), addr, token.MinBridgeLockAmount)
 	ev, err := locker.b.GetLock(id)
 	if err != nil {
 		t.Fatalf("the escrow moved but the bridge has no lock %x to attest to: %v", id, err)
 	}
-	if ev.NativeAmount != 4_000 {
-		t.Fatalf("recorded %d native, want 4000", ev.NativeAmount)
+	if ev.NativeAmount != token.MinBridgeLockAmount {
+		t.Fatalf("recorded %d native, want %d", ev.NativeAmount, token.MinBridgeLockAmount)
 	}
 
 	// The node has to still be a node. A driver that deadlocked while applying
@@ -194,9 +194,9 @@ func TestARealBridgeDoesNotWedgeTheNode(t *testing.T) {
 		if got.err != nil {
 			t.Fatalf("Reconcile: %v", got.err)
 		}
-		if got.r.OutstandingNative != 4_000 || got.r.EscrowBalance != 4_000 {
-			t.Fatalf("Reconcile reports outstanding %d escrow %d, want 4000/4000",
-				got.r.OutstandingNative, got.r.EscrowBalance)
+		if got.r.OutstandingNative != token.MinBridgeLockAmount || got.r.EscrowBalance != token.MinBridgeLockAmount {
+			t.Fatalf("Reconcile reports outstanding %d escrow %d, want %d/%d",
+				got.r.OutstandingNative, got.r.EscrowBalance, token.MinBridgeLockAmount, token.MinBridgeLockAmount)
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Reconcile blocked for 10s: something is still holding the ledger")

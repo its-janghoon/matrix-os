@@ -160,6 +160,41 @@ console.log(finished.completion);
 Inference settles the same way `completeJob` does, so the same signing-key
 requirement applies to the buyer.
 
+## Bridge to Base
+
+`submitBridgeLock` submits a caller-signed native transfer to the canonical
+`bridge/lock/<address>` recipient, requires that consensus both committed and
+applied it, and returns the lock id used to collect validator attestations. The
+SDK never creates, imports, or holds the private key: pass the sender account id,
+its 32-byte ed25519 public key or raw 20-byte EVM address, and the signature you
+obtained from your own signer. `collectLockAttestations` polls only the explicit
+validator clients/endpoints you provide, retries only a not-yet-visible
+`not_found`, and validates field agreement, amount conversion, and claimed
+attestor uniqueness. It does not claim cryptographic verification; the Base
+contract adapter performs that check.
+
+The native lock does not pay Base gas. The user (or a relayer they arrange) pays
+the Base transaction gas when submitting the wrapped-token mint. The attestor
+committee and threshold are fixed for each bridge contract deployment; changing
+the validator committee requires a new deployment/migration rather than an SDK
+configuration update.
+
+Before an irreversible lock, call `bridgeReadiness` on every configured endpoint
+with the same fresh random 32-byte challenge. Each response signs its chain ID,
+normalized contract, attestor address, protocol minimum, and echoed challenge
+under the readiness-only domain `MATRIX_BRIDGE_READINESS_V1`:
+
+```ts
+const challenge = crypto.getRandomValues(new Uint8Array(32));
+const proof = await matrix.bridgeReadiness(challenge);
+```
+
+The SDK only transports this proof. A browser or contract adapter must recover
+the signer, reject duplicate or unregistered addresses, compare every deployment
+field, and require the live on-chain threshold before asking a wallet to sign a
+native payment. The readiness digest is deliberately distinct from the mint
+attestation digest and cannot authorize a mint.
+
 ## Amounts are `bigint`
 
 Native MATRIX has 9 decimals and a cap of 1,000,000,000 whole coins, so a

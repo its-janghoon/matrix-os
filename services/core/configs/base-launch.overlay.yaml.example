@@ -1,0 +1,79 @@
+# Base production launch overlay EXAMPLE — NOT A STANDALONE matrixd config.
+#
+# 1. Run: matrixd -init -config /absolute/path/to/config.yaml
+# 2. Merge only the leaf values below into that generated file.
+# 3. Preserve generated API keys, storage, listeners, and unrelated sections.
+# 4. Resolve EVERY <placeholder> before start. Do not commit resolved secrets,
+#    credential-bearing RPC URLs, keystores, real accounts, or deployment data.
+# 5. Review the final full config on every node. matrixd does not load or merge
+#    this overlay automatically and accepts only one -config file.
+
+network:
+  # Replace with this host's reviewed public listen multiaddr.
+  listen_addr: "/ip4/<public-node-ip>/tcp/9000"
+  bootstrap_peers:
+    # Full peer multiaddr; never use a fake peer ID in production.
+    - "/dns4/<bootstrap-host>/tcp/9000/p2p/<bootstrap-peer-id>"
+
+connect:
+  # One exact production browser origin. A wildcard is intentionally forbidden.
+  # Add separately reviewed exact origins as additional entries if required.
+  allowed_origins:
+    - "https://<exact-production-origin-host>"
+  public_reads: true
+  signed_writes: true
+  # Positive per-caller limits; zero would disable protection.
+  rate_limit_per_minute: 600
+  rate_limit_burst: 120
+
+consensus:
+  # Native validator membership is dynamic chain state. It is separate from the
+  # immutable EVM attestor list fixed in the WrappedMatrix constructor.
+  membership_mode: bonded-open
+  participate_in_open_set: true
+  # Must be the identical native GENESIS validator IDs on every node. Joining or
+  # ejecting one of these validators does not add/remove an EVM mint attestor.
+  validators:
+    - "<64-lowercase-hex-genesis-validator-account>"
+  epoch_length: 100
+  approved_changes: []
+  eject_equivocators: true
+  stake:
+    enabled: true
+    min_bond: 1000000000000000
+    unbonding_period: 1000
+    bond: 1000000000000000
+  # 100 bp = 1% of ordinary consensus-settled value transfers.
+  fee_basis_points: 100
+  # Required launch input: a real Matrix account, never a fake example account.
+  maintainer_account: "<64-lowercase-hex-maintainer-account>"
+  # 5000 bp OF THE FEE = 50% of 1%, at most 0.5% of transferred value.
+  maintainer_fee_share_basis_points: 5000
+  rewards:
+    # Launch provider emission is exactly zero.
+    per_block: 0
+    half_life: 1000000
+    approved_providers: []
+
+bridge:
+  # Base production only. For the rehearsal use a separately resolved copy with
+  # Base Sepolia chain_id 84532 and its own contract, RPC URL, and deploy block.
+  contract: "<deployed-WrappedMatrix-address-on-Base>"
+  chain_id: 8453
+  # Each validator points to its own encrypted secp256k1 keystore. The
+  # MATRIX_ATTESTOR_PASSPHRASE stays in the process environment, never YAML.
+  attestor_keystore: "/absolute/path/to/<this-node-attestor-keystore>.json"
+  watch:
+    enabled: true
+    rpc_url: "https://<credential-bearing-base-rpc-host>/<credential>"
+    start_block: <WrappedMatrix-deployment-block>
+    confirmations: 12
+    poll_interval: 12s
+    max_block_span: 2000
+
+# Genesis is deliberately omitted. Preserve the generated safe baseline unless
+# every node operator has approved identical pre-start allocations. If exactly
+# 50,000,000 MATRIX is allocated for founder backing at genesis, add
+# 50000000000000000 native base units to the real backing account and reduce the
+# generated reward_pool by the same amount to 950000000000000000. Never change
+# genesis after first start and never put a fake account into a launch config.

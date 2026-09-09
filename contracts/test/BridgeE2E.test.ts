@@ -63,7 +63,7 @@ describe("Bridge end-to-end (Go attestation -> Solidity mint)", function () {
   const THRESHOLD = 2;
   const VALIDATORS = 3;
   const SEED = "matrix-e2e-test";
-  const NATIVE_AMOUNT = 4_000_000_000; // 4 native base units (4 * 1e9)
+  const NATIVE_AMOUNT = 100_000_000_000; // 100 MATRIX: the minimum bridge lock (100 * 1e9)
 
   before(function () {
     if (!goAvailable()) {

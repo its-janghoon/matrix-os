@@ -55,7 +55,7 @@ func TestSubcommandHelp(t *testing.T) {
 	}{
 		{[]string{"wallet", "--help"}, []string{"create", "show", "balance", "transfer"}},
 		{[]string{"job", "--help"}, []string{"submit", "get", "list", "complete", "cancel"}},
-		{[]string{"provider", "--help"}, []string{"register", "list"}},
+		{[]string{"provider", "--help"}, []string{"register", "quote-update", "list"}},
 		{[]string{"tx", "--help"}, []string{"get", "list"}},
 	}
 	for _, tc := range cases {
@@ -76,6 +76,7 @@ func TestSubcommandHelp(t *testing.T) {
 func TestArgValidationErrors(t *testing.T) {
 	cases := [][]string{
 		{"provider", "register"},                // missing --id/--capacity/--price
+		{"provider", "quote-update"},            // missing --id/--price
 		{"job", "submit", "--provider", "p"},    // missing --buyer/--units
 		{"job", "get"},                          // missing --id
 		{"balance"},                             // missing --account

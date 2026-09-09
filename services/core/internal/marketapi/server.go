@@ -74,6 +74,9 @@ type Service struct {
 	// lock-and-mint bridge. When nil (no bridge configured, the default), the RPC
 	// returns codes.FailedPrecondition rather than panicking.
 	reconciler Reconciler
+	// readinessSigner proves this node has both the configured bridge parameters
+	// and the corresponding live secp256k1 attestor key. Nil fails closed.
+	readinessSigner BridgeReadinessSigner
 	// lockAttestor signs mint authorizations; nil when the node has no bridge or
 	// no attestor key.
 	lockAttestor LockAttestor
@@ -240,6 +243,23 @@ type Reconciler interface {
 	Reconcile() (*BridgeSnapshot, error)
 }
 
+// BridgeReadinessProof is one validator's challenge-bound proof that it has a
+// live secp256k1 attestor key configured for an exact bridge deployment.
+type BridgeReadinessProof struct {
+	ChainID       uint64
+	Contract      string
+	Attestor      string
+	MinLockNative uint64
+	Challenge     []byte
+	Signature     []byte
+}
+
+// BridgeReadinessSigner signs a readiness-only digest. A nil capability means
+// either bridge parameters or the attestor key are absent and must fail closed.
+type BridgeReadinessSigner interface {
+	SignBridgeReadiness(challenge []byte) (*BridgeReadinessProof, error)
+}
+
 // LockAttestation is this node's signature authorizing the wrapped mint for one
 // committed lock. Declared here (consumer side) for the reason BridgeSnapshot is:
 // the market API must not import internal/bridge.
@@ -311,6 +331,12 @@ func (s *Service) SetTransferSettler(settler TransferSettler) { s.transferSettle
 // FailedPrecondition.
 func (s *Service) SetReconciler(reconciler Reconciler) { s.reconciler = reconciler }
 
+// SetBridgeReadinessSigner installs the challenge-response signer for
+// GetBridgeReadiness. Nil leaves the RPC failing closed.
+func (s *Service) SetBridgeReadinessSigner(signer BridgeReadinessSigner) {
+	s.readinessSigner = signer
+}
+
 // SetLockAttestor installs the mint-authorization signer for GetLockAttestation,
 // on the same single-threaded startup path SetReconciler uses. Nil leaves the
 // RPC refusing, which is what a node with no attestor key should do.
@@ -378,6 +404,9 @@ type Config struct {
 	// lock-and-mint bridge. When nil (no bridge configured), that RPC returns
 	// FailedPrecondition. See the Reconciler doc.
 	Reconciler Reconciler
+	// ReadinessSigner proves live bridge/key configuration. Nil leaves
+	// GetBridgeReadiness refusing.
+	ReadinessSigner BridgeReadinessSigner
 	// LockAttestor signs mint authorizations. Nil leaves GetLockAttestation
 	// refusing, which is correct for a node with no attestor key.
 	LockAttestor LockAttestor
@@ -397,6 +426,7 @@ func NewServer(cfg Config) (*Server, error) {
 	svc.SetJobSettler(cfg.Settler)
 	svc.SetTransferSettler(cfg.TransferSettler)
 	svc.SetReconciler(cfg.Reconciler)
+	svc.SetBridgeReadinessSigner(cfg.ReadinessSigner)
 	svc.SetLockAttestor(cfg.LockAttestor)
 
 	var opts []grpc.ServerOption
@@ -527,6 +557,10 @@ func mapMarketError(err error) error {
 		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, market.ErrInvalidJobState):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, market.ErrStaleQuote):
+		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, market.ErrPriceOverflow):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, market.ErrInvalidProvider):
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, market.ErrSelfDealing):
@@ -593,6 +627,8 @@ func mapSettlementError(err error) error {
 		errors.Is(err, market.ErrInsufficientFunds),
 		errors.Is(err, market.ErrInsufficientCapacity),
 		errors.Is(err, market.ErrInvalidJobState),
+		errors.Is(err, market.ErrStaleQuote),
+		errors.Is(err, market.ErrPriceOverflow),
 		errors.Is(err, market.ErrInvalidProvider),
 		errors.Is(err, market.ErrSelfDealing):
 		return mapMarketError(err)

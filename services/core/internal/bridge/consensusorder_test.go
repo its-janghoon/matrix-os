@@ -189,15 +189,15 @@ func TestAttestedUnlockRejectsNonsense(t *testing.T) {
 // invisible to attestation, and Reconcile failing on the gap it left.
 func TestADirectBridgeStillRecordsAConsensusLock(t *testing.T) {
 	b, ledger := orderHarness(t, false)
-	if err := ledger.Credit(orderTestAccount, 1000); err != nil {
+	if err := ledger.Credit(orderTestAccount, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("credit: %v", err)
 	}
 	id := [LockIDLen]byte{0x01}
 	if err := ledger.Atomically(func(ltx market.LedgerTx) error {
-		if err := ltx.Transfer(orderTestAccount, EscrowAccount, 500); err != nil {
+		if err := ltx.Transfer(orderTestAccount, EscrowAccount, token.MinBridgeLockAmount); err != nil {
 			return err
 		}
-		return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500)
+		return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, token.MinBridgeLockAmount)
 	}); err != nil {
 		t.Fatalf("a solo node could not record a committed lock: %v", err)
 	}
@@ -208,8 +208,23 @@ func TestADirectBridgeStillRecordsAConsensusLock(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if rec.OutstandingNative != 500 || rec.EscrowBalance != 500 {
-		t.Fatalf("outstanding %d escrow %d, want 500/500", rec.OutstandingNative, rec.EscrowBalance)
+	if rec.OutstandingNative != token.MinBridgeLockAmount || rec.EscrowBalance != token.MinBridgeLockAmount {
+		t.Fatalf("outstanding %d escrow %d, want %d/%d", rec.OutstandingNative, rec.EscrowBalance,
+			token.MinBridgeLockAmount, token.MinBridgeLockAmount)
+	}
+}
+
+func TestRecordLockRejectsBelowMinimum(t *testing.T) {
+	b, ledger := orderHarness(t, true)
+	id := [LockIDLen]byte{0x06}
+	err := ledger.Atomically(func(ltx market.LedgerTx) error {
+		return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, token.MinBridgeLockAmount-1)
+	})
+	if !errors.Is(err, ErrLockAmountBelowMinimum) {
+		t.Fatalf("RecordLock error = %v, want ErrLockAmountBelowMinimum", err)
+	}
+	if _, err := b.GetLock(id); !errors.Is(err, ErrLockNotFound) {
+		t.Fatalf("GetLock after rejection = %v, want ErrLockNotFound", err)
 	}
 }
 
@@ -220,7 +235,7 @@ func TestADirectBridgeStillRecordsAConsensusLock(t *testing.T) {
 // check - a second lock acquisition anywhere in it would never return.
 func TestRecordLockRunsInsideTheCallersSection(t *testing.T) {
 	b, ledger := orderHarness(t, true)
-	if err := ledger.Credit(orderTestAccount, 1000); err != nil {
+	if err := ledger.Credit(orderTestAccount, token.MinBridgeLockAmount); err != nil {
 		t.Fatalf("credit: %v", err)
 	}
 	id := [LockIDLen]byte{0x07}
@@ -228,14 +243,14 @@ func TestRecordLockRunsInsideTheCallersSection(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- ledger.Atomically(func(ltx market.LedgerTx) error {
-			if err := ltx.Transfer(orderTestAccount, EscrowAccount, 500); err != nil {
+			if err := ltx.Transfer(orderTestAccount, EscrowAccount, token.MinBridgeLockAmount); err != nil {
 				return err
 			}
-			if err := b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500); err != nil {
+			if err := b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, token.MinBridgeLockAmount); err != nil {
 				return err
 			}
 			// Twice, in the same section: this is what block replay looks like.
-			return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, 500)
+			return b.RecordLock(ltx, id, orderTestAccount, Address{0xaa}, token.MinBridgeLockAmount)
 		})
 	}()
 	select {
@@ -252,16 +267,16 @@ func TestRecordLockRunsInsideTheCallersSection(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLock: %v", err)
 	}
-	if ev.NativeAmount != 500 {
-		t.Fatalf("recorded %d native, want 500", ev.NativeAmount)
+	if ev.NativeAmount != token.MinBridgeLockAmount {
+		t.Fatalf("recorded %d native, want %d", ev.NativeAmount, token.MinBridgeLockAmount)
 	}
 	rec, err := b.Reconcile()
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if rec.OutstandingNative != 500 {
-		t.Fatalf("outstanding = %d, want 500: recording the same lock twice double counted it",
-			rec.OutstandingNative)
+	if rec.OutstandingNative != token.MinBridgeLockAmount {
+		t.Fatalf("outstanding = %d, want %d: recording the same lock twice double counted it",
+			rec.OutstandingNative, token.MinBridgeLockAmount)
 	}
 }
 

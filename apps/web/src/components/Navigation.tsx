@@ -14,6 +14,7 @@ type NavMenu = { label: string; href?: string; links?: NavLink[] };
 const productLinks: NavLink[] = [
   { label: 'Compute Marketplace', href: '/products/marketplace' },
   { label: 'MATRIX Token', href: '/products/token' },
+  { label: 'Base Bridge', href: '/bridge', description: 'Lock native MATRIX or burn wMATRIX with MetaMask' },
   { label: 'Consensus', href: '/products/consensus' },
   { label: 'LLM Inference', href: '/products/inference' },
   { label: 'Matrix Console', href: '/products/console' },

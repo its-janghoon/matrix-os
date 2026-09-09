@@ -309,7 +309,7 @@ leaves the local wallet.`,
 	}
 	cmd.Flags().StringVar(&walletPath, "wallet", "", "wallet file path (default ~/.matrix/wallet.json)")
 	cmd.Flags().StringVar(&to, "to", "", "recipient account ID (required)")
-	cmd.Flags().Uint64Var(&amount, "amount", 0, "amount in credits (required, > 0)")
+	cmd.Flags().Uint64Var(&amount, "amount", 0, "native MATRIX base units to transfer (required, > 0)")
 	return cmd
 }
 

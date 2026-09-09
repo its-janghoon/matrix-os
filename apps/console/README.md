@@ -20,7 +20,9 @@ This repository contains the graphical user interface for Matrix OS, providing a
 - **Live Monitoring**: Stream conversations and observe emergent behaviors as they happen
 - **Simulation Control**: Drag-and-drop Souls into Matrices and control simulation parameters
 
-The console connects to local `matrixd` nodes via WebSocket/gRPC, providing a seamless bridge between the user interface and the Matrix OS core infrastructure. Built with Tauri, it delivers native performance across Windows, macOS, and Linux.
+The console connects to local `matrixd` nodes via the Connect protocol, providing a UI for providers, jobs, native MATRIX wallet state, consensus, and inference. It is an observation/operation client, **not** a contract deployer, bridge relayer, attestor-rotation tool, or source of deployment truth. Base launch operators must use the ordered [`Base launch runbook`](../../docs/runbooks/base-launch.md); users pay their own Base gas and no relayer is provided.
+
+Built with Tauri, it runs as a web frontend or desktop application.
 
 ## 🧠 Core Components
 
@@ -210,4 +212,4 @@ in `src/api/`.
 
 ## 📄 License
 
-MIT — see [LICENSE](LICENSE). 
+MIT — see [LICENSE](LICENSE).

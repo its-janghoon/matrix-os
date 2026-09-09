@@ -96,6 +96,10 @@ const (
 	// one node becomes known to all of them, rather than sitting in the log of
 	// whichever node happened to receive both votes.
 	TopicEvidence = "matrix.consensus.v2/evidence"
+	// TopicMembership carries only self-signed bond, admission, voluntary-exit,
+	// and withdrawal transactions in bonded-open mode. Candidates are not yet
+	// validators, so they need a bounded gossip path to reach current leaders.
+	TopicMembership = "matrix.consensus.v2/membership"
 )
 
 // Block-sync bounds. A response is capped both by block count and by encoded

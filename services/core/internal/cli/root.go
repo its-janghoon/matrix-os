@@ -53,8 +53,9 @@ func NewRootCommand() *cobra.Command {
 
 It drives a running node over its gRPC market API (matrix.market.v1.MarketService,
 served on the node's market port, default 127.0.0.1:9091): check node health,
-manage compute providers and jobs, read balances and the token chain, and manage
-an ed25519 wallet to sign and submit native MATRIX transfers.
+manage compute providers and jobs, read balances and committed consensus transfer
+history, operate the Base bridge, and manage an ed25519 wallet that signs native
+MATRIX transfers locally.
 
 Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		SilenceUsage:  true,

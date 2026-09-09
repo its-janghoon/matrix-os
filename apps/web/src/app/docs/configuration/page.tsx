@@ -60,16 +60,18 @@ connect:
     - http://localhost:5173
 
 consensus:
-  validators: []                         # GENESIS set: hex account ids; empty = this node alone
+  membership_mode: bonded-open           # self-signed admission after a positive bond
+  participate_in_open_set: true          # this node bonds and requests admission
+  validators: []                         # empty creates the secure solo/dev genesis set
   epoch_length: 100                      # blocks between set changes taking effect; must match everywhere
-  approved_changes: []                   # set changes this operator votes for and offers
-  eject_equivocators: true               # remove a validator proven to have double-voted
+  approved_changes: []                   # ignored by bonded-open membership
+  eject_equivocators: true               # objectively proven double-votes are removed and slashed
   stake:
-    enabled: false                       # voting power = bonded MATRIX; off = one vote each
-    min_bond: null                       # null = 1e15 base units; 0 = no minimum
+    enabled: true                        # required by bonded-open membership
+    min_bond: 1000000000000000           # positive admission floor in native base units
     unbonding_period: 0                  # 0 = 1000 blocks after leaving before withdrawal
-    bond: 0                              # what THIS node keeps bonded from its own account
-  fee_basis_points: 0                    # cut of each transfer to validators; capped at 100 in code
+    bond: 1000000000000000               # this node's target; fund its consensus account first
+  fee_basis_points: 100                  # 1% of each transfer to validators; code cap is 100
   maintainer_account: ""                 # paid a standing cut of the fee; empty pays nobody
   maintainer_fee_share_basis_points: 0   # that cut, in hundredths of a percent OF THE FEE; capped at 5000
   rewards:
@@ -82,9 +84,9 @@ genesis:
   reward_pool: 1000000000000000000       # native base units held for funding accounts
 
 bridge:
-  contract: ""                           # WrappedMatrix address; empty leaves the bridge off
-  attestor_keystore: ""                  # this validator's encrypted attestor key; empty cannot attest
-  chain_id: 0
+  contract: ""                           # verified WrappedMatrix address; empty leaves bridge off
+  attestor_keystore: ""                  # only for a fixed contract attestor; not every validator
+  chain_id: 0                             # 84532 rehearsal or 8453 Base production
   watch:
     enabled: false
     rpc_url: ""
@@ -98,6 +100,40 @@ const MINIMAL = `network:
 storage:
   engine: pebble
   path: ./data`;
+
+const PUBLIC_BASE_OVERLAY = `# Overlay on the generated baseline for the public web/API deployment.
+# The maintainer value below is a syntactically valid EXAMPLE; replace it with
+# the real 64-lowercase-hex account controlled by the launch maintainer.
+connect:
+  addr: 0.0.0.0:9093
+  public_reads: true
+  signed_writes: true
+  rate_limit_per_minute: 600
+  rate_limit_burst: 120
+  allowed_origins:
+    - https://matrix.example.org          # exact deployed web origin; NEVER "*"
+
+consensus:
+  membership_mode: bonded-open
+  participate_in_open_set: true
+  stake:
+    enabled: true
+    min_bond: 1000000000000000           # positive; all nodes must agree
+    bond: 1000000000000000               # fund this node's consensus account
+  fee_basis_points: 100                  # 1%; all nodes must agree
+  maintainer_account: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+  maintainer_fee_share_basis_points: 5000 # 50% OF the 1% fee, not 50% of value
+  rewards:
+    per_block: 0                         # launch policy: zero provider emissions
+
+bridge:
+  contract: "<verified WrappedMatrix address>"
+  chain_id: 84532                        # Base Sepolia rehearsal; use 8453 for Base production
+  attestor_keystore: "<only on a node whose fixed EVM attestor is registered>"
+  watch:
+    enabled: true
+    rpc_url: "<credential-free or server-only Base HTTPS RPC>"
+    confirmations: 12`;
 
 const VALIDATORS = `consensus:
   validators:
@@ -213,19 +249,29 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'allowed_origins',
         def: 'the Console dev origins',
-        note: 'Empty means no browser may call the endpoint, and that is the default for a config that omits it. A wide-open policy on a localhost daemon lets any page the operator visits drive their node. Non-browser callers send no Origin and are unaffected. "*" is for development.',
+        note: 'Empty means no browser may call the endpoint. The generated baseline lists only the Console development origins. A public endpoint must replace those with the exact HTTPS origin of the deployed web app on every validator endpoint; never use "*" in a public profile. CORS is not authentication: non-browser callers send no Origin, public_reads controls credential-free reads, and signed_writes still verifies client signatures.',
       },
     ],
   },
   {
     title: 'consensus',
     blurb:
-      'The validator set. Every node in a network must start from the same ids and agree on epoch_length, and on whether stake is enabled, or they derive different leader schedules and different quorums. The set itself is chain state: once it has changed, each node resumes the set the chain arrived at and this file no longer decides it.',
+      'The genesis validator set and admission policy. Every node must agree on genesis ids, epoch_length, membership_mode and stake policy or they derive different leader schedules and quorums. Bonded-open candidates self-sign admission after bonding; operator-approved networks use approved_changes. The set in force is chain state and resumes from committed history.',
     fields: [
+      {
+        name: 'membership_mode',
+        def: 'bonded-open',
+        note: 'The generated baseline uses bonded-open membership: a candidate self-signs admission after its positive minimum bond commits, and may self-sign a voluntary exit. operator-approved preserves the private allow-list model. In bonded-open mode approved_changes does not admit or remove honest validators; objectively proven equivocation is still slashable.',
+      },
+      {
+        name: 'participate_in_open_set',
+        def: 'true',
+        note: 'Whether this node should bond and request admission in bonded-open mode. False makes an active validator submit a voluntary exit and keeps a candidate passive.',
+      },
       {
         name: 'validators',
         def: '[]',
-        note: 'The GENESIS set, as hex account ids. It seeds a fresh store and is ignored once the chain has changed the set. This node’s own consensus identity is always added, so an empty list is a working single-validator node.',
+        note: 'The GENESIS set, as hex account ids. A non-empty list is authoritative and must match for every node. An empty list creates the generated solo/dev set; a later bonded-open candidate starts as a passive follower, replays that genesis history, bonds, then self-signs admission.',
       },
       {
         name: 'epoch_length',
@@ -235,17 +281,17 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'approved_changes',
         def: '[]',
-        note: 'Set changes this operator votes for, written as add:<64-hex public key> or remove:<64-hex account id> - the same text the node prints in its log. A node offers the changes listed here and re-offers them until they commit, and prevotes nil on a block carrying anything else, so a change needs a quorum of operators to have listed it. Empty means this node approves no membership change, which is the safe default. A typo fails startup rather than silently approving nothing.',
+        note: 'Set changes this operator approves in operator-approved mode, written as add:<64-hex public key> or remove:<64-hex account id>. Bonded-open admission and voluntary exit are self-signed and ignore this list; objective equivocation evidence remains the only path to force-removing a validator there.',
       },
       {
         name: 'stake.enabled',
-        def: 'false',
-        note: 'Turns bonded stake on. Voting power becomes an account’s bonded native MATRIX rather than one vote per validator, admission requires stake.min_bond, and a validator proven to have equivocated loses its whole bond to the reward pool instead of only its place. Off, the network runs as a permissioned set of equals - coherent for operators who know each other, and not safe for a set anyone may join, because a quorum counted in heads can be bought for the price of a few identities.',
+        def: 'true',
+        note: 'Turns bonded stake on and is required by bonded-open membership. Voting power becomes an account’s bonded native MATRIX, admission requires stake.min_bond, and a validator proven to have equivocated loses its whole bond to the reward pool. operator-approved networks may turn it off for a permissioned set of equals, but bonded-open refuses to start without stake and a positive minimum.',
       },
       {
         name: 'stake.min_bond',
-        def: 'null (1e15 base units)',
-        note: 'What an account must have bonded before the network may admit it as a validator. Null takes the default, a thousandth of the supply cap; an explicit 0 means no minimum, which is only appropriate on a network not using stake for security. A bond is necessary to be admitted and never sufficient: a quorum of operators still has to approve the change.',
+        def: '1e15 base units',
+        note: 'What an account must have bonded before bonded-open admission. The generated baseline writes the positive default explicitly. Every node must agree on the floor; lowering it changes the economic cost of admission. This validator minimum is separate from the bridge lock minimum of 100 MATRIX.',
       },
       {
         name: 'stake.unbonding_period',
@@ -254,8 +300,8 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       },
       {
         name: 'stake.bond',
-        def: '0',
-        note: 'How much of its own native MATRIX this node keeps bonded. The node bonds the shortfall itself and keeps topping it up, because bonding must be signed by the validator’s own key and that key lives inside the node. Its consensus account has to hold the coins first - the id is printed at startup - and the node says so plainly if it does not. Zero bonds nothing, so on a staked network the node cannot be admitted.',
+        def: '1e15 base units',
+        note: 'How much of its own native MATRIX this node targets as bonded stake in the generated bonded-open baseline. The node bonds the shortfall itself and keeps topping it up; fund the printed consensus account first. A private operator-approved deployment may set zero, but bonded-open admission requires at least the positive minimum.',
       },
       {
         name: 'fee_basis_points',
@@ -275,7 +321,7 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'rewards.per_block',
         def: '0',
-        note: 'What the genesis reward pool pays out per committed block, shared among the REGISTERED providers that block paid, pro rata by how much. A fixed budget rather than a percentage of what a provider earned, because consensus cannot see work: a percentage of a transfer is a money pump, since anyone can send coins to an account they also control and collect it. A fixed budget means faked volume moves a share and cannot increase the total, so the pool empties on schedule. Zero leaves the pool untouched.',
+        note: 'What the genesis reward pool pays per committed block. The generated baseline and public launch overlay set this to zero: providers earn user-paid MATRIX only, with no provider token emissions. matrixd can run a nonzero, supply-tracked reward schedule for a separate network, but that is not the launch policy.',
       },
       {
         name: 'rewards.half_life',
@@ -315,13 +361,13 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
       {
         name: 'run_price',
         def: '0',
-        note: 'Credits charged per agent run, settled from the deploying account to run_price_recipient through consensus rather than by a per-node ledger write. Zero disables metering: nothing is charged and no signing key is needed. A deploy whose payer cannot afford the charge, or has no signing key, is refused rather than run for free.',
+        note: 'Native MATRIX base units charged per agent run, settled from the deploying account to run_price_recipient through consensus. Zero disables metering: nothing is charged and no signing key is needed. A deploy whose payer cannot afford the charge, or has no signing key, is refused rather than run for free.',
       },
       { name: 'run_price_recipient', def: '""', note: 'The account both the run price and the storage rent are paid to. Required when either price is set.' },
       {
         name: 'storage_price',
         def: '0',
-        note: 'Credits per MiB per day for a stored module. Zero disables rent. It exists because run_price charged for a run and nothing charged for the BYTES, so a stored module was the one resource a deployer took for free and kept indefinitely - up to 32 MiB each, on the operator\'s disk, forever. Rent is the market answer to that rather than a deployment cap: a cap refuses a paying customer to save disk, where rent sells the disk and only reclaims it from whoever will not pay. The rate a deployment is billed at is FIXED when it is deployed, so raising this price never re-prices modules that are already stored.',
+        note: 'Native MATRIX base units per MiB per day for a stored module. Zero disables rent. The rate a deployment is billed at is fixed when deployed, so raising this price never re-prices modules already stored.',
       },
       { name: 'storage_rent_interval', def: '0 (1h)', note: 'How often rent is swept. The interval does not change the price: a sub-credit sweep charges nothing and advances no clock, so the remainder keeps accruing until it crosses one credit.' },
       {
@@ -336,20 +382,20 @@ const sections: { title: string; blurb: string; fields: Field[] }[] = [
   },
   {
     title: 'bridge',
-    blurb: 'The lock-and-mint bridge to wMATRIX on Ethereum. Off unless a contract address is set.',
+    blurb: 'The lock-and-mint bridge to wMATRIX on Base. Off unless an exact contract address and chain are configured. Before every browser lock, a fresh challenge-response gate proves a live registered attestor threshold for that deployment; this still does not replace source verification or post-lock reconciliation.',
     fields: [
-      { name: 'contract', def: '""', note: 'Deployed WrappedMatrix address. Empty leaves the whole subsystem off.' },
-      { name: 'chain_id', def: '0', note: 'EVM chain id the contract is deployed on.' },
+      { name: 'contract', def: '""', note: 'Exact deployed WrappedMatrix address. Empty leaves the subsystem off. Base Sepolia rehearsal is chain 84532; Base production is 8453. Verify code and deployment records independently before funding it.' },
+      { name: 'chain_id', def: '0', note: 'EVM chain id bound into every mint attestation: 84532 for Base Sepolia rehearsal or 8453 for Base production.' },
       {
         name: 'watch.enabled',
         def: 'false',
-        note: 'Runs the burn-to-unlock watcher inside the node: it polls for Burned events past a confirmation depth, exactly once per event. What it does with one depends on the size of the validator set. A single node releases the escrow itself. On a SET the release is consensus-ordered: the watcher submits an attestation and the engine releases escrow on the block where attesting voting power crosses quorum, so turn this on for EVERY validator - a burn stays pending until more than two thirds of the power has attested it, and one watching node produces one attestation.',
+        note: 'Runs the burn-to-unlock watcher inside matrixd and polls confirmed Burned events exactly once. Burn release is always a native-consensus operation: on a validator set, each watcher submits its observation and escrow releases only in the committed block where native voting power crosses quorum. A standalone bridge-watch process uses a throwaway diagnostic ledger and is not this production path. The contract’s fixed EVM attestor committee is separate from these dynamic native validators.',
       },
       { name: 'watch.rpc_url', def: '""', note: 'Ethereum JSON-RPC endpoint for the watcher.' },
       {
         name: 'attestor_keystore',
         def: '""',
-        note: 'Path to this validator\'s encrypted secp256k1 attestor key, generated by `matrix bridge attestor-new`. Empty means this node cannot attest: it still applies every lock and unlock, it just signs no mint authorizations. It is a KEYSTORE rather than a hex field because the key is unilateral authority to mint wrapped tokens against escrow - the same scrypt-and-AES-GCM format a wallet key gets. The passphrase is read from MATRIX_ATTESTOR_PASSPHRASE and is deliberately never a config field: a secret in the file is a secret in every backup of the file. A configured key that will not unlock STOPS the node, because a validator that looks like it is attesting and is not means mints silently stop reaching quorum with nothing pointing at the node responsible. The printed ADDRESS is what goes in the contract\'s registered attestor set.',
+        note: 'Path to a fixed deployment attestor’s encrypted secp256k1 key, generated by `matrix bridge attestor-new`. The address must be one of the immutable WrappedMatrix attestors chosen when that contract was deployed. This EVM committee does not follow bonded-open validator joins or exits automatically; only operators assigned to the fixed committee configure a key. The passphrase comes from MATRIX_ATTESTOR_PASSPHRASE and is never stored in YAML.',
       },
       {
         name: 'watch.confirmations',
@@ -385,12 +431,35 @@ export default function ConfigurationPage() {
                     </p>
                   </div>
 
-                  <h2 className='mb-4 mt-8 text-3xl font-bold text-white'>The whole file</h2>
-                  <CodeSample label='config.yaml' code={FULL} />
+                  <h2 className='mb-4 mt-8 text-3xl font-bold text-white'>The generated secure baseline</h2>
+                  <p className='mb-4 text-gray-300'>
+                    <code className='text-white'>matrixd -init</code> writes a safe starting point: ACLs stay on,
+                    browser access is limited to local development origins, public reads and signed writes stay off,
+                    no maintainer account is invented, provider emissions are zero, and the bridge is disabled. It is
+                    a baseline to review, not a claim that a production launch profile has been installed.
+                  </p>
+                  <CodeSample label='config.yaml (matrixd -init)' code={FULL} />
                   <p className='mt-4 text-gray-300'>
                     A missing section takes its defaults, so this is also a valid config:
                   </p>
                   <CodeSample className='mt-4' label='config.yaml (minimal)' code={MINIMAL} />
+
+                  <h2 className='mb-4 mt-12 text-3xl font-bold text-white'>Explicit public Base overlay</h2>
+                  <p className='mb-4 text-gray-300'>
+                    A public deployment must opt in deliberately and identically on every node. This example keeps
+                    bonded-open membership, a positive stake target, the 100-basis-point protocol fee, a real
+                    64-hex maintainer account with a 5000-basis-point share of that fee, and zero provider emissions.
+                    Replace every example value and verify the WrappedMatrix deployment before use.
+                  </p>
+                  <CodeSample label='config.yaml (public overlay)' code={PUBLIC_BASE_OVERLAY} />
+                  <p className='mt-4 text-gray-300'>
+                    The web origin and node CORS origin are a pair: list the exact HTTPS site origin on every endpoint,
+                    never <code className='text-white'>*</code>. CORS only decides which browser origin may call the
+                    endpoint. <code className='text-white'>public_reads: true</code> opens credential-free read methods,
+                    while <code className='text-white'>signed_writes: true</code> opens only writes carrying the
+                    client&apos;s valid signature. Neither setting exposes admin methods, funding, provider registration,
+                    private keys, or an unsigned spending path.
+                  </p>
 
                   {sections.map((section) => (
                     <section key={section.title}>

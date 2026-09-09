@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import * as canonical from '@matrix-os/protocol';
 import {
+  ERC20PerNativeUnit,
+  MinBridgeLockAmount,
+  NativeUnit,
   bridgeLockRecipient,
+  deriveBridgeLockId,
+  ethereumAccountId,
   paymentSigningBytes,
   runAuthorizationSigningBytes,
+  senderAccountId,
+  validateBridgeLockAmount,
+  validateLockAttestations,
   type ChatMessage,
   type ChatRole,
 } from './index';
@@ -257,5 +265,58 @@ describe('bridgeLockRecipient against the canonical implementation', () => {
       expect(() => bridgeLockRecipient(bad)).toThrow();
       expect(() => canonical.bridgeLockRecipient(bad)).toThrow();
     }
+  });
+});
+
+
+
+describe('bridge protocol mirror matches the canonical package', () => {
+  it('keeps monetary constants and minimum validation identical', () => {
+    expect(NativeUnit).toBe(canonical.NativeUnit);
+    expect(ERC20PerNativeUnit).toBe(canonical.ERC20PerNativeUnit);
+    expect(MinBridgeLockAmount).toBe(canonical.MinBridgeLockAmount);
+    expect(validateBridgeLockAmount(MinBridgeLockAmount)).toBe(
+      canonical.validateBridgeLockAmount(canonical.MinBridgeLockAmount),
+    );
+    expect(() => validateBridgeLockAmount(MinBridgeLockAmount - 1n)).toThrow();
+    expect(() => canonical.validateBridgeLockAmount(canonical.MinBridgeLockAmount - 1n)).toThrow();
+  });
+
+  it('keeps Ethereum account ids and lock derivation identical over varied fields', async () => {
+    const next = rng(0xb45310c);
+    for (let i = 0; i < 100; i++) {
+      const recipient = `0x${Array.from(pickBytes(next, 20), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('')}`;
+      const senderAddress = `0x${Array.from(pickBytes(next, 20), (byte) =>
+        byte.toString(16).padStart(2, '0'),
+      ).join('')}`;
+      const sender = `${ethereumAccountId(senderAddress)}${i % 3 === 0 ? '/한글' : ''}`;
+      expect(ethereumAccountId(senderAddress)).toBe(canonical.ethereumAccountId(senderAddress));
+      const senderBytes = pickBytes(next, i % 2 === 0 ? 20 : 32);
+      expect(senderAccountId(senderBytes)).toBe(canonical.senderAccountId(senderBytes));
+      const nonce = BigInt(Math.floor(next() * 0x100000000)) << 24n | BigInt(i);
+      const amount = MinBridgeLockAmount + BigInt(i);
+      await expect(deriveBridgeLockId(nonce, sender, recipient, amount)).resolves.toBe(
+        await canonical.deriveBridgeLockId(nonce, sender, recipient, amount),
+      );
+    }
+  });
+
+  it('normalizes and validates attestation sets identically', () => {
+    const lockId = `0x${'ab'.repeat(32)}`;
+    const recipient = `0x${'cd'.repeat(20)}`;
+    const nativeAmount = MinBridgeLockAmount;
+    const attestations = ['11', '22'].map((byte) => ({
+      recipient,
+      erc20Amount: nativeAmount * ERC20PerNativeUnit,
+      lockId,
+      signature: 'ef'.repeat(65),
+      attestor: `0x${byte.repeat(20)}`,
+      nativeAmount,
+    }));
+    expect(validateLockAttestations(attestations)).toEqual(
+      canonical.validateBridgeLockAttestations(attestations),
+    );
   });
 });

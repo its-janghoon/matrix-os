@@ -165,11 +165,6 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 		s.failJob(jobID)
 		return nil, fmt.Errorf("%w: %q", market.ErrJobNotFound, marketJobID)
 	}
-	prov, ok := s.market.GetProvider(provider)
-	if !ok {
-		s.failJob(jobID)
-		return nil, fmt.Errorf("%w: %q", market.ErrProviderNotFound, provider)
-	}
 
 	// Identical clamping to FulfillJob: the charge can never exceed the reserved,
 	// affordability-checked price, whichever path settles it.
@@ -177,7 +172,11 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 	if billableUnits > mjob.Units {
 		billableUnits = mjob.Units
 	}
-	amount := billableUnits * prov.PricePerUnit
+	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
+	if err != nil {
+		s.failJob(jobID)
+		return nil, fmt.Errorf("inference: price job %q from quote %s/%d: %w", jobID, mjob.QuoteID, mjob.QuoteVersion, err)
+	}
 	if amount > mjob.Price {
 		s.failJob(jobID)
 		return nil, fmt.Errorf("inference: computed charge %d exceeds reserved price %d for job %q",
