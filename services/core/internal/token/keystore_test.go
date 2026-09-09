@@ -104,18 +104,17 @@ func TestAMnemonicRoundTripsToTheSameAccount(t *testing.T) {
 // it a wrong word derives a different, empty account and the user concludes
 // their funds are gone.
 func TestTheChecksumCatchesAMistypedWord(t *testing.T) {
-	phrase, err := NewMnemonic()
-	if err != nil {
-		t.Fatalf("NewMnemonic: %v", err)
+	const valid = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about"
+	if err := ValidateMnemonic(valid); err != nil {
+		t.Fatalf("known BIP-39 vector is invalid: %v", err)
 	}
-	words := strings.Fields(phrase)
-	// Swap the first word for another real BIP-39 word, so the failure is the
-	// checksum rather than an unknown word.
-	replacement := "zoo"
-	if words[0] == replacement {
-		replacement = "abandon"
-	}
-	words[0] = replacement
+	words := strings.Fields(valid)
+	// Replace the first word with another real BIP-39 word. For this fixed
+	// vector, "zoo" changes the entropy while the final checksum bits remain
+	// unchanged, so the phrase is deterministically invalid. Generating a random
+	// phrase here made the test flaky because any one-word replacement has a
+	// 1-in-16 chance of accidentally producing another valid 12-word checksum.
+	words[0] = "zoo"
 	mistyped := strings.Join(words, " ")
 
 	if err := ValidateMnemonic(mistyped); !errors.Is(err, ErrInvalidMnemonic) {
