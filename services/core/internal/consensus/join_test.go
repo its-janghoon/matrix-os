@@ -123,6 +123,12 @@ func TestAFreshNodeCatchesUpToARunningNetwork(t *testing.T) {
 	waitFor(t, 20*time.Second, "the network to build some history", func() bool {
 		return nodes[0].engine.Height() >= 5
 	})
+	// Freeze the finite input stream before the newcomer starts. Otherwise it can
+	// synchronize from a peer that is one block ahead of node 0 while the loop
+	// below is comparing against node 0, making a correct catch-up look like a
+	// height-out-of-range failure. Consensus drains the already-submitted work,
+	// then all chains have a stable common tip for comparison.
+	stopTraffic()
 
 	// A machine arrives with nothing: no chain, no ledger, no idea of the set
 	// beyond what its config says.
@@ -174,7 +180,6 @@ func TestAFreshNodeCatchesUpToARunningNetwork(t *testing.T) {
 	}
 
 	// And it applied them, so it agrees about money.
-	stopTraffic()
 	waitFor(t, 20*time.Second, "the joining node to agree on a balance", func() bool {
 		want, err := nodes[0].ledger.Balance(payer.AccountID())
 		if err != nil {

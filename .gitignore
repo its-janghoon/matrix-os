@@ -24,6 +24,7 @@ node_modules/
 .pnp.js
 .pnp.*
 package-lock.json
+!contracts/package-lock.json
 
 # ---- Next.js (apps/web) ----
 /.next/
