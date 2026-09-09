@@ -1,5 +1,3 @@
-'use client';
-
 import { Button } from '@/components/Button';
 import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
@@ -18,14 +16,39 @@ import {
   FiShoppingCart,
   FiTerminal,
 } from 'react-icons/fi';
-import { GITHUB_URL } from '@/lib/releases';
+import { GITHUB_URL, REPO, getLatestRelease } from '@/lib/releases';
 
-// The copy-paste quickstart: build the daemon + CLI, boot a local dev node, and
-// run the one-command zero-to-first-job loop. These commands match exactly what
-// the matrix CLI supports (matrixd --init/start, matrix quickstart).
-const QUICKSTART_COMMAND = [
+// Re-checked hourly, like /download, so the hero's version pill follows a newly
+// published release without a redeploy.
+export const revalidate = 3600;
+
+// The copy-paste quickstart. Prebuilt binaries now exist, so this no longer
+// tells a first-time reader to install Go and buf just to see a node run: it
+// downloads the release the hero pill names, checks it against the SHA256SUMS
+// the release workflow generates over the published archives, and boots.
+//
+// The tag is interpolated because the archives are named
+// matrix-os-<tag>-<goos>-<goarch>, so a tagless /latest/download/ URL 404s.
+// `-init` and `quickstart` are the real flags the CLI supports.
+function quickstartCommand(tag: string): string {
+  const base = `https://github.com/${REPO}/releases/download/${tag}`;
+  return [
+    `curl -fsSLO ${base}/SHA256SUMS`,
+    `curl -fsSLO ${base}/matrix-os-${tag}-linux-amd64.tar.gz`,
+    'sha256sum -c SHA256SUMS --ignore-missing',
+    `tar -xzf matrix-os-${tag}-linux-amd64.tar.gz`,
+    './matrixd -init && ./matrixd &',
+    './matrix quickstart',
+  ].join('\n');
+}
+
+// The from-source fallback, for a reader on a platform the release does not
+// cover or working from a checkout.
+const BUILD_FROM_SOURCE_COMMAND = [
+  'make proto',
+  'cd services/core',
   'go build -o matrixd ./cmd/matrixd && go build -o matrix ./cmd/matrix',
-  './matrixd --init && ./matrixd &',
+  './matrixd -init && ./matrixd &',
   './matrix quickstart',
 ].join('\n');
 
@@ -76,7 +99,17 @@ const products = [
   },
 ];
 
-export default function Home() {
+export default async function Home() {
+  // The hero pill used to be the literal string 'v0.1.0-alpha'. It survived the
+  // v0.2.0 release untouched, because nothing connected it to a release - the
+  // landing page advertised a version two tags behind the binaries /download was
+  // serving from the same repository. Read from the same source as /download so
+  // there is one answer to "what version is this".
+  const release = await getLatestRelease();
+  // Prebuilt binaries when a release exists, source build when it does not, so
+  // the block never tells a reader to fetch an archive that was never published.
+  const quickstart = release ? quickstartCommand(release.tag) : BUILD_FROM_SOURCE_COMMAND;
+
   return (
     <>
       <Navigation />
@@ -89,7 +122,7 @@ export default function Home() {
           <div className='relative z-10 mx-auto w-full max-w-7xl px-4 py-24 sm:px-6 lg:px-8'>
             <div className='mx-auto max-w-4xl text-center animate-fade-up'>
               <div className='mb-6 flex flex-wrap items-center justify-center gap-2'>
-                <Eyebrow>v0.1.0-alpha</Eyebrow>
+                {release ? <Eyebrow>{release.tag}</Eyebrow> : null}
                 <a
                   href={GITHUB_URL}
                   className='inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-grayscale-300 transition-colors hover:border-white/20 hover:text-white'
@@ -126,12 +159,21 @@ export default function Home() {
                   <span className='text-[11px] uppercase tracking-[0.12em] text-grayscale-500'>
                     Quickstart: zero to first job
                   </span>
-                  <CopyButton value={QUICKSTART_COMMAND} label='Copy quickstart commands' />
+                  <CopyButton value={quickstart} label='Copy quickstart commands' />
                 </div>
+                {/*
+                  Rendered from the same string the copy button carries. These
+                  were two separate literals and had already drifted: the block
+                  showed `matrixd --init` while the copied text said `-init`,
+                  which is the flag the CLI actually defines.
+                */}
                 <pre className='overflow-x-auto whitespace-pre-wrap break-words text-grayscale-300'>
-                  <code>{`$ go build -o matrixd ./cmd/matrixd && go build -o matrix ./cmd/matrix
-$ ./matrixd --init && ./matrixd &
-$ ./matrix quickstart`}</code>
+                  <code>
+                    {quickstart
+                      .split('\n')
+                      .map((line) => `$ ${line}`)
+                      .join('\n')}
+                  </code>
                 </pre>
               </div>
 

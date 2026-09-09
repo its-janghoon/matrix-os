@@ -22,8 +22,24 @@
   background-size: 44px 44px;
 }
 
+/*
+ * The site is dark-only, so the FOREGROUND has to be declared here alongside
+ * the background.
+ *
+ * It was not, and that is a real defect rather than a tidy-up: with a
+ * background of #060a16 and no `color`, every element that does not inherit an
+ * explicit text colour renders in the browser default BLACK, on near-black.
+ * Most pages happened to be readable only because they each wrapped their own
+ * content in `min-h-screen bg-black text-white`; /download did not, so its
+ * PageHero h1 was black on black and unreadable.
+ *
+ * A second stylesheet, src/app/globals.css, did set `color` on body - and was
+ * never imported by any layout, so it had no effect while looking exactly like
+ * the place this was already handled. It is deleted rather than left as a trap.
+ */
 html,
 body {
+  color: #fff;
   background: #060a16;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;

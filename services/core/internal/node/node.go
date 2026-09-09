@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -1934,10 +1935,19 @@ func (n *Node) GetBridgeWatcher() *bridge.Watcher {
 // one, ready to paste into its `network.bootstrap_peers`.
 //
 // The peer id is the part that cannot be guessed: it is derived from the node's
-// libp2p key, which is generated on first start. A loopback address is printed
-// too, and labelled, because it is right for a second node on the same machine
-// and wrong for one anywhere else - an operator who pastes 127.0.0.1 into a
-// remote node's config gets a peer that silently never connects.
+// libp2p key, which is generated on first start. Addresses that are not
+// reachable from another host are printed too, and LABELLED, because they are
+// right for a second node on the same machine or in the same VPC and wrong for
+// one anywhere else - an operator who pastes 127.0.0.1, or a cloud instance's
+// 172.31.x.x, into a remote node's config gets a peer that silently never
+// connects.
+//
+// The private-range label matters as much as the loopback one and was missing.
+// On EC2, GCE or any NAT'd cloud instance libp2p only knows its INTERNAL
+// address, so this printed a private multiaddr with no warning at all - and the
+// operator most likely to be reading it is one bringing up nodes in separate
+// regions, where every address here is unreachable and the public one is an
+// Elastic IP the node cannot see.
 func (n *Node) printPeerAddresses() {
 	if n.p2pHost == nil {
 		return
@@ -1951,14 +1961,63 @@ func (n *Node) printPeerAddresses() {
 
 	fmt.Printf("P2P peer id: %s\n", id)
 	fmt.Printf("P2P addresses for another node's network.bootstrap_peers:\n")
+	routable := 0
 	for _, addr := range addrs {
 		full := addr.String() + "/p2p/" + id
-		note := ""
-		if strings.Contains(addr.String(), "/127.0.0.1/") || strings.Contains(addr.String(), "/::1/") {
-			note = "   (loopback: only for a node on this same machine)"
+		note := peerAddrReachabilityNote(addr.String())
+		if note == "" {
+			routable++
 		}
 		fmt.Printf("  %s%s\n", full, note)
 	}
+	if routable == 0 {
+		fmt.Printf("  NOTE: none of the addresses above is reachable from another host. " +
+			"If this node is behind NAT (any cloud instance with a separate public or " +
+			"Elastic IP), give other nodes /ip4/<public ip>/tcp/<port>/p2p/" + id +
+			" and allow that port from their addresses.\n")
+	}
+}
+
+// peerAddrReachabilityNote returns a label for a multiaddr that another HOST
+// cannot use, or "" when the address is routable.
+//
+// Split out from printPeerAddresses so the classification is testable: the
+// loopback case was covered only by reading the printed output, and the private
+// case was not covered at all because it was not implemented.
+func peerAddrReachabilityNote(addr string) string {
+	ip := net.ParseIP(multiaddrIP(addr))
+	if ip == nil {
+		// Not an ip4/ip6 address at all - a dns or unix multiaddr, say. Nothing
+		// useful to claim about it, and a wrong label is worse than none.
+		return ""
+	}
+	switch {
+	case ip.IsLoopback():
+		return "   (loopback: only for a node on this same machine)"
+	case ip.IsPrivate():
+		// 10/8, 172.16/12, 192.168/16 and the IPv6 unique-local equivalent.
+		return "   (private: only for a node inside this same network/VPC, NOT another region)"
+	case ip.IsLinkLocalUnicast(), ip.IsLinkLocalMulticast():
+		return "   (link-local: not reachable from another host)"
+	case ip.IsUnspecified():
+		// 0.0.0.0 means "every interface" to a listener and is meaningless as a
+		// dial target, so it must never be pasted into a peer's config.
+		return "   (unspecified: a listen wildcard, not an address another node can dial)"
+	}
+	return ""
+}
+
+// multiaddrIP pulls the ip4/ip6 value out of a multiaddr string, or "" when it
+// carries neither. String handling rather than the multiaddr API keeps this
+// usable on the plain strings the caller already has.
+func multiaddrIP(addr string) string {
+	parts := strings.Split(addr, "/")
+	for i, p := range parts {
+		if (p == "ip4" || p == "ip6") && i+1 < len(parts) {
+			return parts[i+1]
+		}
+	}
+	return ""
 }
 
 // bootstrapRedialInterval is how often a dropped bootstrap peer is re-dialled.

@@ -64,7 +64,7 @@ export default function NotFound() {
 
         {/* Error Content */}
         {showContent && (
-          <div className='mt-8 text-center animate-fade-in'>
+          <div className='mt-8 text-center animate-fade-up'>
             <h1 className='text-4xl font-bold mb-4'>404: Page Not in This Reality</h1>
             <p className='text-gray-400 mb-8'>
               Looks like you&apos;ve ventured into uncharted territory. Our best developers are busy writing
