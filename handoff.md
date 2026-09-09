@@ -696,10 +696,22 @@ a golden vector says nothing about: an empty recipient, a zero-length prevHash,
 a negative timestamp, multi-byte characters, and values above 2^53. Verified to
 fail on an injected one-bit drift.
 
-The EIP-712 digests in `apps/web/src/lib/wallet/eip712.ts` are still a separate
-copy; they depend on ethers, which the dependency-free shared package will not
-take. Moving them needs a keccak implementation in `packages/protocol` or a
-second package that may depend on ethers.
+The EIP-712 material moved too, which closes this item: all four canonical
+payloads now live in `packages/protocol`. This paragraph used to say the EIP-712
+definitions "depend on ethers" and were blocked on a keccak implementation. The
+first half was stale - the definitions themselves were dependency-free, with the
+domain salt precomputed as a transcribed constant precisely to avoid needing
+keccak - but the keccak half was real, so the package grew its own
+(`src/keccak.ts`, Keccak padding, BigInt lanes, deliberately not fast). The salt
+is now COMPUTED as `keccak256("matrix-os-native-l1")` rather than transcribed,
+and `apps/web/src/lib/wallet/eip712.ts` is a re-export with no implementation
+left, exactly like `signing.ts`. The keccak is pinned against the published
+empty/"abc" vectors, viem-generated values on either side of the 136-byte rate
+boundary (135/136/137, where the padding branches), a multi-block input, and the
+ethers-pinned salt itself - which the web app's own test still checks through
+its import, so a drift in the shared package fails in the consumer that signs
+with it. Only agreement with a real Ethereum library proves anything here;
+every constant in this material that was ever written from memory was wrong.
 
 **CI now runs the SDK and the contracts.** It ran neither. The SDK had tests and
 nothing executed them - which matters now that the layout-parity guard lives

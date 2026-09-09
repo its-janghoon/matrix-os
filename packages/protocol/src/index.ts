@@ -202,6 +202,13 @@ export function bridgeLockRecipient(ethAddress: string): string {
  *  a recipient it reads back without re-implementing the check. */
 export const BRIDGE_LOCK_PREFIX = 'bridge/lock/';
 
+// The EIP-712 typed data an eth: account signs (the other two canonical
+// payloads), plus the keccak256 its domain salt is computed with. In their own
+// files because they are Ethereum's encoding, not the chain's byte layouts -
+// but exported from here so a client has one import for everything it signs.
+export * from './eip712';
+export { keccak256 } from './keccak';
+
 
 /** Native base units in one whole MATRIX (9 native decimals). */
 export const NativeUnit = 1_000_000_000n;
