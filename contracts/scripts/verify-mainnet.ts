@@ -69,12 +69,17 @@ function resolveVerifyInput(): VerifyInput {
 }
 
 async function main() {
-  const explorerKey = network.name === "base" || network.name === "baseSepolia"
-    ? process.env.BASESCAN_API_KEY
-    : process.env.ETHERSCAN_API_KEY;
+  // One etherscan.io key covers every chain through the Etherscan V2 API,
+  // including Base and Base Sepolia. This used to demand BASESCAN_API_KEY for
+  // the Base networks, matching a hardhat.config.ts that pinned them to the
+  // per-explorer V1 endpoints; those endpoints now reject every request with
+  // "You are using a deprecated V1 endpoint". BASESCAN_API_KEY is still
+  // accepted as a fallback so an existing .env keeps working.
+  const explorerKey = process.env.ETHERSCAN_API_KEY ?? process.env.BASESCAN_API_KEY;
   if (!explorerKey) {
     throw new Error(
-      `${network.name === "base" || network.name === "baseSepolia" ? "BASESCAN_API_KEY" : "ETHERSCAN_API_KEY"} is not set; cannot verify.`
+      "ETHERSCAN_API_KEY is not set; cannot verify. One etherscan.io key serves " +
+        "every chain via the Etherscan V2 API - get it from https://etherscan.io/myapikey"
     );
   }
 

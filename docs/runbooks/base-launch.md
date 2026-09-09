@@ -41,7 +41,11 @@ Native burn unlocks are a different consensus decision again. Every bridge confi
 
 Record reviewers and the exact git revision. Resolve these inputs before spending gas:
 
-- Base Sepolia and Base RPC URLs and explorer API access.
+- Base Sepolia and Base RPC URLs and explorer API access. Verification uses one
+  etherscan.io API key for every chain through the Etherscan V2 API; the
+  per-explorer V1 endpoints (`api.basescan.org`, `api-sepolia.basescan.org`) are
+  retired and reject every request, and a stale key setup fails at the
+  verification step - after the deploy is already broadcast and paid for.
 - Funded, disposable Base Sepolia deploy/mint/burn accounts and production custody accounts.
 - The ordered attestor addresses, independent custody owners, and threshold.
 - A real 64-lowercase-hex Matrix `maintainer_account`.
@@ -91,7 +95,7 @@ Copy `contracts/.env.example` to the gitignored `contracts/.env` and resolve at 
 
 ```dotenv
 BASE_SEPOLIA_RPC_URL=<credential-bearing Base Sepolia HTTPS RPC URL>
-BASESCAN_API_KEY=<BaseScan API key>
+ETHERSCAN_API_KEY=<one etherscan.io key; covers Base Sepolia via Etherscan V2>
 PRIVATE_KEY=<funded throwaway rehearsal key, 0x-prefixed>
 ATTESTORS=<comma-separated reviewed addresses>
 THRESHOLD=<integer satisfying 3*m > 2*n>
@@ -226,7 +230,7 @@ Set the Base values in the gitignored environment:
 
 ```dotenv
 BASE_RPC_URL=<credential-bearing Base HTTPS RPC URL>
-BASESCAN_API_KEY=<BaseScan API key>
+ETHERSCAN_API_KEY=<one etherscan.io key; covers Base via Etherscan V2>
 PRIVATE_KEY=<funded production deployer key>
 ATTESTORS=<comma-separated production attestor addresses>
 THRESHOLD=<integer satisfying 3*m > 2*n>

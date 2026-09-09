@@ -35,8 +35,27 @@ const FORK_ENABLED =
   MAINNET_FORK_RPC_URL !== undefined && MAINNET_FORK_RPC_URL.trim() !== "";
 
 // Etherscan API key for source verification, from env only.
-const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY;
-const BASESCAN_API_KEY = process.env.BASESCAN_API_KEY;
+//
+// ONE key for every chain, and it must be a single STRING rather than a
+// per-network map. That is not a style preference - hardhat-verify branches on
+// the type: a string means "this is an etherscan.io key" and routes to the
+// Etherscan V2 multichain API, while an object means "these are per-explorer
+// keys" and keeps using each explorer's V1 API. The V1 endpoints this config
+// used to name are now DEAD, and they fail in the least helpful way possible:
+//
+//   {"status":"0","message":"NOTOK","result":"You are using a deprecated V1
+//    endpoint, switch to Etherscan API V2 ..."}
+//
+// which surfaces during `npm run verify:base-sepolia` - after the deploy has
+// already been broadcast and paid for. Verified source is a launch gate in
+// docs/runbooks/base-launch.md, so this failing late blocks the ceremony at its
+// most expensive point.
+//
+// BASESCAN_API_KEY is still read, as a fallback only, so an operator who
+// followed the older .env.example is not stranded; an etherscan.io key is what
+// V2 actually wants.
+const ETHERSCAN_API_KEY =
+  process.env.ETHERSCAN_API_KEY ?? process.env.BASESCAN_API_KEY;
 
 const config: HardhatUserConfig = {
   solidity: {
@@ -107,30 +126,15 @@ const config: HardhatUserConfig = {
     },
   },
   etherscan: {
-    apiKey: {
-      mainnet: ETHERSCAN_API_KEY ?? "",
-      sepolia: ETHERSCAN_API_KEY ?? "",
-      base: BASESCAN_API_KEY ?? "",
-      baseSepolia: BASESCAN_API_KEY ?? "",
-    },
-    customChains: [
-      {
-        network: "base",
-        chainId: 8453,
-        urls: {
-          apiURL: "https://api.basescan.org/api",
-          browserURL: "https://basescan.org",
-        },
-      },
-      {
-        network: "baseSepolia",
-        chainId: 84532,
-        urls: {
-          apiURL: "https://api-sepolia.basescan.org/api",
-          browserURL: "https://sepolia.basescan.org",
-        },
-      },
-    ],
+    // A single string, deliberately. See the ETHERSCAN_API_KEY comment above:
+    // the per-network object form pins hardhat-verify to the V1 APIs, which
+    // Etherscan has retired for Base, Base Sepolia and everything else.
+    apiKey: ETHERSCAN_API_KEY ?? "",
+    // No customChains block. hardhat-verify 2.x already ships base (8453) and
+    // baseSepolia (84532), and the entries this file used to override with
+    // pointed at api.basescan.org and api-sepolia.basescan.org - the exact V1
+    // hosts that now refuse every request. Overriding them re-broke what the
+    // plugin gets right on its own.
   },
 };
 

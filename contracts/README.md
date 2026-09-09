@@ -58,7 +58,7 @@ Copy `.env.example` to the gitignored `.env` and resolve real values outside ver
 | --- | --- |
 | `BASE_SEPOLIA_RPC_URL` | Base Sepolia RPC, chain `84532` |
 | `BASE_RPC_URL` | Base production RPC, chain `8453` |
-| `BASESCAN_API_KEY` | BaseScan source verification |
+| `ETHERSCAN_API_KEY` | Source verification, one etherscan.io key for every chain (Etherscan V2). `BASESCAN_API_KEY` is a legacy fallback; the per-explorer V1 APIs are retired |
 | `PRIVATE_KEY` | Funded deploy/mint broadcaster key; never hardcode or put in shell history |
 | `ATTESTORS` | Comma-separated reviewed secp256k1 addresses |
 | `THRESHOLD` | Strict `>2/3` signature threshold |
