@@ -1971,10 +1971,13 @@ func (n *Node) printPeerAddresses() {
 		fmt.Printf("  %s%s\n", full, note)
 	}
 	if routable == 0 {
-		fmt.Printf("  NOTE: none of the addresses above is reachable from another host. " +
-			"If this node is behind NAT (any cloud instance with a separate public or " +
-			"Elastic IP), give other nodes /ip4/<public ip>/tcp/<port>/p2p/" + id +
-			" and allow that port from their addresses.\n")
+		// A constant format string with an argument, not a concatenation passed
+		// as the format: `go vet` rejects a non-constant format, and rightly -
+		// a peer id containing a percent sign would otherwise be interpreted.
+		fmt.Printf("  NOTE: none of the addresses above is reachable from another host. "+
+			"If this node is behind NAT (any cloud instance with a separate public or "+
+			"Elastic IP), give other nodes /ip4/<public ip>/tcp/<port>/p2p/%s "+
+			"and allow that port from their addresses.\n", id)
 	}
 }
 
