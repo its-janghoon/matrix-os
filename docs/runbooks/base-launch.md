@@ -142,6 +142,16 @@ bridge:
 
 Resolve the exact browser origin (never `*`), maintainer account, peers, validator IDs, and all other placeholders. Start each node with `MATRIX_ATTESTOR_PASSPHRASE` in its environment. Confirm the logged attestor address belongs to the immutable contract set.
 
+#### Reaching each other across hosts
+
+Validators on separate hosts - separate cloud regions especially - need their network identity resolved before the chain will make progress, and the failure mode is silent: libp2p reports only `all dials failed`, and a node with no peers simply never commits.
+
+- **Bind the wildcard, advertise the public address.** Set `network.listen_addr` to `/ip4/0.0.0.0/tcp/9000`. A cloud instance's public or Elastic IP is not bindable (it belongs to the NAT), and its private address is unreachable from another region.
+- **Peer IDs must be collected from a first start.** A peer ID is derived from a key generated on that node's first run, so start all nodes once, read the printed `P2P peer id`, then complete every node's `bootstrap_peers` and restart. `matrixd` labels every address it prints that is loopback, private, link-local, or a wildcard, and says explicitly when none is reachable from another host.
+- **Use a stable address in `bootstrap_peers`.** An Elastic IP or a DNS name survives an instance restart; an ephemeral public IP does not, and it silently staleness every other node's config when it changes.
+- **Open only what is needed, from named sources.** `9000` (libp2p) and the market port `9091` (attestation collection) from the other validators' addresses only; `443` from anywhere for the browser origin, terminated by a TLS proxy in front of the Connect port. Security-group references do not cross a VPC or region boundary, so cross-region deployments list each peer address explicitly.
+- **Never expose the admin port.** Set `admin.addr` to `127.0.0.1:9090`. Its API key can move funds; reach it over an SSH tunnel. The inference and agent ports have no reason to be open either.
+
 Run the watcher on every validator. It reads Base logs and submits native consensus attestations; it is not a user-gas relayer. Every configured `matrixd`, singleton included, releases native escrow only through consensus ordering.
 
 Before any lock, run the browser pre-lock readiness gate against **every** configured validator endpoint. The browser first confirms the wallet chain and deployed bytecode, then reads `threshold`, `attestorCount`, `mintCap`, `totalSupply`, and `ERC20_PER_NATIVE_UNIT` from the exact WrappedMatrix address. It sends one fresh random 32-byte challenge to every endpoint's public, rate-limited `GetBridgeReadiness` RPC and requires the responses to agree on chain, normalized contract, and `100000000000` minimum. Recover each readiness-only signature, reject duplicates, require every recovered address to satisfy on-chain `isAttestor`, and require at least the live contract threshold. A transport failure is tolerable only when the remaining valid registered responders still meet threshold; any semantic or signature mismatch stops the ceremony. Preserve the endpoint list and recovered signer addresses as rehearsal evidence. This gate proves current deployment/key availability; it does not replace source verification or post-lock reconciliation.

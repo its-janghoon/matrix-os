@@ -9,11 +9,36 @@
 #    this overlay automatically and accepts only one -config file.
 
 network:
-  # Replace with this host's reviewed public listen multiaddr.
-  listen_addr: "/ip4/<public-node-ip>/tcp/9000"
+  # BIND address, not the advertised one. On a cloud host (EC2, GCE, any NAT'd
+  # instance) the public/Elastic IP is NOT bindable - it belongs to the NAT, not
+  # to an interface on the machine - so binding to it fails outright and binding
+  # to the private address makes the node unreachable from another region. Use
+  # the wildcard and let peers reach the host through its public IP.
+  #
+  # matrixd prints the multiaddrs another node should be given at startup, and
+  # LABELS every address that is loopback, private, link-local, or a wildcard.
+  # If it reports that none is reachable from another host, that is expected on a
+  # cloud instance: publish /ip4/<this host's public or Elastic IP>/tcp/9000 with
+  # the printed peer id, and allow 9000 from the other nodes' addresses.
+  listen_addr: "/ip4/0.0.0.0/tcp/9000"
   bootstrap_peers:
-    # Full peer multiaddr; never use a fake peer ID in production.
-    - "/dns4/<bootstrap-host>/tcp/9000/p2p/<bootstrap-peer-id>"
+    # One entry per OTHER node, each with that node's own printed peer id. The
+    # peer id cannot be guessed or reused: it is derived from a key generated on
+    # that node's first start, so every node has to be started once before this
+    # list can be completed. Never use a fake peer ID in production.
+    #
+    # A private address here (10.x, 172.16-31.x, 192.168.x) only works inside one
+    # VPC. Across regions or accounts it produces a peer that silently never
+    # connects, and libp2p reports only "all dials failed".
+    - "/ip4/<other-node-public-or-elastic-ip>/tcp/9000/p2p/<its-printed-peer-id>"
+    # Or, when the host has stable DNS, the dns4 form:
+    # - "/dns4/<bootstrap-host>/tcp/9000/p2p/<bootstrap-peer-id>"
+
+admin:
+  # Loopback ONLY. The admin API's key can move funds, so it must not be
+  # reachable from outside the host; nothing in a security group should ever
+  # open 9090. Reach it over an SSH tunnel.
+  addr: "127.0.0.1:9090"
 
 connect:
   # One exact production browser origin. A wildcard is intentionally forbidden.
