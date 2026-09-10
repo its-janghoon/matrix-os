@@ -476,7 +476,7 @@ func TestMarket_ConcurrentSubmitCancelNoDeadlock(t *testing.T) {
 	m := setupMarket(t, 1_000_000, 1, 1_000_000)
 
 	const (
-		workers   = 16
+		workers = 16
 		// Pebble fsyncs every persisted provider/job change. Twenty iterations
 		// per worker still schedules hundreds of overlapping Submit/Cancel pairs
 		// and catches the AB/BA lock inversion, without turning this lock-order

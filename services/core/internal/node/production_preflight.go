@@ -14,7 +14,7 @@ import (
 // ProductionPreflight summarizes consensus-critical launch inputs after they
 // pass static validation. It contains no secrets.
 type ProductionPreflight struct {
-	GenesisSupply    uint64 `json:"genesis_supply"`
+	GenesisSupply   uint64 `json:"genesis_supply"`
 	AllocationCount int    `json:"allocation_count"`
 	ValidatorCount  int    `json:"validator_count"`
 	RoundTimeout    string `json:"round_timeout"`
@@ -82,7 +82,7 @@ func ValidateProductionConfig(configPath string) (ProductionPreflight, error) {
 	}
 
 	return ProductionPreflight{
-		GenesisSupply:    total,
+		GenesisSupply:   total,
 		AllocationCount: len(cfg.Genesis.Allocations),
 		ValidatorCount:  len(cfg.Consensus.Validators),
 		RoundTimeout:    cfg.Consensus.RoundTimeout,
