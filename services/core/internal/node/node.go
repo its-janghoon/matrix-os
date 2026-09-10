@@ -171,6 +171,14 @@ type Config struct {
 		// height and no node's leader schedule diverges from its peers'. It must be
 		// identical on every node; zero means consensus.DefaultEpochLength.
 		EpochLength uint64 `yaml:"epoch_length"`
+		// RoundTimeout is how long a height waits before rotating the leader.
+		// Go duration strings ("3s", "500ms"). Empty uses consensus's 150ms
+		// default, which is a LAN value: Seoul-Virginia-Frankfurt RTTs exceed it,
+		// rounds expire before votes arrive, and height 0 never commits. A
+		// cross-region set needs a few seconds. Every node must agree, because a
+		// node that rotates sooner computes a different leader and refuses the
+		// others' proposals.
+		RoundTimeout string `yaml:"round_timeout"`
 		// ApprovedChanges is this operator's local allow-list of validator-set
 		// changes, as the change strings the engine prints ("add:<hex pubkey>" or
 		// "remove:<account id>"). A change is only committed if a quorum of
@@ -843,6 +851,24 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	}, nil
 }
 
+// parseConsensusRoundTimeout accepts Go duration strings. Empty means the
+// engine's LAN default. Zero or negative is rejected so a typo cannot freeze
+// rounds at 0.
+func parseConsensusRoundTimeout(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("%q: %w", s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("%q: must be positive", s)
+	}
+	return d, nil
+}
+
 // Start initializes and starts all node components
 func (n *Node) Start() error {
 	// Initialize metrics collector
@@ -1104,6 +1130,13 @@ func (n *Node) Start() error {
 		fmt.Printf("Bridge: enabled for WrappedMatrix %s on chain %d; unlocks require a quorum of the %d validators to attest and are applied by consensus.\n",
 			nodeBridge.Params().BridgeContract.Hex(), n.config.Bridge.ChainID, validatorSet.Len())
 	}
+	roundTimeout, err := parseConsensusRoundTimeout(n.config.Consensus.RoundTimeout)
+	if err != nil {
+		return fmt.Errorf("consensus.round_timeout: %w", err)
+	}
+	if roundTimeout > 0 {
+		fmt.Printf("Consensus: round timeout %s (empty would use %s).\n", roundTimeout, consensus.DefaultRoundTimeout)
+	}
 	var burnUnlocker consensus.BurnUnlocker
 	if nodeBridge != nil {
 		burnUnlocker = attestedUnlockTranslator{bridge: nodeBridge}
@@ -1128,6 +1161,7 @@ func (n *Node) Start() error {
 		// diverge from every node that has one.
 		BridgeLocker:         bridgeLockerFor(n.bridge),
 		EpochLength:          n.config.Consensus.EpochLength,
+		RoundTimeout:         roundTimeout,
 		MembershipMode:       consensus.MembershipMode(n.config.Consensus.MembershipMode),
 		ParticipateInOpenSet: n.config.Consensus.ParticipateInOpenSet,
 		ApprovedSetChanges:   n.config.Consensus.ApprovedChanges,
