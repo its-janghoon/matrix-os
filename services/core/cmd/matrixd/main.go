@@ -17,6 +17,7 @@ import (
 func main() {
 	// Parse command line flags
 	initMode := flag.Bool("init", false, "Write a secure baseline config (not a production launch profile)")
+	initIdentities := flag.Bool("init-identities", false, "Create and print stable node identities without applying genesis")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
@@ -37,6 +38,19 @@ func main() {
 		fmt.Println("This is a secure baseline, not a production launch profile; review origins, public access, economics, genesis, peers, and bridge settings before exposure.")
 		fmt.Println("An admin API key was generated under security.api_keys in that file.")
 		fmt.Println("Pass it to the CLI with --api-key, or export MATRIX_ADMIN_API_KEY.")
+		return
+	}
+
+	if *initIdentities {
+		ids, err := node.InitializeIdentities(*configPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize identities: %v", err)
+		}
+		out, err := node.MarshalIdentities(ids)
+		if err != nil {
+			log.Fatalf("Failed to encode identities: %v", err)
+		}
+		fmt.Println(string(out))
 		return
 	}
 
