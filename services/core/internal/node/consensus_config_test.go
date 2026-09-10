@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/kv"
@@ -113,5 +114,23 @@ func TestConsensusNew_ZeroValueIsFeeAndEmissionFree(t *testing.T) {
 		if got := eng.ProviderEmissionAt(h); got != 0 {
 			t.Errorf("zero-value engine ProviderEmissionAt(%d) = %d, want 0 (emission-free by default)", h, got)
 		}
+	}
+}
+
+func TestParseConsensusRoundTimeout(t *testing.T) {
+	t.Parallel()
+	got, err := parseConsensusRoundTimeout("")
+	if err != nil || got != 0 {
+		t.Fatalf("empty: got %v err %v, want 0 nil", got, err)
+	}
+	got, err = parseConsensusRoundTimeout("3s")
+	if err != nil || got != 3*time.Second {
+		t.Fatalf("3s: got %v err %v, want 3s nil", got, err)
+	}
+	if _, err := parseConsensusRoundTimeout("nope"); err == nil {
+		t.Fatal("nope: want error")
+	}
+	if _, err := parseConsensusRoundTimeout("0s"); err == nil {
+		t.Fatal("0s: want error")
 	}
 }

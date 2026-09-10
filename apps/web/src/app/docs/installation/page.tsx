@@ -21,16 +21,27 @@ go build -o matrixd ./cmd/matrixd`;
 
 // Uses the archive naming the release workflow produces, and verifies against
 // the SHA256SUMS file it publishes rather than a hash pasted into a page.
+//
+// OS is NOT `uname -s`. Git Bash on Windows reports MINGW64_NT-10.0-..., which
+// lowercases to a string that is not a GOOS, so the URL 404s and tar looks for
+// a .tar.gz that was never published. Windows releases are .zip; Unix ones are
+// .tar.gz.
 const FETCH_RELEASE = `TAG=$(curl -fsSL https://api.github.com/repos/${REPO}/releases/latest \\
   | grep -m1 '"tag_name"' | cut -d'"' -f4)
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+UNAME=$(uname -s | tr '[:upper:]' '[:lower:]')
 ARCH=$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+case "$UNAME" in
+  linux*)             OS=linux;   EXT=tar.gz ;;
+  darwin*)            OS=darwin;  EXT=tar.gz ;;
+  mingw*|msys*|cygwin*) OS=windows; EXT=zip ;;
+  *) echo "unsupported uname: $UNAME (need linux, darwin, or Git Bash on Windows)"; exit 1 ;;
+esac
 
-curl -fsSLO "https://github.com/${REPO}/releases/download/$TAG/matrix-os-$TAG-$OS-$ARCH.tar.gz"
+curl -fsSLO "https://github.com/${REPO}/releases/download/$TAG/matrix-os-$TAG-$OS-$ARCH.$EXT"
 curl -fsSLO "https://github.com/${REPO}/releases/download/$TAG/SHA256SUMS"
 sha256sum -c SHA256SUMS --ignore-missing
 
-tar xzf "matrix-os-$TAG-$OS-$ARCH.tar.gz"`;
+if [ "$EXT" = zip ]; then unzip -o "matrix-os-$TAG-$OS-$ARCH.zip"; else tar xzf "matrix-os-$TAG-$OS-$ARCH.tar.gz"; fi`;
 
 const VERIFY_INSTALL = `matrix --version     # matrix version v0.1.0   (or "dev")
 matrixd -version     # matrixd v0.1.0          (or "dev")
@@ -139,12 +150,16 @@ export default function MatrixOsInstallation() {
                         Tagged releases publish archives for Linux, macOS and Windows on x64 and
                         arm64, each containing both binaries, alongside a{' '}
                         <code className='text-white'>SHA256SUMS</code> file generated over those
-                        archives. The{' '}
+                        archives. Unix archives are <code className='text-white'>.tar.gz</code>;
+                        Windows is a <code className='text-white'>.zip</code>. The{' '}
                         <a href='/download' className='text-primary-300 hover:text-secondary-300'>
                           download page
                         </a>{' '}
-                        reads the release list directly, so it shows only what exists &mdash; if it
-                        offers nothing, nothing has been published yet.
+                        reads the release list directly, so it shows only what exists - if it
+                        offers nothing, nothing has been published yet. Git Bash users: do not
+                        feed <code className='text-white'>uname -s</code> into the URL. That
+                        string is <code className='text-white'>MINGW64_NT-...</code>, not{' '}
+                        <code className='text-white'>windows</code>.
                       </p>
                       <div className='bg-black rounded-lg p-4'>
                         <div className='flex justify-between items-center mb-3'>
