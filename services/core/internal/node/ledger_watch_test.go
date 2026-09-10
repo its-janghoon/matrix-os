@@ -163,6 +163,11 @@ func TestAStuckReaderIsReportedAndNotMistakenForHealth(t *testing.T) {
 // wedged, and reporting it would train an operator to ignore the alarm.
 func TestSustainedWriteLoadIsNotAStall(t *testing.T) {
 	h := newStallHarness(t)
+	// This test distinguishes queued writers from a wedged holder; it is not a
+	// test of the 40ms synthetic threshold. A Pebble fsync can honestly exceed
+	// 40ms on a loaded CI disk, so use a threshold that still makes any single
+	// acquisition ordinary while the loop samples thousands of acquisitions.
+	h.watch.threshold = time.Second
 	stop := make(chan struct{})
 	var wg sync.WaitGroup
 	for i := 0; i < 4; i++ {

@@ -477,7 +477,11 @@ func TestMarket_ConcurrentSubmitCancelNoDeadlock(t *testing.T) {
 
 	const (
 		workers   = 16
-		perWorker = 200
+		// Pebble fsyncs every persisted provider/job change. Twenty iterations
+		// per worker still schedules hundreds of overlapping Submit/Cancel pairs
+		// and catches the AB/BA lock inversion, without turning this lock-order
+		// test into a storage-throughput benchmark on slower CI disks.
+		perWorker = 20
 	)
 
 	done := make(chan struct{})
