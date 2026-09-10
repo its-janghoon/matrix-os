@@ -18,6 +18,7 @@ func main() {
 	// Parse command line flags
 	initMode := flag.Bool("init", false, "Write a secure baseline config (not a production launch profile)")
 	initIdentities := flag.Bool("init-identities", false, "Create and print stable node identities without applying genesis")
+	preflightProduction := flag.Bool("preflight-production", false, "Validate consensus-critical production config without applying genesis")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
@@ -49,6 +50,19 @@ func main() {
 		out, err := node.MarshalIdentities(ids)
 		if err != nil {
 			log.Fatalf("Failed to encode identities: %v", err)
+		}
+		fmt.Println(string(out))
+		return
+	}
+
+	if *preflightProduction {
+		result, err := node.ValidateProductionConfig(*configPath)
+		if err != nil {
+			log.Fatalf("Production preflight failed: %v", err)
+		}
+		out, err := node.MarshalProductionPreflight(result)
+		if err != nil {
+			log.Fatalf("Failed to encode production preflight: %v", err)
 		}
 		fmt.Println(string(out))
 		return
