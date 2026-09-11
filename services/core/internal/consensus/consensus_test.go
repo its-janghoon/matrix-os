@@ -27,6 +27,9 @@ type testNode struct {
 	evidence *EvidenceStore
 	// sets is this node's validator-set state.
 	sets *SetStore
+	// selfVotes is this node's own-vote record, so a restart test can assert
+	// that the lock and votes survive.
+	selfVotes *SelfVoteStore
 	// peerID is this node's identity on the in-memory bus, which a test needs to
 	// address it in a delivery filter.
 	peerID peer.ID
@@ -69,6 +72,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		chain := NewBlockChain(store)
 		evidence := NewEvidenceStore(store)
 		sets := NewSetStore(store)
+		selfVotes := NewSelfVoteStore(store)
 		// Every test cluster gets a stake ledger, matching how the node wires
 		// one. With no bonds posted, every validator has power 1 and every
 		// quorum is the same headcount it always was, so this changes nothing
@@ -89,11 +93,13 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			RoundTimeout:    60 * time.Millisecond,
 			Evidence:        evidence,
 			Sets:            sets,
+			SelfVotes:       selfVotes,
 			Stake:           stake,
 			Providers:       providers,
 			// Nothing is bonded in most tests, so an admission floor would refuse
 			// every set change. Tests about the floor set one.
-			ZeroMinBond: true,
+			ZeroMinBond:     true,
+			DisableTxGossip: true,
 		}
 		if opts != nil {
 			opts(&cfg)
@@ -106,15 +112,16 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			t.Fatalf("start engine: %v", err)
 		}
 		nodes[i] = &testNode{
-			acct:     accts[i],
-			engine:   eng,
-			ledger:   ledger,
-			chain:    chain,
-			store:    store,
-			peerID:   peerID,
-			bus:      bus,
-			evidence: evidence,
-			sets:     sets,
+			acct:      accts[i],
+			engine:    eng,
+			ledger:    ledger,
+			chain:     chain,
+			store:     store,
+			peerID:    peerID,
+			bus:       bus,
+			evidence:  evidence,
+			sets:      sets,
+			selfVotes: selfVotes,
 		}
 	}
 
@@ -565,4 +572,47 @@ func TestValidatorSetLeaderRotation(t *testing.T) {
 			t.Fatalf("validator ordering not deterministic at %d", i)
 		}
 	}
+}
+
+// TestTxGossipLetsALeaderProposeATransferItDidNotReceive submits a transfer to
+// one node whose proposals never reach the others. The chain can only commit
+// if TopicTx copies the transfer into a leader that can be heard.
+func TestTxGossipLetsALeaderProposeATransferItDidNotReceive(t *testing.T) {
+	nodes, stop := newCluster(t, 3, func(cfg *Config) {
+		cfg.DisableTxGossip = false
+	})
+	defer stop()
+
+	isolated := nodes[2]
+	nodes[0].bus.setDeliveryFilter(func(from, to peer.ID, topic string) bool {
+		if topic == TopicProposal && from == isolated.peerID {
+			return false
+		}
+		return true
+	})
+
+	alice := nodes[0].acct
+	mintAll(t, nodes, alice.AccountID(), 1000)
+	const recipient = "tx-gossip-recipient"
+	tx := signedTransfer(t, alice, recipient, 7, 0)
+	if err := isolated.engine.Submit(tx); err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, nd := range nodes {
+			b, err := nd.ledger.Balance(recipient)
+			if err != nil || b != 7 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("transfer submitted to a silenced proposer never committed; TopicTx did not reach a heard leader")
 }

@@ -61,6 +61,7 @@ func joinNode(
 		RoundTimeout:    40 * time.Millisecond,
 		Evidence:        NewEvidenceStore(store),
 		Sets:            NewSetStore(store),
+		SelfVotes:       NewSelfVoteStore(store),
 		Stake:           NewStakeLedger(ledger, store),
 		Providers:       NewProviderRegistry(store),
 		ZeroMinBond:     true,

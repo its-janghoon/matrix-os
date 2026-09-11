@@ -1150,6 +1150,10 @@ func (n *Node) Start() error {
 		Ledger:       n.market.Ledger(),
 		Self:         consensusAccount,
 		Evidence:     n.evidence,
+		// A validator must be able to prove to itself what it has already
+		// signed at the height it is deciding. Without this a restart mid-height
+		// can sign a conflicting vote and slash its own bond.
+		SelfVotes: consensus.NewSelfVoteStore(n.kvStore),
 		// The validator set is chain state, not a startup constant: Sets persists
 		// the set the committed chain arrived at, so a restart resumes the set the
 		// network agreed on rather than snapping back to whatever this file says.
