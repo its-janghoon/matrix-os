@@ -125,6 +125,12 @@ type Config struct {
 	// Evidence, when non-nil, persists proof of equivocation. Without it the
 	// engine still detects and gossips an offence but forgets it on restart.
 	Evidence *EvidenceStore
+	// SelfVotes, when non-nil, persists the votes this node casts at the height
+	// it has not committed yet, so a restart mid-height cannot sign a second,
+	// conflicting vote for a position it has already taken. A validator running
+	// with bonded stake and without this is one restart away from slashing
+	// itself; see SelfVoteStore.
+	SelfVotes *SelfVoteStore
 	// Sets, when non-nil, persists the validator set the chain has arrived at
 	// and the changes waiting for an epoch boundary. Without it a node forgets
 	// an admitted validator on restart and starts rejecting its votes, so a
@@ -255,6 +261,10 @@ type Config struct {
 	// It is how an operator finds out, in addition to whatever the network does
 	// about it.
 	OnEquivocation func(eq *Equivocation)
+	// DisableTxGossip skips TopicTx publish. In-process tests already submit to
+	// every node; gossiping the same transfers again fills the mem-bus and
+	// drops proposals. Production leaves this false.
+	DisableTxGossip bool
 }
 
 // Engine is a fast, leader-based BFT consensus engine over a fixed validator
@@ -279,6 +289,7 @@ type Engine struct {
 	isValidator atomic.Bool
 
 	proposeInterval      time.Duration
+	disableTxGossip      bool
 	roundTimeout         time.Duration
 	maxBlockTxs          int
 	maxMempoolTxs        int
@@ -286,6 +297,7 @@ type Engine struct {
 	onCommit             CommitObserver
 	evidence             *EvidenceStore
 	onEquivocation       func(eq *Equivocation)
+	selfVotes            *SelfVoteStore
 	sets                 *SetStore
 	epochLength          uint64
 	membershipMode       MembershipMode
@@ -522,6 +534,9 @@ type Engine struct {
 	// Transactions remain in the mempool until committed; periodic re-gossip
 	// makes candidate admission survive a dropped first publication.
 	lastMembershipGossip time.Time
+	// lastTxGossip rate-limits re-announcing ordinary mempool transfers so a
+	// leader that missed the first TopicTx publish can still propose them.
+	lastTxGossip time.Time
 	// seenEquivocations dedups reports when no evidence store is configured, so a
 	// gossiped offence is not re-announced on every echo.
 	seenEquivocations map[string]struct{}
@@ -572,6 +587,12 @@ func New(cfg Config) (*Engine, error) {
 		if cfg.Evidence == nil {
 			return nil, fmt.Errorf("consensus: bonded-open membership requires a persistent evidence store")
 		}
+		// Slashing is automatic here, so the node must be able to prove to itself
+		// what it has already signed. Without this a restart mid-height is a
+		// coin flip on its own bond.
+		if cfg.SelfVotes == nil {
+			return nil, fmt.Errorf("consensus: bonded-open membership requires a persistent own-vote store")
+		}
 	}
 	if cfg.FeeBasisPoints > MaxFeeBasisPoints {
 		return nil, fmt.Errorf("consensus: fee of %d basis points exceeds the %d-basis-point ceiling this build allows",
@@ -586,6 +607,7 @@ func New(cfg Config) (*Engine, error) {
 		ledger:               cfg.Ledger,
 		self:                 cfg.Self,
 		proposeInterval:      orDurationC(cfg.ProposeInterval, DefaultProposeInterval),
+		disableTxGossip:      cfg.DisableTxGossip,
 		roundTimeout:         orDurationC(cfg.RoundTimeout, DefaultRoundTimeout),
 		maxBlockTxs:          orIntC(cfg.MaxBlockTxs, DefaultMaxBlockTxs),
 		maxMempoolTxs:        orIntC(cfg.MaxMempoolTxs, DefaultMaxMempoolTxs),
@@ -593,6 +615,7 @@ func New(cfg Config) (*Engine, error) {
 		onCommit:             cfg.OnCommit,
 		evidence:             cfg.Evidence,
 		onEquivocation:       cfg.OnEquivocation,
+		selfVotes:            cfg.SelfVotes,
 		sets:                 cfg.Sets,
 		ejectEquivocators:    cfg.EjectEquivocators == nil || *cfg.EjectEquivocators,
 		stake:                cfg.Stake,
@@ -654,6 +677,9 @@ func New(cfg Config) (*Engine, error) {
 			return nil, fmt.Errorf("consensus: read stored equivocation evidence: %w", err)
 		}
 		for i := range records {
+			if isPardonedRestartEvidence(&records[i]) {
+				continue
+			}
 			e.approveRemovalLocked(records[i].VoterID)
 		}
 	}
@@ -754,6 +780,16 @@ func (e *Engine) Start(ctx context.Context) error {
 		}
 		e.pendingChanges = pending
 	}
+	// Recover what this node already signed at the height it is resuming, so it
+	// cannot take a second position there.
+	if err := e.resumeSelfVotesLocked(); err != nil {
+		e.mu.Unlock()
+		return err
+	}
+	// The launch-repair pardon must not depend on a transaction that can only
+	// commit once. Applying it on every start is idempotent and keeps a restart
+	// from re-approving the pardoned slash out of stored evidence.
+	e.pardonVirginiaRestartSlashLocked()
 	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 	e.mu.Unlock()
 
@@ -778,6 +814,9 @@ func (e *Engine) Start(ctx context.Context) error {
 			// committed rotation wins, which is what "in force" means.
 			if IsMaintainerRotateRecipient(b.Txs[i].To) {
 				e.replayMaintainerRotate(&b.Txs[i])
+			}
+			if b.Txs[i].To == launchRepairRecipient {
+				e.pardonVirginiaRestartSlashLocked()
 			}
 		}
 		e.mu.Unlock()
@@ -815,7 +854,12 @@ func (e *Engine) Start(ctx context.Context) error {
 		}
 	}
 
-	workers := 7 // six receive loops plus the driver
+	txCh, err := e.transport.Subscribe(ctx, TopicTx)
+	if err != nil {
+		return fmt.Errorf("consensus: subscribe tx: %w", err)
+	}
+
+	workers := 8 // seven receive loops plus the driver
 	if membershipCh != nil {
 		workers++
 	}
@@ -826,6 +870,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	go e.runLoop(ctx, syncRespCh, e.handleSyncResponse)
 	go e.runLoop(ctx, headCh, e.handleHeadAnnounce)
 	go e.runLoop(ctx, evidenceCh, e.handleEvidence)
+	go e.runLoop(ctx, txCh, e.handleTx)
 	if membershipCh != nil {
 		go e.runLoop(ctx, membershipCh, e.handleMembership)
 	}
@@ -856,12 +901,23 @@ func (e *Engine) runLoop(ctx context.Context, ch <-chan transport.Message, handl
 // Submit adds a signed transaction to the mempool so it can be included in a
 // future block. It verifies the signature up front so a badly-signed tx is
 // rejected at the door and never reaches consensus. Duplicate submissions (same
-// sender + nonce + signature) are ignored. Any node may accept submissions; the
-// tx propagates to the leader implicitly because clients submit to nodes and,
-// for a multi-node deployment, tx gossip or client fan-out feeds leaders. In the
-// in-process test bus, transactions are submitted directly to whichever node(s)
-// the test chooses, and the leader among them proposes them.
+// sender + nonce + signature) are ignored. A newly accepted transfer is
+// gossiped on TopicTx so a leader that did not receive the client request can
+// still propose it. In-process tests still submit directly to whichever node(s)
+// they choose.
 func (e *Engine) Submit(tx *token.Transaction) error {
+	return e.submit(tx, !e.disableTxGossip)
+}
+
+func (e *Engine) handleTx(_ context.Context, msg transport.Message) {
+	var tx token.Transaction
+	if err := json.Unmarshal(msg.Payload, &tx); err != nil {
+		return
+	}
+	_ = e.submit(&tx, false)
+}
+
+func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
 	if err := tx.Verify(); err != nil {
 		return err
 	}
@@ -878,10 +934,17 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	key := mempoolKey(tx)
 	e.mu.Lock()
 	publishMembership := false
+	doGossip := false
+	var gossipCopy token.Transaction
 	defer func() {
 		e.mu.Unlock()
 		if publishMembership {
 			e.publishMembership(tx)
+		}
+		if gossip && doGossip {
+			if data, err := json.Marshal(&gossipCopy); err == nil {
+				_ = e.transport.Publish(context.Background(), TopicTx, data)
+			}
 		}
 	}()
 	if e.membershipMode == MembershipBondedOpen {
@@ -948,6 +1011,11 @@ func (e *Engine) Submit(tx *token.Transaction) error {
 	}
 	e.mempool = append(e.mempool, *tx)
 	publishMembership = membershipSlot != ""
+	// Membership already travels on TopicMembership. Putting it on TopicTx as
+	// well doubles traffic and, in tests that submit the same transfer to every
+	// node, fills the in-memory gossip buffers until proposals drop.
+	doGossip = membershipSlot == ""
+	gossipCopy = *tx
 	return nil
 }
 
@@ -1161,6 +1229,7 @@ func (e *Engine) driver(ctx context.Context) {
 			e.maybeTopUpBond()
 			e.maybeMaintainOpenMembership()
 			e.maybeGossipMembership()
+			e.maybeGossipTx()
 			e.maybeOfferProviderChanges()
 			e.tick(ctx)
 		}
@@ -1817,12 +1886,78 @@ func (e *Engine) verifySetChangeLocked(tx *token.Transaction, height uint64) err
 // and persisted equivocation evidence against validatorID. Evidence is recorded
 // only after signature and then-current membership checks, so this remains valid
 // if a voluntary exit happens before the slash transaction commits.
+//
+// Pardoned records do not count. That filter is what makes the launch repair
+// durable: in bonded-open mode a slash is approved from stored evidence rather
+// than from an operator list, so clearing the approval alone would let the same
+// slash be re-offered and re-approved the moment the offender rejoined.
 func (e *Engine) hasStoredEvidenceLocked(validatorID string) bool {
 	if e.evidence == nil {
 		return false
 	}
 	records, err := e.evidence.ByValidator(validatorID)
-	return err == nil && len(records) > 0
+	if err != nil {
+		return false
+	}
+	for i := range records {
+		if !isPardonedRestartEvidence(&records[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// resumeSelfVotesLocked replays this node's persisted votes for the height it
+// is resuming and restores the lock they imply. Callers hold e.mu.
+//
+// Restoring the LOCK is the half that matters most. A node that has
+// precommitted a block must not prevote a different one at this height without
+// a polka at a round at least as high, and the lock is the only thing that
+// enforces it. Coming back unlocked, the node is free to prevote whatever the
+// current leader proposes - which is precisely how a restart turns into two
+// signed prevotes for different blocks at one height and round.
+func (e *Engine) resumeSelfVotesLocked() error {
+	if e.selfVotes == nil || e.selfID == "" {
+		return nil
+	}
+	votes, err := e.selfVotes.AtHeight(e.height)
+	if err != nil {
+		return err
+	}
+	var restored int
+	for i := range votes {
+		v := votes[i]
+		// Only this node's own votes belong in this store, but a vote signed by
+		// some other key could not be justified as ours and is ignored rather
+		// than trusted.
+		if v.VoterID != e.selfID || v.Verify() != nil {
+			continue
+		}
+		e.recordVoteLocked(&v)
+		restored++
+		if v.Type != VoteTypePrecommit || isNilVoteHash(v.BlockHash) {
+			continue
+		}
+		hkey := fmt.Sprintf("%x", v.BlockHash)
+		if !e.locked || v.Round >= e.lockedRound {
+			e.locked = true
+			e.lockedRound = v.Round
+			e.lockedHash = hkey
+		}
+	}
+	if restored > 0 {
+		locked := "no lock"
+		if e.locked {
+			locked = fmt.Sprintf("locked on %s at round %d", e.lockedHash, e.lockedRound)
+		}
+		fmt.Printf("consensus: recovered %d of this node's own votes at height %d (%s)\n",
+			restored, e.height, locked)
+	}
+	// Heights below the resumed one are committed; their votes are settled.
+	if err := e.selfVotes.PruneBelow(e.height); err != nil {
+		fmt.Printf("consensus: %v\n", err)
+	}
+	return nil
 }
 
 // verifyStakeTxLocked decides whether a stake transaction may be in a block at
@@ -1949,6 +2084,8 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyMaintainerRotateLocked(tx)
 	case IsBridgeLockRecipient(tx.To):
 		return e.verifyBridgeLockLocked(tx)
+	case IsLaunchRepairRecipient(tx.To):
+		return e.verifyLaunchRepairLocked(tx)
 	}
 	return nil
 }
@@ -2016,6 +2153,20 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		// lock that can never enter a valid block cannot poison the mempool.
 		if err := verifyBridgeLockAmount(tx.Amount); err != nil {
 			return err
+		}
+		valueAllowed = true
+	case IsLaunchRepairRecipient(tx.To):
+		spec, ok := repairSpec(tx.To)
+		if !ok {
+			return fmt.Errorf("%w: unknown production launch repair", ErrInvalidMessage)
+		}
+		if tx.SenderID() != spec.signer {
+			return fmt.Errorf("%w: production launch repair must be signed by %s",
+				ErrInvalidMessage, spec.signer)
+		}
+		if tx.Amount != spec.amount {
+			return fmt.Errorf("%w: production launch repair amount is %d, got %d",
+				ErrInvalidMessage, spec.amount, tx.Amount)
 		}
 		valueAllowed = true
 	}
@@ -2442,6 +2593,16 @@ func (e *Engine) castVoteMsg(ctx context.Context, typ VoteType, hash []byte, rou
 	}
 	if err := v.Sign(e.self.PrivateKey); err != nil {
 		e.mu.Unlock()
+		return
+	}
+	// Persist before publishing, and abandon the vote if that fails. A vote on
+	// disk that the network never saw costs this node one round; a vote the
+	// network saw that this node cannot remember costs it the whole bond after
+	// the next restart. The lock is still held, so nothing else can take this
+	// position in the meantime.
+	if err := e.selfVotes.Record(v); err != nil {
+		e.mu.Unlock()
+		fmt.Printf("consensus: not voting at height %d round %d: %v\n", v.Height, v.Round, err)
 		return
 	}
 	// Record our own vote first so a single-validator (already quorate) set makes
@@ -3140,6 +3301,17 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = ok
 				continue
 			}
+			if IsLaunchRepairRecipient(tx.To) {
+				ok, err := applyLaunchRepair(ltx, tx)
+				if err != nil {
+					return err
+				}
+				if ok && tx.To == launchRepairRecipient {
+					e.pardonVirginiaRestartSlashLocked()
+				}
+				applied[mempoolKey(tx)] = ok
+				continue
+			}
 			sender := tx.SenderID()
 			bal, err := ltx.Balance(sender)
 			if err != nil {
@@ -3396,6 +3568,13 @@ func (e *Engine) advanceHeight(committed *Block) {
 	e.round = 0
 	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
 	e.proposals = make(map[string]*Block)
+	// The votes for the height just committed are settled by the block itself,
+	// so the own-vote record for it is no longer needed. Discarding it here is
+	// also what keeps a resumed node from replaying a stale lock: only the
+	// uncommitted height is ever recovered.
+	if err := e.selfVotes.PruneBelow(e.height); err != nil {
+		fmt.Printf("consensus: %v\n", err)
+	}
 	// Reset the per-height voting discipline state: a fresh height starts with no
 	// vote cast, no lock, no polka'd value and no vote evidence.
 	e.prevotes = make(map[uint64]map[string]map[string]Vote)
@@ -3848,6 +4027,30 @@ func (e *Engine) maybeGossipMembership() {
 	}
 }
 
+func (e *Engine) maybeGossipTx() {
+	if e.disableTxGossip {
+		return
+	}
+	e.mu.Lock()
+	if !e.lastTxGossip.IsZero() && time.Since(e.lastTxGossip) < membershipGossipInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastTxGossip = time.Now()
+	pending := make([]token.Transaction, 0, 4)
+	for i := range e.mempool {
+		if !isOpenMembershipTransaction(&e.mempool[i]) {
+			pending = append(pending, e.mempool[i])
+		}
+	}
+	e.mu.Unlock()
+	for i := range pending {
+		if data, err := json.Marshal(&pending[i]); err == nil {
+			_ = e.transport.Publish(context.Background(), TopicTx, data)
+		}
+	}
+}
+
 const membershipGossipInterval = 2 * time.Second
 
 // maybeTopUpBond submits a bond for the shortfall between what this node has
@@ -4024,7 +4227,8 @@ func IsReservedRecipient(to string) bool {
 		IsProviderChangeRecipient(to) ||
 		IsBurnUnlockRecipient(to) ||
 		IsMaintainerRotateRecipient(to) ||
-		IsBridgeLockRecipient(to)
+		IsBridgeLockRecipient(to) ||
+		IsLaunchRepairRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value

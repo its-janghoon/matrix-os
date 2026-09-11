@@ -100,6 +100,11 @@ const (
 	// and withdrawal transactions in bonded-open mode. Candidates are not yet
 	// validators, so they need a bounded gossip path to reach current leaders.
 	TopicMembership = "matrix.consensus.v2/membership"
+	// TopicTx carries ordinary signed token.Transaction values so a transfer
+	// submitted to one node reaches whatever validator is leader. Without this,
+	// an idle network produces no empty blocks and a leader that never saw the
+	// mempool cannot commit the transfer.
+	TopicTx = "matrix.consensus.v2/tx"
 )
 
 // Block-sync bounds. A response is capped both by block count and by encoded

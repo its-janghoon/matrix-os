@@ -220,7 +220,14 @@ export async function deployWrappedMatrix(cfg: DeployConfig): Promise<DeployResu
   await wmatrix.waitForDeployment();
 
   const address = await wmatrix.getAddress();
-  const code = await ethers.provider.getCode(address);
+  let code = "0x";
+  for (let i = 0; i < 10; i++) {
+    code = await ethers.provider.getCode(address);
+    if (code !== "0x") {
+      break;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
   if (code === "0x") {
     throw new Error(`deployment at ${address} has no contract code on chain ${net.chainId}`);
   }
