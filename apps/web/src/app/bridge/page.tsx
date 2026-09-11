@@ -23,6 +23,10 @@ const CARD = 'rounded-2xl border border-white/10 bg-white/[0.035] p-6';
 const FIELD = 'w-full rounded-lg border border-white/15 bg-black/60 px-3 py-2 text-sm text-white outline-none focus:border-primary-400';
 const PRIMARY = 'rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40';
 const SECONDARY = 'rounded-lg border border-white/20 px-5 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40';
+const PRODUCTION_VAULT = '0x7A23b7748162e7BcA02b16C4d236E4A9D122038d';
+const PRODUCTION_MINT_TX = '0xaba866d6c810a4343e8467dd22a2a9988581a7193bc5c7bf8bd2d40b56f2b145';
+const PRODUCTION_EVIDENCE =
+  'https://github.com/savagemanage/matrix-os/blob/main/docs/evidence/base-production-2026-09-12.md';
 
 export default function BridgePage() {
   const config = bridgeConfigState.config;
@@ -234,6 +238,22 @@ export default function BridgePage() {
               from the same address. You pay Base gas directly; there is no relayer or gas sponsorship.
             </p>
           </header>
+
+          {config.chain.id === 8453 ? (
+            <section className='rounded-2xl border border-green-500/30 bg-green-500/10 p-6'>
+              <p className='text-sm font-semibold uppercase tracking-wider text-green-300'>Base production</p>
+              <h2 className='mt-2 text-xl font-semibold'>Bridge deployment is live and reconciled</h2>
+              <p className='mt-3 text-sm text-green-100'>
+                The founder vault holds 50,000,000 wMATRIX against exactly 50,000,000 MATRIX in native escrow.
+                New locks require at least 100 MATRIX and the deployed 3-of-3 attestor threshold.
+              </p>
+              <div className='mt-4 space-y-1 text-xs text-green-100'>
+                <p className='break-all'>Founder vesting vault: <a className='font-mono underline' href={`${config.chain.explorerUrl}/address/${PRODUCTION_VAULT}#code`} target='_blank' rel='noopener noreferrer'>{PRODUCTION_VAULT}</a></p>
+                <p className='break-all'>Founder mint: <a className='font-mono underline' href={`${config.chain.explorerUrl}/tx/${PRODUCTION_MINT_TX}`} target='_blank' rel='noopener noreferrer'>{PRODUCTION_MINT_TX}</a></p>
+                <p><a className='underline' href={PRODUCTION_EVIDENCE} target='_blank' rel='noopener noreferrer'>Read the launch evidence and operating policy</a></p>
+              </div>
+            </section>
+          ) : null}
 
           <section className={CARD}>
             <h2 className='font-semibold'>Progress</h2>
