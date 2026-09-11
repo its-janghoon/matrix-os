@@ -18,19 +18,19 @@ import (
 // This operation is valid only for this account, amount, and exact pre-repair
 // balance, and therefore cannot execute twice.
 const (
-	launchRepairRecipient      = "consensus/launch-repair/founder-shortfall-v1"
-	launchRepairFounder        = "945871e41d6116218c5b9dde5f384843396e12949ab2232dc5d6d57a5be2853b"
-	launchRepairAmount  uint64 = 100
-	launchRepairBefore  uint64 = 49_999_999_999_999_900
+	launchRepairRecipient        = "consensus/launch-repair/founder-shortfall-v1"
+	launchRepairFounder          = "945871e41d6116218c5b9dde5f384843396e12949ab2232dc5d6d57a5be2853b"
+	launchRepairAmount    uint64 = 100
+	launchRepairBefore    uint64 = 49_999_999_999_999_900
 
 	// A rolling restart used to extract validator fee dust exposed that vote
 	// history is not restart-persistent. Virginia signed conflicting prevotes
 	// at height 109 and was slashed. Restore only that exact bond from the pool
 	// so bonded-open admission can return the launch set to three.
-	validatorRepairRecipient      = "consensus/launch-repair/virginia-restart-slash-v1"
-	validatorRepairAccount        = "86c3d2ec2a1378a1a647512112002c1a92e9e781e3fbcfb3e9e2c999967431fb"
-	validatorRepairAmount  uint64 = 1_000_000_000_000_000
-	validatorRepairBefore  uint64 = 0
+	validatorRepairRecipient        = "consensus/launch-repair/virginia-restart-slash-v1"
+	validatorRepairAccount          = "86c3d2ec2a1378a1a647512112002c1a92e9e781e3fbcfb3e9e2c999967431fb"
+	validatorRepairAmount    uint64 = 1_000_000_000_000_000
+	validatorRepairBefore    uint64 = 0
 
 	// The single equivocation record this repair pardons, identified by its
 	// exact position so no other offence can match. Every launch node holds a
