@@ -41,12 +41,28 @@ registered anywhere before you use it - chainlist.org is a directory people
 publish to, not an authority that grants ids - so the whole decision is "check it
 is free, then never change it".
 
-Checking is one request per candidate:
+Checking is one request per candidate, against the list's own source file. 404
+means nobody has registered it:
 
 ```sh
-# Anything but 404 means the id is taken; pick another.
-curl -s -o /dev/null -w '%{http_code}\n' https://chainid.network/chain/<candidate>.json
+# 404 = free. 200 = taken, pick another.
+curl -s -o /dev/null -w '%{http_code}\n' \
+  https://raw.githubusercontent.com/ethereum-lists/chains/master/_data/chains/eip155-<candidate>.json
 ```
+
+Confirm any candidate a second way before committing to it, because a check that
+is silently broken looks exactly like a free id:
+
+```sh
+# Prints the name if it is taken, nothing if it is free.
+curl -s https://chainid.network/chains_mini.json \
+  | python3 -c 'import json,sys; print(next((c["name"] for c in json.load(sys.stdin) if c["chainId"]==<candidate>), "free"))'
+```
+
+The registry is a directory, not a gate. It lists ids people have published and
+knows nothing about private or unpublished networks, so a 404 means "unclaimed
+here", not "provably unused anywhere". That is the right bar for picking one, and
+it is the reason to publish yours once it is live.
 
 It goes inside every signature a wallet makes and must be identical on every
 node, and changing it later invalidates every signature already made for the old
@@ -134,32 +150,65 @@ the config, do not restart around it.
 2. **Run `matrix bridge reconcile`** and record its output in the evidence file
    with the Base block `totalSupply()` was read at. An error here stops the
    relaunch until it is understood.
-3. **Write and review the genesis**, on every node, against the frozen figures.
-   Two reviewers, and a diff between the three files that shows only the node's
-   own identity differing.
-4. **Set the watcher's start block to the CURRENT Base head**, not to the
+3. **Give every node a fresh data directory and read its new identity.** This
+   comes BEFORE the genesis file, because the genesis names these ids.
+
+   The hosts do not need reinstalling and nothing needs uninstalling: a relaunch
+   is a new binary, a new config, and an empty store. But the store is also
+   where the validator keypair lives (`consensus/identity/validator_key`, beside
+   the committed chain), so emptying it for the new chain discards the identity
+   with it. A node started on a fresh directory generates a NEW keypair, and a
+   genesis carrying the old ids would then name three accounts that never
+   validate - the network comes up holding nothing, several layers from its
+   cause.
+
+   So move the old directory aside rather than deleting it (it is the archive),
+   point `storage.path` at the new one, and then read each node's identity:
+
+   ```sh
+   # storage.path must already be the NEW directory. Run this against the old
+   # config and the id you get back is the one you are trying to leave behind;
+   # run it with no config at all and the identity is created under ./data and
+   # then abandoned, because the node makes another one against its real path.
+   matrixd -init-identities -config <the node's new config>
+   ```
+
+   It prints a `consensus_id` and a `peer_id`. The three `consensus_id` values
+   are what go in `consensus.validators`, identical on every node; the `peer_id`
+   values are what the other nodes dial. Reading it twice returns the same pair -
+   that is the check that it was stored where the node will look for it.
+
+   Keeping the OLD identity instead is possible but is not the simple path: the
+   key is a record inside a pebble store, so preserving it means preserving the
+   old chain's store, which is the thing being replaced. Identities carry nothing
+   across a relaunch - bonds do not carry over either - so generating three new
+   ones costs nothing.
+4. **Write and review the genesis**, on every node, against the frozen figures
+   and the ids from the step above. Two reviewers, and a diff between the three
+   files that shows only the node's own identity differing.
+5. **Set the watcher's start block to the CURRENT Base head**, not to the
    contract's deployment block. This is where money leaks if it is going to: the
    new chain has no record of past burns, so a watcher rescanning from the
    deployment block would release escrow for burns the old chain already
    released. It is harmless only while nothing has been burned - check
    `released` on the vault and the `Burned` events before relying on that.
-5. **Start the validators** on the new genesis, and confirm they commit past the
+6. **Start the validators** on the new genesis, and confirm they commit past the
    first epoch boundary.
-6. **Re-bond.** Bonds do not carry over: they were balances on a chain that no
+7. **Re-bond.** Bonds do not carry over: they were balances on a chain that no
    longer exists. Each validator funds its account and bonds, either with
    `stake.bond` in config or `matrix stake bond` from a wallet. `matrix stake
    status` shows both numbers.
-7. **Verify the escrow** before announcing anything: run `matrix bridge
+8. **Verify the escrow** before announcing anything: run `matrix bridge
    reconcile` against the NEW chain and check it against the contract again. Also
    check that anyone can: `matrix_getAccountProof` on `bridge/escrow` returns a
    proof against the state root, and that proof is the evidence an exchange or an
    auditor checks without trusting the node that served it. If the figures do not
    line up, stop - the mirror is unbacked and every later step compounds it.
-8. **Point a wallet at it.** Add the network, read a balance, send a transfer to
+9. **Point a wallet at it.** Add the network, read a balance, send a transfer to
    yourself, watch the receipt land. What passes here is what a buyer will see.
    `make devnet` does exactly this against three throwaway nodes, so run it first
    and see it pass there before doing it against the real one.
-9. **Publish the evidence**: genesis hash, chain id, escrow figure and the Base
+10. **Publish the evidence**: genesis hash, chain id, escrow figure and the Base
    block it was read at, the validator set, and the binary's revision and SHA-256
    on each host.
 
