@@ -115,6 +115,28 @@ inference:
       # holding a reservation forever.
       request_timeout: 10m
 
+      # READINESS. The node probes this backend on an interval and SUSPENDS the
+      # provider on the order book when it stops answering, so a crashed model
+      # server stops winning routing decisions instead of taking reservations it
+      # cannot serve. On by default at 30s.
+      #
+      # Point the path at /health on vLLM, SGLang or TGI: that reports on the
+      # inference engine, while the default /v1/models can still answer from a
+      # list built at startup while the engine is wedged. For "local-http" the
+      # default is /api/tags.
+      health_check_path: "/health"
+      health_check_interval: 30s
+      #
+      # A single failed probe suspends, deliberately: one interval off the market
+      # reverses on the next good probe, while staying on it costs a buyer a
+      # reservation, a wait and a failed request. Live reservations are never
+      # cancelled - a probe cannot tell a dead backend from one busy finishing a
+      # real completion.
+      #
+      # Turn it OFF only for a backend pointing at a PAID third-party vendor,
+      # where every probe is a billed request against a rate limit:
+      # health_check: false
+
       # What a buyer puts in "model". Must match the model server's
       # --served-model-name; the order book lowercases these. A backend that
       # advertises none is reachable by provider id only and is never selected by

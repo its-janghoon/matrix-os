@@ -122,6 +122,8 @@ inference:
       base_url: "http://127.0.0.1:8000"
       api_key_env: MATRIX_VLLM_API_KEY
       request_timeout: 10m
+      health_check_path: /health
+      health_check_interval: 30s
       models:
         - <the-name-you-will-advertise>
       capacity: 200000
@@ -132,6 +134,10 @@ inference:
 Two registrations happen from this one block and both are needed. The inference registry answers "what fulfills a job for this provider"; the order book answers "does this provider exist, what does it cost, and does it have capacity to reserve". An inference job is a market job, and registering only the backend fails at submit time with `market: provider not found`.
 
 `request_timeout` deserves a moment. It bounds one upstream request end to end, including the time spent reading a streamed body, and it defaults to 60s. Sixty seconds is a fair cap on somebody else's hosted API and the wrong one on a GPU you own: a local model asked for a few thousand tokens routinely runs longer, and the fixed cap failed the job *after* the GPU had already produced the answer - electricity spent, nothing sold. Size it from the model and the completion length you actually advertise. Do not set it enormous either; the timeout is also what stops a wedged runner from holding a reservation forever.
+
+`health_check_*` is how the listing follows the model server. The node probes the backend on an interval and suspends the provider on the order book when it stops answering, so a crashed runner stops winning routing decisions instead of taking reservations it cannot serve. It is on by default at 30s. Point `health_check_path` at `/health` on vLLM, SGLang or TGI: that reports on the inference engine, while the default `/v1/models` can still answer from a list built at startup even when the engine is wedged. Turn it off with `health_check: false` only when the backend is a paid third-party vendor, where each probe is a billed request against a rate limit.
+
+A failed probe suspends on the first failure, deliberately. The two outcomes are not symmetric: being off the market for one interval costs the provider a few routing decisions and reverses on the next good probe, while staying on it costs a buyer a reservation, a wait, and a failed request. Suspension never cancels work already reserved, because a probe cannot tell a dead backend from one busy finishing a real completion.
 
 `MATRIX_VLLM_API_KEY` has to be in the node process's environment, not only in your shell. Under systemd use `EnvironmentFile=` with a root-owned `0600` file. The key is never carried in config; `api_key_env` names the variable and the backend reads it at construction.
 
@@ -204,7 +210,9 @@ matrix --api-key <key> balance --account <provider-account>
 
 ## Operating notes
 
-**The node does not health-check the model server.** It advertises the capacity you configured whether or not vLLM is up. A crashed model server produces a provider that keeps taking reservations and failing them. Supervise the model server, and make the node's restart depend on it (`After=` plus `Requires=` under systemd) so the two do not drift apart.
+**The health check is not a substitute for supervising the model server.** The probe takes a dead provider off the market; it does not bring the model server back. Supervise it, and make the node's restart depend on it (`After=` plus `Requires=` under systemd) so the two do not drift apart. Watch for the transition lines - `provider "..." SUSPENDED` and `is serving again` - as the signal that the two processes are disagreeing.
+
+**A suspension survives a restart.** It is persisted with the provider, and a config quote refresh on startup preserves it, so a node that restarts while its model server is still down does not put itself back on the market for one interval. The first successful probe clears it.
 
 **Capacity is not throughput.** `capacity` bounds tokens reserved concurrently on the order book; `--max-num-seqs` bounds what the GPU will actually run at once. Setting capacity far above what the GPU can serve converts a queue into timeouts, and a timeout after the work is done is the expensive kind.
 

@@ -38,9 +38,10 @@ func effectiveTimeout(configured time.Duration) time.Duration {
 // a configurable base URL, authenticating with a Bearer API key. The API key is
 // read from the environment and NEVER hardcoded or logged.
 type OpenAIBackend struct {
-	baseURL string
-	apiKey  string
-	client  *http.Client
+	baseURL   string
+	apiKey    string
+	probePath string
+	client    *http.Client
 }
 
 // OpenAIConfig configures an OpenAIBackend.
@@ -61,6 +62,10 @@ type OpenAIConfig struct {
 	// cut the request off after the GPU had already done the work - the provider
 	// paid for the tokens in electricity and the job failed anyway.
 	RequestTimeout time.Duration
+	// ProbePath is the path Probe issues a GET against to decide whether this
+	// upstream is answering. Empty means DefaultOpenAIProbePath. Point it at
+	// /health on a local server that offers one; see DefaultOpenAIProbePath.
+	ProbePath string
 	// HTTPClient overrides the HTTP client (mainly for tests). When nil a client
 	// with RequestTimeout, or defaultHTTPTimeout when that is zero, is used.
 	HTTPClient *http.Client
@@ -90,7 +95,12 @@ func NewOpenAIBackend(cfg OpenAIConfig) (*OpenAIBackend, error) {
 		client = &http.Client{Timeout: effectiveTimeout(cfg.RequestTimeout)}
 	}
 
-	return &OpenAIBackend{baseURL: baseURL, apiKey: apiKey, client: client}, nil
+	return &OpenAIBackend{
+		baseURL:   baseURL,
+		apiKey:    apiKey,
+		probePath: normalizeProbePath(cfg.ProbePath, DefaultOpenAIProbePath),
+		client:    client,
+	}, nil
 }
 
 // Name identifies the backend for advertisement and diagnostics.

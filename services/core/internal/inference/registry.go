@@ -36,6 +36,9 @@ type BackendConfig struct {
 	// provider serving a model on its own GPU can allow a completion that runs
 	// longer than a cap sized for a hosted API.
 	RequestTimeout time.Duration
+	// ProbePath overrides the readiness-probe path for KindOpenAI and
+	// KindLocalHTTP. Empty means the per-kind default.
+	ProbePath string
 	// EchoPrefix optionally sets the EchoBackend prefix for KindEcho.
 	EchoPrefix string
 }
@@ -52,11 +55,13 @@ func NewBackend(cfg BackendConfig) (Backend, error) {
 			BaseURL:        cfg.BaseURL,
 			APIKeyEnv:      cfg.APIKeyEnv,
 			RequestTimeout: cfg.RequestTimeout,
+			ProbePath:      cfg.ProbePath,
 		})
 	case KindLocalHTTP:
 		return NewLocalHTTPBackend(LocalHTTPConfig{
 			BaseURL:        cfg.BaseURL,
 			RequestTimeout: cfg.RequestTimeout,
+			ProbePath:      cfg.ProbePath,
 		})
 	default:
 		return nil, fmt.Errorf("%w: unknown kind %q", ErrBackendNotFound, cfg.Kind)

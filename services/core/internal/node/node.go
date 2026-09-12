@@ -446,6 +446,24 @@ type InferenceBackendConfig struct {
 	// model and the completion length actually advertised, not generously: the
 	// timeout is also what stops a wedged runner from holding a reservation.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// HealthCheck turns the readiness probe on or off for this backend. Unset
+	// means ON: a provider that did not think about it gets the protection
+	// rather than the silent failure it replaced.
+	//
+	// The switch exists because "openai" also points at PAID third-party vendors,
+	// where a probe every interval is a billed request that counts against a rate
+	// limit. On your own model server, leave it on.
+	HealthCheck *bool `yaml:"health_check"`
+	// HealthCheckInterval is how often the backend is probed. Zero means 30s.
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+	// HealthCheckPath overrides the path the probe GETs. Empty means the per-kind
+	// default: /v1/models for "openai", /api/tags for "local-http".
+	//
+	// vLLM, SGLang and TGI expose /health, which reports on the inference engine
+	// rather than only the HTTP layer in front of it, and is the better signal
+	// when the backend is a local server. A wedged engine can still answer
+	// /v1/models from a list it built at startup.
+	HealthCheckPath string `yaml:"health_check_path"`
 	// Models are the model identifiers this backend serves. They are what a
 	// request naming a model is routed on; a backend that declares none can
 	// still be reached by naming its provider ID explicitly.
@@ -618,26 +636,27 @@ func metadataFromHTTPHeader(h http.Header) metadata.MD {
 
 // Node represents a Matrix node instance
 type Node struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	config           *Config
-	p2pHost          *p2p.Host
-	transport        *transport.Transport
-	eventBus         *transport.EventBus
-	kvStore          *kv.Store
-	market           *market.Market
-	tokenChain       *token.Chain
-	treasury         *token.Treasury
-	exchange         *marketexchange.Exchange
-	consensus        *consensus.Engine
-	consensusAccount *token.Account
-	evidence         *consensus.EvidenceStore
-	metrics          *metrics.Collector
-	adminServer      *admin.Server
-	marketServer     *marketapi.Server
-	inferenceSvc     *inference.Service
-	inferenceServer  *inferenceapi.Server
-	agentServer      *agentapi.Server
+	ctx                   context.Context
+	cancel                context.CancelFunc
+	config                *Config
+	p2pHost               *p2p.Host
+	transport             *transport.Transport
+	eventBus              *transport.EventBus
+	kvStore               *kv.Store
+	market                *market.Market
+	tokenChain            *token.Chain
+	treasury              *token.Treasury
+	exchange              *marketexchange.Exchange
+	consensus             *consensus.Engine
+	consensusAccount      *token.Account
+	evidence              *consensus.EvidenceStore
+	metrics               *metrics.Collector
+	adminServer           *admin.Server
+	marketServer          *marketapi.Server
+	inferenceHealthChecks []inferenceHealthCheck
+	inferenceSvc          *inference.Service
+	inferenceServer       *inferenceapi.Server
+	agentServer           *agentapi.Server
 	// unhealthy is why this node cannot serve, or nil when it can.
 	//
 	// It is here rather than inside a subsystem because two surfaces have to
@@ -1475,6 +1494,10 @@ func (n *Node) Start() error {
 	if err := n.registerConfiguredInferenceBackends(inferenceRegistry); err != nil {
 		return err
 	}
+	// Follow each backend's health and keep its order-book listing honest, so a
+	// dead model server stops winning routing decisions instead of taking
+	// reservations it cannot serve.
+	n.startInferenceHealthChecks()
 
 	// A job on the client-signed path holds a reservation while it waits for the
 	// buyer's signature. A buyer who never signs would otherwise hold a
@@ -2286,12 +2309,14 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 
 		// Build and install the backend first: a bad kind or a missing API key
 		// should stop the node before it advertises capacity it cannot serve.
-		if _, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
+		backend, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
 			Kind:           inference.BackendKind(b.Kind),
 			BaseURL:        b.BaseURL,
 			APIKeyEnv:      b.APIKeyEnv,
 			RequestTimeout: b.RequestTimeout,
-		}); err != nil {
+			ProbePath:      b.HealthCheckPath,
+		})
+		if err != nil {
 			return fmt.Errorf("inference.backends[%d] (%s): %w", i, b.ID, err)
 		}
 
@@ -2320,6 +2345,18 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 			}
 		} else if err := n.market.UpdateProviderQuote(b.ID, quote); err != nil {
 			return fmt.Errorf("inference.backends[%d] (%s): refresh market quote: %w", i, b.ID, err)
+		}
+
+		// Collect rather than start: Start launches these once the node context
+		// exists, so registration stays callable without spawning goroutines.
+		if probeable, ok := backend.(inference.ProbeableBackend); ok {
+			if interval, enabled := inferenceHealthCheckInterval(b); enabled {
+				n.inferenceHealthChecks = append(n.inferenceHealthChecks, inferenceHealthCheck{
+					providerID: b.ID,
+					backend:    probeable,
+					interval:   interval,
+				})
+			}
 		}
 
 		stored, _ := n.market.GetProvider(b.ID)

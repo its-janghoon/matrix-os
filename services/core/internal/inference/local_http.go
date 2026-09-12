@@ -26,8 +26,9 @@ import (
 // prompt_eval_count / eval_count are Ollama's prompt/completion token counts,
 // which map directly onto our Usage.
 type LocalHTTPBackend struct {
-	baseURL string
-	client  *http.Client
+	baseURL   string
+	probePath string
+	client    *http.Client
 }
 
 // LocalHTTPConfig configures a LocalHTTPBackend.
@@ -40,6 +41,9 @@ type LocalHTTPConfig struct {
 	// case where the 60s default is too short: it is generating every token
 	// itself, so a long completion outlasts a cap sized for a hosted API.
 	RequestTimeout time.Duration
+	// ProbePath is the path Probe issues a GET against. Empty means
+	// DefaultLocalHTTPProbePath.
+	ProbePath string
 	// HTTPClient overrides the HTTP client (mainly for tests). When nil a client
 	// with RequestTimeout, or defaultHTTPTimeout when that is zero, is used.
 	HTTPClient *http.Client
@@ -55,7 +59,11 @@ func NewLocalHTTPBackend(cfg LocalHTTPConfig) (*LocalHTTPBackend, error) {
 	if client == nil {
 		client = &http.Client{Timeout: effectiveTimeout(cfg.RequestTimeout)}
 	}
-	return &LocalHTTPBackend{baseURL: baseURL, client: client}, nil
+	return &LocalHTTPBackend{
+		baseURL:   baseURL,
+		probePath: normalizeProbePath(cfg.ProbePath, DefaultLocalHTTPProbePath),
+		client:    client,
+	}, nil
 }
 
 // Name identifies the backend for advertisement and diagnostics.
