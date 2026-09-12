@@ -49,6 +49,15 @@ func joinNode(
 	ledger := market.NewLedger(store)
 	chain := NewBlockChain(store)
 	bus := existing[0].bus
+	// A joining node starts from the cluster's genesis, not from nothing. Only
+	// state that originated in the ordered log is replayed by block sync; balances
+	// seeded outside it have to be present before the first block is applied, or
+	// this node's ledger can never match its peers'.
+	if prepare == nil {
+		if err := bus.applySeed(ledger); err != nil {
+			t.Fatalf("apply the cluster seed: %v", err)
+		}
+	}
 	peerID := peer.ID("joiner-" + self.AccountID()[:8])
 
 	cfg := Config{

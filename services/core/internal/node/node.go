@@ -182,6 +182,23 @@ type Config struct {
 		// Zero, the default, means this node accepts no Ethereum-enveloped
 		// transaction at all. It is never read as "any chain".
 		ChainID uint64 `yaml:"chain_id"`
+		// ProtocolUpgrades schedules protocol-version activations by height, as
+		// entries of {height, version}. It must be IDENTICAL on every node: the
+		// version is part of block validity, so two nodes with different schedules
+		// disagree about the same block.
+		//
+		// This is how the next rule change avoids being another coordinated
+		// restart. Add an entry far enough out that every operator can upgrade,
+		// roll the binary over days, and every node switches at the same HEIGHT
+		// rather than at a moment agreed in a chat. A node that has not upgraded
+		// by then stops voting, which is the loud failure.
+		//
+		// Empty means the chain runs the genesis version forever, which is the
+		// right value until a change is actually planned.
+		ProtocolUpgrades []struct {
+			Height  uint64 `yaml:"height"`
+			Version uint32 `yaml:"version"`
+		} `yaml:"protocol_upgrades"`
 		// MembershipMode is "operator-approved" for the legacy allow-list or
 		// "bonded-open" for permissionless, self-signed admission after the
 		// configured minimum bond has committed.
@@ -1249,6 +1266,7 @@ func (n *Node) Start() error {
 		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
 		ProviderEmissionHalfLife: n.config.Consensus.Rewards.HalfLife,
 		ChainID:                  n.config.Consensus.ChainID,
+		ProtocolUpgrades:         protocolUpgradesFromConfig(n.config.Consensus.ProtocolUpgrades),
 		ApprovedProviders:        n.config.Consensus.Rewards.ApprovedProviders,
 		OnEquivocation: func(eq *consensus.Equivocation) {
 			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+
@@ -2423,4 +2441,21 @@ func (n *Node) RegisterInferenceAccount(acct *token.Account) {
 		return
 	}
 	n.signingAccts.Add(acct)
+}
+
+// protocolUpgradesFromConfig converts the YAML shape into the consensus one. The
+// two are separate types so the config file's field names are a config decision
+// rather than a consensus one.
+func protocolUpgradesFromConfig(in []struct {
+	Height  uint64 `yaml:"height"`
+	Version uint32 `yaml:"version"`
+}) []consensus.ProtocolUpgrade {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]consensus.ProtocolUpgrade, 0, len(in))
+	for _, u := range in {
+		out = append(out, consensus.ProtocolUpgrade{Height: u.Height, Version: u.Version})
+	}
+	return out
 }

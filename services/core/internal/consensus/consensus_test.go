@@ -108,9 +108,6 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		if err != nil {
 			t.Fatalf("new engine: %v", err)
 		}
-		if err := eng.Start(ctx); err != nil {
-			t.Fatalf("start engine: %v", err)
-		}
 		nodes[i] = &testNode{
 			acct:      accts[i],
 			engine:    eng,
@@ -122,6 +119,16 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			evidence:  evidence,
 			sets:      sets,
 			selfVotes: selfVotes,
+		}
+	}
+
+	// Started only once EVERY node exists. Starting each engine as it was built
+	// left node 0 proposing and committing while node 3 had no ledger at all, so
+	// any balance seeded afterwards landed on some nodes after a block and on
+	// others before it - a disagreement about state that no later credit undoes.
+	for _, nd := range nodes {
+		if err := nd.engine.Start(ctx); err != nil {
+			t.Fatalf("start engine: %v", err)
 		}
 	}
 
@@ -144,6 +151,13 @@ func mintAll(t *testing.T, nodes []*testNode, account string, amount uint64) {
 		if err := nd.ledger.Credit(account, amount); err != nil {
 			t.Fatalf("credit: %v", err)
 		}
+	}
+	// Recorded on the shared bus so a node joining later starts from the same
+	// balances, which is what every node sharing one genesis file means. Without
+	// it the joiner reaches different balances from the same blocks and the state
+	// root check correctly stops it from voting.
+	if len(nodes) > 0 {
+		nodes[0].bus.recordSeed(account, amount)
 	}
 }
 

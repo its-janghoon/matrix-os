@@ -450,8 +450,20 @@ func stakeCluster(t *testing.T, n int, epoch, minBond uint64, approved ...string
 // any test about voting power.
 func bondAll(t *testing.T, nodes []*testNode, amounts []uint64) {
 	t.Helper()
+	// Two passes, and the order matters. Minting writes each node's ledger
+	// OUTSIDE the ordered log, so while a mint loop is part-way through, the
+	// nodes hold different balances; a block that commits in that window is
+	// applied by all of them on top of ledgers that already disagreed, and the
+	// disagreement is then permanent. Doing every mint before any bond
+	// transaction can produce a block keeps the whole seed invisible to
+	// consensus, which is what one genesis file applied everywhere means.
+	//
+	// Production forbids the live equivalent outright: FundAccount is refused on
+	// a multi-validator node for exactly this reason.
 	for i, nd := range nodes {
 		mintAll(t, nodes, nd.acct.AccountID(), amounts[i])
+	}
+	for i, nd := range nodes {
 		tx, err := nodes[0].engine.SubmitBond(nd.acct, amounts[i], 1)
 		if err != nil {
 			t.Fatalf("SubmitBond for node %d: %v", i, err)
@@ -711,10 +723,13 @@ func TestEquivocationCostsTheOffenderItsBond(t *testing.T) {
 	// third of the stake cannot be slashed by anyone, because a slash needs a
 	// quorum it would control; that is the BFT assumption, not a defect, and a
 	// test that violated it would be testing the impossible.
-	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
-	defer stopTraffic()
+	// Bonded BEFORE traffic starts. Minting is an out-of-band ledger write, and
+	// doing it while blocks are already committing leaves the nodes permanently
+	// disagreeing about balances they were all meant to receive.
 	const bond = 7000
 	bondAll(t, nodes, []uint64{bond, bond, bond, bond, bond})
+	stopTraffic := keepTrafficFlowing(t, nodes, nodes[0].acct)
+	defer stopTraffic()
 	waitFor(t, 20*time.Second, "the set to be weighted by stake", func() bool {
 		for _, nd := range nodes {
 			if nd.engine.vset().TotalPower() != uint64(len(nodes))*bond {

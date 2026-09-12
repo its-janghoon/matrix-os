@@ -23,7 +23,7 @@ import (
 //
 // Unlock evidence belongs to the proposal envelope, not the block, so it is
 // passed to deliverProposal rather than here.
-func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64, prevHash []byte, txs []token.Transaction) *Block {
+func buildSignedBlock(t *testing.T, eng *Engine, leader *token.Account, height, round uint64, prevHash []byte, txs []token.Transaction) *Block {
 	t.Helper()
 	b := &Block{
 		Height:        height,
@@ -33,6 +33,14 @@ func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64,
 		ProposerID:    leader.AccountID(),
 		Timestamp:     time.Now().Unix(),
 	}
+	// The version and state root a validator checks against its own view. A
+	// hand-built block that omits them is refused for that rather than for
+	// whatever the test is actually about, so they are taken from the engine the
+	// block will be offered to.
+	eng.mu.Lock()
+	b.Version = eng.protocolVersionAt(height)
+	b.StateRoot = eng.stateRootLocked()
+	eng.mu.Unlock()
 	if err := b.Sign(leader.PrivateKey); err != nil {
 		t.Fatalf("sign block: %v", err)
 	}
@@ -175,8 +183,8 @@ func TestConsensusNoDivergenceAcrossRotation(t *testing.T) {
 	txB := signedTransfer(t, sender, "recipient-B", 200, 1)
 	leader0 := leaderForRound(t, vs, accts, 0, 0)
 	leader1 := leaderForRound(t, vs, accts, 0, 1)
-	blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
-	blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB})
+	blockA := buildSignedBlock(t, eng, leader0, 0, 0, head, []token.Transaction{*txA})
+	blockB := buildSignedBlock(t, eng, leader1, 0, 1, head, []token.Transaction{*txB})
 	if string(blockA.Hash()) == string(blockB.Hash()) {
 		t.Fatal("test setup: blocks A and B must differ")
 	}
@@ -297,7 +305,7 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 		eng, _, head := newSubject(t)
 
 		txA := signedTransfer(t, subject, "recipient-A", 100, 0)
-		blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
+		blockA := buildSignedBlock(t, eng, leader0, 0, 0, head, []token.Transaction{*txA})
 
 		// Subject prevotes A, then a polka for A makes it precommit and lock.
 		deliverProposal(t, eng, leader0, 0, blockA, nil)
@@ -313,7 +321,7 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 		// network genuinely converged on B; here we synthesise it to prove the
 		// unlock path honors a valid certificate.
 		txB := signedTransfer(t, subject, "recipient-B", 200, 1)
-		blockB := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txB})
+		blockB := buildSignedBlock(t, eng, leader1, 0, 1, head, []token.Transaction{*txB})
 		cert := &PolkaCertificate{
 			Height:    0,
 			Round:     1,
@@ -340,7 +348,7 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 		eng, chain, head := newSubject(t)
 
 		txA := signedTransfer(t, subject, "recipient-A", 100, 0)
-		blockA := buildSignedBlock(t, leader0, 0, 0, head, []token.Transaction{*txA})
+		blockA := buildSignedBlock(t, eng, leader0, 0, 0, head, []token.Transaction{*txA})
 		deliverProposal(t, eng, leader0, 0, blockA, nil)
 		others := otherValidators(accts, subject, 2)
 		deliverVote(t, eng, buildVote(t, others[0], 0, 0, blockA.Hash()))
@@ -351,7 +359,7 @@ func TestConsensusUnlockRequiresValidCertificate(t *testing.T) {
 
 		// A certificate with one vote's signature broken must not unlock anything.
 		txC := signedTransfer(t, subject, "recipient-C", 300, 2)
-		blockC := buildSignedBlock(t, leader1, 0, 1, head, []token.Transaction{*txC})
+		blockC := buildSignedBlock(t, eng, leader1, 0, 1, head, []token.Transaction{*txC})
 		badVote := buildVote(t, accts[2], 0, 1, blockC.Hash())
 		badVote.Signature[0] ^= 0xFF
 		badCert := &PolkaCertificate{

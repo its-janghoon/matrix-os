@@ -243,6 +243,13 @@ type Config struct {
 	// ProviderEmissionHalfLife is how many blocks halve the emission. Zero means
 	// DefaultProviderEmissionHalfLife.
 	ProviderEmissionHalfLife uint64
+	// ProtocolUpgrades schedules protocol-version activations by height. It must
+	// be identical on every node: the version is part of block validity, so two
+	// nodes with different schedules disagree about the same block.
+	//
+	// Empty means the chain runs ProtocolVersionGenesis forever, which is the
+	// right value until a rule change is actually planned.
+	ProtocolUpgrades []ProtocolUpgrade
 	// ChainID identifies this chain inside the signature of every
 	// Ethereum-enveloped transaction, which is what stops one signed for another
 	// network from being replayed here. It must be identical on every node: a
@@ -336,6 +343,12 @@ type Engine struct {
 	// chainID is what an Ethereum-enveloped transaction's signature must commit
 	// to for this node to accept it. See Config.ChainID.
 	chainID uint64
+	// protocolUpgrades is the version schedule, normalized and sorted by height.
+	protocolUpgrades []ProtocolUpgrade
+	// stateRoot caches the ledger digest, and stateRootEpoch the ledger write
+	// epoch it was taken at. See stateRootLocked.
+	stateRoot      []byte
+	stateRootEpoch uint64
 	// now is the wall clock the block-timestamp rules read, injectable so a test
 	// can drive a proposer and a validator whose clocks disagree.
 	now             func() time.Time
@@ -624,6 +637,10 @@ func New(cfg Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	upgrades, err := normalizeUpgrades(cfg.ProtocolUpgrades)
+	if err != nil {
+		return nil, err
+	}
 	participateInOpenSet := true
 	if cfg.ParticipateInOpenSet != nil {
 		participateInOpenSet = *cfg.ParticipateInOpenSet
@@ -692,6 +709,7 @@ func New(cfg Config) (*Engine, error) {
 		membershipMode:       membershipMode,
 		participateInOpenSet: participateInOpenSet,
 		chainID:              cfg.ChainID,
+		protocolUpgrades:     upgrades,
 		now:                  time.Now,
 		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
@@ -1575,6 +1593,8 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		Txs:           txs,
 		ProposerID:    e.selfID,
 		Timestamp:     e.proposalTimestampLocked(),
+		Version:       e.protocolVersionAt(e.height),
+		StateRoot:     e.stateRootLocked(),
 	}
 	if err := b.Sign(e.self.PrivateKey); err != nil {
 		return nil, nil
@@ -1830,6 +1850,14 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		return err
 	}
 	if err := e.verifyBlockTimestampLocked(b); err != nil {
+		return err
+	}
+	// Version before state root: a version mismatch EXPLAINS a state mismatch, so
+	// reporting it first names the cause rather than the symptom.
+	if err := e.verifyBlockVersionLocked(b); err != nil {
+		return err
+	}
+	if err := e.verifyBlockStateRootLocked(b); err != nil {
 		return err
 	}
 	// Every transaction must be individually validly signed. A single bad tx

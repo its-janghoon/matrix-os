@@ -132,6 +132,7 @@ func TestARealProposalPasses(t *testing.T) {
 		ProposerID:    acct.AccountID(),
 		Txs:           txs,
 		Timestamp:     time.Now().Unix(),
+		Version:       ProtocolVersionGenesis,
 	}
 	if err := b.Sign(acct.PrivateKey); err != nil {
 		t.Fatalf("Sign block: %v", err)

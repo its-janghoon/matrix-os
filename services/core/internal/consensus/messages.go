@@ -199,9 +199,37 @@ type Block struct {
 	// it must be within BlockTimestampSkew of the validator's own clock. That
 	// makes it usable for ordering and display without pretending it is a trusted
 	// time source - a proposer can still choose any value inside that window.
-	Timestamp int64  `json:"timestamp"`
+	Timestamp int64 `json:"timestamp"`
+	// Version is the protocol version whose rules this block was built under,
+	// and it is inside the signature.
+	//
+	// It exists so the NEXT rule change is a release rather than another
+	// coordinated restart. A node knows which version applies at which height
+	// (see Config.ProtocolUpgrades), so operators can roll a binary out over days
+	// and have every node switch rules at the same height, instead of everyone
+	// stopping and starting together at a moment agreed in a chat. Without the
+	// field there is nowhere to put that agreement, which is why adding it is
+	// worth breaking every block hash exactly once.
+	Version uint32 `json:"version"`
+	// StateRoot commits to the ledger this block was built on top of: the hash of
+	// every balance after everything up to the PARENT has been applied.
+	//
+	// The parent's state and not this block's, because a proposer would otherwise
+	// have to speculatively apply its own block before knowing whether anyone will
+	// accept it. The cost is that a disagreement is caught one block later; the
+	// benefit is that nothing is applied twice.
+	//
+	// This is the field that makes divergence loud. Consensus agrees on the ORDER
+	// of transactions and nothing else - each node applies them itself - so two
+	// nodes running different apply logic produced identical block hashes and
+	// different balances, with nothing to report it. Now a validator whose ledger
+	// disagrees refuses to vote, and says so.
+	StateRoot []byte `json:"state_root,omitempty"`
 	Signature []byte `json:"signature"`
 }
+
+// ProtocolVersionGenesis is the version a chain starts at.
+const ProtocolVersionGenesis uint32 = 1
 
 // BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
 // the validating node's own clock, in either direction.
@@ -240,7 +268,8 @@ type PolkaCertificate struct {
 //	uint64(Height) | uint64(Round) |
 //	uint32(len(PrevBlockHash)) | PrevBlockHash |
 //	uint32(len(ProposerID)) | ProposerID |
-//	int64(Timestamp) |
+//	int64(Timestamp) | uint32(Version) |
+//	uint32(len(StateRoot)) | StateRoot |
 //	uint64(len(Txs)) | for each tx: uint32(len(txSig)) | txSig
 //
 // Each transaction is bound by its own signature bytes, which uniquely commit to
@@ -253,6 +282,8 @@ func (b *Block) signingBytes() []byte {
 	buf = appendLenPrefixed(buf, b.PrevBlockHash)
 	buf = appendLenPrefixed(buf, []byte(b.ProposerID))
 	buf = appendUint64(buf, uint64(b.Timestamp))
+	buf = appendUint64(buf, uint64(b.Version))
+	buf = appendLenPrefixed(buf, b.StateRoot)
 	buf = appendUint64(buf, uint64(len(b.Txs)))
 	for i := range b.Txs {
 		// Bind each tx by its signature; a tx with no signature contributes an

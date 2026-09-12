@@ -2,6 +2,7 @@ package consensus
 
 import (
 	"context"
+	"github.com/ecirlabs/matrix-core/internal/market"
 	"sync"
 
 	"github.com/libp2p/go-libp2p/core/peer"
@@ -24,6 +25,42 @@ type memBus struct {
 	// entirely for a while. Drops are the reason block sync exists, so a test
 	// that cannot drop a message cannot exercise it.
 	deliver func(from, to peer.ID, topic string) bool
+	// seeded records the credits every node in this cluster was given OUTSIDE
+	// the ordered log, which is what a real network's genesis file is.
+	//
+	// It exists because the state root makes out-of-band ledger writes visible:
+	// a node that did not receive the same seed reaches different balances from
+	// the same blocks and correctly refuses to vote. Production forbids the
+	// equivalent - FundAccount is refused on a multi-validator node for exactly
+	// this reason - so a joiner replaying this seed is modelling the rule rather
+	// than working around it.
+	seeded []seedCredit
+}
+
+// seedCredit is one out-of-band credit applied to every node in a cluster.
+type seedCredit struct {
+	account string
+	amount  uint64
+}
+
+// recordSeed notes a credit given to the whole cluster.
+func (b *memBus) recordSeed(account string, amount uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.seeded = append(b.seeded, seedCredit{account: account, amount: amount})
+}
+
+// applySeed replays the cluster's seed into a ledger.
+func (b *memBus) applySeed(ledger *market.Ledger) error {
+	b.mu.Lock()
+	seeds := append([]seedCredit(nil), b.seeded...)
+	b.mu.Unlock()
+	for _, s := range seeds {
+		if err := ledger.Credit(s.account, s.amount); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type memSub struct {

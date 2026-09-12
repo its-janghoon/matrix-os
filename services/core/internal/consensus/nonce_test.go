@@ -150,6 +150,8 @@ func TestAMaliciousLeaderCannotSmuggleTwoSameNonceTransfers(t *testing.T) {
 		ProposerID:    nd.acct.AccountID(),
 		Txs:           []token.Transaction{*first, *second},
 		Timestamp:     time.Now().Unix(),
+		Version:       ProtocolVersionGenesis,
+		StateRoot:     engineStateRoot(t, nd.engine),
 	}
 	if err := b.Sign(nd.acct.PrivateKey); err != nil {
 		t.Fatalf("sign block: %v", err)
