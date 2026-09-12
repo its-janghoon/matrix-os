@@ -2,6 +2,7 @@ import Link from 'next/link';
 
 import { BrandMark } from '@/components/BrandMark';
 import { GITHUB_URL } from '@/lib/releases';
+import { launchFacts } from '@/lib/launch';
 
 const columns: { title: string; links: { label: string; href: string; external?: boolean }[] }[] = [
   {
@@ -9,6 +10,7 @@ const columns: { title: string; links: { label: string; href: string; external?:
     links: [
       { label: 'Compute Marketplace', href: '/products/marketplace' },
       { label: 'MATRIX Token', href: '/products/token' },
+      { label: 'Base Bridge', href: '/bridge' },
       { label: 'Consensus', href: '/products/consensus' },
       { label: 'LLM Inference', href: '/products/inference' },
       { label: 'Matrix Console', href: '/products/console' },
@@ -37,7 +39,6 @@ const columns: { title: string; links: { label: string; href: string; external?:
     ],
   },
 ];
-
 export function Footer() {
   return (
     <footer className='relative border-t border-white/10 bg-black text-grayscale-400'>
@@ -111,6 +112,27 @@ export function Footer() {
           <p>&copy; {new Date().getFullYear()} ECIR Labs. All rights reserved.</p>
           <p>Native-first compute, settled through consensus.</p>
         </div>
+
+        {/* The bridge disclosure belongs wherever the bridge is linked, not only
+            on /bridge: a visitor can reach the wrapped token from any page, and
+            "no peg" is the claim most easily assumed the other way. */}
+        {launchFacts ? (
+          <p className='mt-6 text-xs leading-relaxed text-grayscale-400'>
+            wMATRIX on {launchFacts.config.chain.name} is backed 1:1 by native MATRIX held in
+            consensus escrow, at an exact 1e9 decimal conversion. It has no USD, fiat, or stablecoin
+            peg, and any market price can move freely. You submit every Base transaction and pay its
+            gas yourself; there is no relayer or gas sponsorship. See the{' '}
+            <a
+              className='underline decoration-white/30 hover:text-white'
+              href={launchFacts.evidenceUrl}
+              target='_blank'
+              rel='noopener noreferrer'
+            >
+              published launch evidence
+            </a>{' '}
+            before bridging.
+          </p>
+        ) : null}
       </div>
     </footer>
   );

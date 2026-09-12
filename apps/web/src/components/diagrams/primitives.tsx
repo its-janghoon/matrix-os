@@ -226,11 +226,47 @@ export function Arrow({
         strokeDasharray={dashed ? '5 4' : undefined}
         markerEnd={`url(#arrow-${tone})`}
       />
-      {label ? (
-        <text x={lx} y={ly + labelDy} textAnchor='middle' fill={C.textDim} fontSize={11.5}>
-          {label}
-        </text>
-      ) : null}
+      {label ? <Label x={lx} y={ly + labelDy}>{label}</Label> : null}
+    </g>
+  );
+}
+
+/**
+ * Small text with an opaque plate behind it.
+ *
+ * An arrow label often has to sit where a `Group` boundary or another box edge
+ * already runs, and SVG has no z-index beyond document order, so the label was
+ * being struck through by dashed borders drawn earlier in the tree. Painting the
+ * page background behind the glyphs is the fix that survives a diagram being
+ * rearranged later, rather than nudging each colliding label by hand until it
+ * happens to miss.
+ *
+ * The plate is sized from the string length because SVG cannot measure text
+ * without a layout pass. 5.9px per character at 11.5px Inter is a slight
+ * over-estimate, which is the safe direction: a plate marginally wider than the
+ * glyphs hides the line cleanly, while a narrow one leaves the ends showing.
+ */
+export function Label({
+  x,
+  y,
+  children,
+  anchor = 'middle',
+  fill = C.textDim,
+}: {
+  x: number;
+  y: number;
+  children: string;
+  anchor?: 'start' | 'middle' | 'end';
+  fill?: string;
+}) {
+  const width = children.length * 5.9 + 10;
+  const plateX = anchor === 'middle' ? x - width / 2 : anchor === 'start' ? x - 5 : x - width + 5;
+  return (
+    <g>
+      <rect x={plateX} y={y - 11} width={width} height={15} rx={3} fill={C.panel} />
+      <text x={x} y={y} textAnchor={anchor} fill={fill} fontSize={11.5}>
+        {children}
+      </text>
     </g>
   );
 }

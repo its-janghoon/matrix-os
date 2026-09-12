@@ -6,9 +6,11 @@ import Navigation from '@/components/Navigation';
 import { TokenBridge } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, PageHero, Section } from '@/components/marketing';
 import { bridgeConfigState } from '@/lib/bridge/config';
-import { FiArrowRight, FiBookOpen, FiLayers, FiShoppingCart } from 'react-icons/fi';
+import { addressUrl, launchFacts, shortHex, txUrl } from '@/lib/launch';
+import { FiArrowRight, FiBookOpen, FiExternalLink, FiLayers, FiShoppingCart } from 'react-icons/fi';
 
 export default function TokenPage() {
+  const facts = launchFacts;
   const bridgeConfigured = bridgeConfigState.config !== null;
   return (
     <>
@@ -20,7 +22,7 @@ export default function TokenPage() {
           eyebrowTone='accent'
           title='The native coin you earn and spend for'
           gradient='compute'
-          lead='MATRIX is the native coin of the Matrix L1 consensus chain, and the single source of truth for balances and supply. Every compute job and every LLM inference request settles in native MATRIX through consensus. A bridged wrapped ERC-20 mirror (wMATRIX) lets the same coin be represented on Ethereum for a future exchange listing, backed 1:1 by native MATRIX locked on the L1.'
+          lead='MATRIX is the native coin of the Matrix L1 consensus chain, and the single source of truth for balances and supply. Every compute job and every LLM inference request settles in native MATRIX through consensus. A bridged wrapped ERC-20 mirror (wMATRIX) lets the same coin be represented on Base, backed 1:1 by native MATRIX locked on the L1.'
           actions={
             <>
               <Button href='/download' variant='primary' size='lg'>
@@ -77,12 +79,62 @@ export default function TokenPage() {
             </div>
             <p className='mt-4 text-grayscale-300'>
               wMATRIX is not the settlement token. It is a mirror, minted only against native MATRIX locked in escrow,
-              so it can be represented on Base. {bridgeConfigured ? (
+              so it can be represented on Base.{' '}
+              {facts ? (
+                <strong className='font-semibold text-white'>
+                  The production deployment on {facts.config.chain.name} is live, source-verified, and reconciled 1:1
+                  against native escrow. Verify the contract and its immutable values yourself before signing.
+                </strong>
+              ) : bridgeConfigured ? (
                 <strong className='font-semibold text-white'>This build contains an explicit Base target; configuration alone does not prove the contract is deployed, verified or live. Inspect its chain and address before signing.</strong>
               ) : (
                 <strong className='font-semibold text-white'>This site has no public bridge deployment configured, so no contract address or validator endpoint is assumed and active bridge controls remain unavailable.</strong>
               )}
             </p>
+
+            {facts ? (
+              <dl className='mt-5 grid gap-x-8 gap-y-2 text-xs sm:grid-cols-3'>
+                <div className='flex items-center gap-2'>
+                  <dt className='text-grayscale-500'>WrappedMatrix</dt>
+                  <dd>
+                    <a
+                      className='font-mono text-grayscale-300 underline decoration-white/30 hover:text-white'
+                      href={`${addressUrl(facts.explorerUrl, facts.wrappedMatrixAddress)}#code`}
+                      target='_blank'
+                      rel='noopener noreferrer'
+                    >
+                      {shortHex(facts.wrappedMatrixAddress)}
+                    </a>
+                  </dd>
+                </div>
+                <div className='flex items-center gap-2'>
+                  <dt className='text-grayscale-500'>Founder vault</dt>
+                  <dd>
+                    <a
+                      className='font-mono text-grayscale-300 underline decoration-white/30 hover:text-white'
+                      href={`${addressUrl(facts.explorerUrl, facts.vaultAddress)}#code`}
+                      target='_blank'
+                      rel='noopener noreferrer'
+                    >
+                      {shortHex(facts.vaultAddress)}
+                    </a>
+                  </dd>
+                </div>
+                <div className='flex items-center gap-2'>
+                  <dt className='text-grayscale-500'>Backing mint</dt>
+                  <dd>
+                    <a
+                      className='font-mono text-grayscale-300 underline decoration-white/30 hover:text-white'
+                      href={txUrl(facts.explorerUrl, facts.mintTx)}
+                      target='_blank'
+                      rel='noopener noreferrer'
+                    >
+                      {shortHex(facts.mintTx)}
+                    </a>
+                  </dd>
+                </div>
+              </dl>
+            ) : null}
 
             <TokenBridge />
             <ul className='mt-6 grid gap-3 sm:grid-cols-2'>
@@ -92,8 +144,32 @@ export default function TokenPage() {
               <CheckItem>The user submits Base transactions and pays Base gas from their own wallet; there is no relayer</CheckItem>
               <CheckItem>Backed 1:1 by locked native with an exact 1e9 decimal conversion; this is not a USD, USDC or stablecoin peg</CheckItem>
               <CheckItem>Production mint ceiling: 6% of native maximum supply, while every minted unit still needs collateral</CheckItem>
-              <CheckItem>{bridgeConfigured ? 'A Base target is configured; verify its chain, contract code and endpoints independently before use' : 'No public bridge target is configured; the site does not invent a contract address or validator endpoint'}</CheckItem>
+              <CheckItem>
+                {facts
+                  ? 'The launch record publishes the source revision, verified addresses, raw constructor arguments and reconciliation snapshot'
+                  : bridgeConfigured
+                    ? 'A Base target is configured; verify its chain, contract code and endpoints independently before use'
+                    : 'No public bridge target is configured; the site does not invent a contract address or validator endpoint'}
+              </CheckItem>
             </ul>
+
+            {facts ? (
+              <div className='mt-6 flex flex-wrap gap-3'>
+                <Button href='/bridge' variant='primary' size='sm'>
+                  Open the bridge
+                  <FiArrowRight className='ml-2 h-4 w-4' />
+                </Button>
+                <a
+                  href={facts.evidenceUrl}
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  className='inline-flex items-center justify-center rounded-full border border-white/10 bg-white/[0.06] px-4 py-2 text-sm font-semibold tracking-tight text-white transition-colors hover:border-white/20'
+                >
+                  Launch evidence
+                  <FiExternalLink className='ml-2 h-4 w-4' />
+                </a>
+              </div>
+            ) : null}
           </Card>
         </Section>
 

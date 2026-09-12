@@ -6,15 +6,24 @@ attestor keystores.
 ## Source and validator set
 
 - Consensus source revision:
-  `f9f17ba96c6b42b8d4b94a157bb0872a7f9b6a05`
+  `751673d09885d954062e9be6ef569c80d61e110d`
 - Validator binary SHA-256 on Seoul, Virginia, and Frankfurt:
-  `d902efb8a165c81319c97eaea1c83c1387459f3111981c1ed17d74ae727696e5`
-- Full `services/core/internal/consensus` test suite passed in 70.864 seconds.
-- Full `services/core/internal/node` test suite passed in 10.742 seconds.
+  `8eae436b1d17d36d1e4b963dd3998aa39f9b2efda57610f3f70ce310e73e6353`
+- Full `services/core` test suite passed, including
+  `internal/consensus` in 80.312 seconds and `internal/node` in 13.287
+  seconds. The consensus package was additionally run three consecutive
+  times with no failure to rule out flakiness before deployment.
+- The prior revision of this record was
+  `f9f17ba96c6b42b8d4b94a157bb0872a7f9b6a05` with binary
+  `d902efb8a165c81319c97eaea1c83c1387459f3111981c1ed17d74ae727696e5`.
+  It is superseded because that binary halts at an epoch boundary; see
+  the liveness incident section. Reverting to it is unsafe for a second
+  reason recorded there.
 - The active set became 3 validators at native height 400, with total power
   `3000000000000000` and quorum `2000000000000001`.
 - All three validators resumed the same active set and reported no new
-  equivocation or slash after the Virginia restart recovery.
+  equivocation or slash after the Virginia restart recovery, and again
+  after the height-400 liveness recovery described below.
 
 Native validator IDs:
 
@@ -140,3 +149,93 @@ Consensus policy:
 - Validator target bond: `1000000000000000` native base units.
 - Epoch length: 100 blocks.
 - Equivocator ejection: enabled.
+
+## Public float allocation
+
+A single, consensus-gated transfer of existing native units out of the
+genesis reward pool. It is not a mint: issued supply is unchanged and
+`NativeMaxSupply` is untouched.
+
+- Recipient operation: `consensus/treasury-allocation/public-float-v1`
+- Destination account:
+  `945871e41d6116218c5b9dde5f384843396e12949ab2232dc5d6d57a5be2853b`
+  (the same account used for the founder backing ceremony, so the
+  holding is disclosed rather than split across identities)
+- Amount: `1000000000000000` native base units, equal to 1,000,000
+  MATRIX.
+- Reward pool before: `946999999999999900`
+- Reward pool after: `945999999999999900`
+- Conservation: pool after plus allocation equals pool before, verified
+  independently on all three validators.
+- Single-use guard: the operation requires the reward pool to hold
+  exactly the pre-transfer balance. The pool is monotonically
+  non-increasing, so the precondition can never hold again regardless of
+  what the recipient later does with the funds. Re-verified as refused
+  after the transfer landed.
+- Remaining wrapped mint headroom is unchanged by this: 50,000,000 of
+  the immutable 60,000,000 cap is held by the founder vault, so
+  10,000,000 MATRIX is the maximum that can ever reach Base.
+
+## Consensus liveness incident, height 400
+
+Recorded because it stopped the chain and because the second defect was
+a regression from the fix for an earlier one.
+
+The chain halted at height 400, an exact epoch boundary, and stayed
+there for roughly 13 hours across restarts. No funds were at risk and no
+validator was slashed. Two independent defects:
+
+1. No node would build a block. A leader refused to propose with an
+   empty mempool unless a pending set change or unweighted bond was
+   outstanding, and the epoch boundary clears both in the same critical
+   section that sets the new height. Because the preceding epoch's
+   traffic was validator-set churn rather than user transactions, that
+   flag was the only thing driving block production, so crossing the
+   boundary switched production off with nothing left to switch it back
+   on.
+
+2. Restart replayed rounds the node had already voted in. The
+   persistent own-vote store, added earlier to stop self-slashing across
+   restarts, correctly refuses a second conflicting vote at a position
+   already voted in - but resume reset the round to 0 while the store
+   held records for rounds 0 to N. The node therefore could not vote on
+   any proposal until it burned N rounds again, and each of those rounds
+   timed out into two further nil votes, so the occupied range grew at
+   least as fast as the node walked it. Measured at 1,418 rounds at
+   height 400 with no vote ever cast for a real block.
+
+Diagnosis was confirmed before any change by reading the persisted own
+votes at height 400 out of a copy of the store: 1,418 nil prevotes and
+1,418 nil precommits, and zero votes for any real block.
+
+Fixes: a leader now proposes an empty block once a height has gone
+unproduced for a duration threshold, excluding the case where the node
+holds a quorum of precommits for a body it lacks (that height is
+settled and block sync owns the recovery); and resume now starts past
+the highest recorded round. The threshold is a duration rather than a
+round count because rounds rotate on a short backed-off timeout, so a
+high round is the ordinary signature of a slow network and treating it
+as a stall would produce empty blocks without bound.
+
+Both fixes carry regression tests. The full service test suite passes,
+and the three previously flaky block-sync tests were confirmed stable
+across repeated runs before deployment.
+
+Recovery: rolling restart of all three validators onto the fixed binary.
+The chain resumed from 400 and has committed continuously since. No
+equivocation and no slash occurred during or after the restarts, which
+also re-confirms the earlier self-slash fix. The public float allocation
+above was the transaction pending in the mempool throughout, and it
+committed on recovery.
+
+Do not revert to the prior binary
+`d902efb8a165c81319c97eaea1c83c1387459f3111981c1ed17d74ae727696e5`. It
+cannot help, because the chain was already halted at 400 for 13 hours
+before the current revision was deployed, so the current code did not
+cause the halt and removing it removes nothing that did. Reverting is
+also actively unsafe: it removes the pardon for the Virginia
+restart-induced equivocation, so that stored evidence counts again, a
+slash of Virginia is re-approved from it, and the restored bond of
+`1000000000000000` native base units is taken at the next epoch
+boundary. That would turn a liveness incident into a loss of funds and
+drop the set back to two members.

@@ -1027,6 +1027,120 @@ func TestASetChangeReachesItsEpochBoundaryOnAnIdleChain(t *testing.T) {
 	})
 }
 
+// An epoch boundary must not be able to switch block production off for good.
+//
+// The boundary clears pendingChanges and stakeDirty, which is what
+// mustAdvanceToEpochBoundaryLocked reads. On a chain whose recent history is
+// validator-set churn rather than user traffic, that flag is the ONLY reason
+// blocks are being produced - so entering the boundary stops production with
+// nothing left to restart it, and the height stalls forever with an empty
+// mempool. A production chain stopped dead at an exact epoch boundary this way.
+//
+// The round is what distinguishes the two cases. Round 0 with nothing to say is
+// an idle chain and must stay silent. A height that has already burned a round
+// is a stalled one and needs a block to get out.
+func TestStalledHeightProposesAnEmptyBlockToRecover(t *testing.T) {
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer store.Close()
+
+	self, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	vs, err := NewValidatorSet([]ed25519.PublicKey{self.PublicKey})
+	if err != nil {
+		t.Fatalf("NewValidatorSet: %v", err)
+	}
+	ledger := market.NewLedger(store)
+	eng, err := New(Config{
+		Transport:       newMemBus().endpoint(peer.ID("epoch-stall")),
+		Validators:      vs,
+		Chain:           NewBlockChain(store),
+		Ledger:          ledger,
+		Self:            self,
+		ProposeInterval: time.Hour,
+		RoundTimeout:    time.Hour,
+		Evidence:        NewEvidenceStore(store),
+		Sets:            NewSetStore(store),
+		SelfVotes:       NewSelfVoteStore(store),
+		Stake:           NewStakeLedger(ledger, store),
+		ZeroMinBond:     true,
+		DisableTxGossip: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// Exactly the stalled state: sitting on an epoch boundary, nothing pending,
+	// nothing to weight, empty mempool.
+	eng.mu.Lock()
+	eng.height = eng.epochLength * 4
+	eng.pendingChanges = nil
+	eng.stakeDirty = false
+	eng.stakeNeverWeighted = false
+	eng.mempool = nil
+	eng.precommits = make(map[uint64]map[string]map[string]Vote)
+
+	if eng.mustAdvanceToEpochBoundaryLocked() {
+		eng.mu.Unlock()
+		t.Fatal("test did not reproduce the stall: something is still pending")
+	}
+
+	// Freshly entered: an ordinary height that has simply not committed yet, and
+	// it must stay quiet. A high round number does NOT make it a stall - rounds
+	// rotate on a short timeout and a loaded network runs them up routinely, so
+	// treating that as a stall would mint empty blocks forever.
+	eng.heightEnteredAt = time.Now()
+	eng.round = 12
+	slow, _ := eng.buildProposalLocked()
+
+	// Stuck far longer than any backed-off round timeout can account for.
+	eng.heightEnteredAt = time.Now().Add(-2 * eng.stallRecoveryAfter)
+	stalled, _ := eng.buildProposalLocked()
+	height := eng.height
+	eng.mu.Unlock()
+
+	if slow != nil {
+		t.Fatal("a merely slow height proposed an empty block; that mints blocks forever on any slow network")
+	}
+	if stalled == nil {
+		t.Fatal("a stalled height proposed nothing, so it can never commit and the chain is dead")
+	}
+	if len(stalled.Txs) != 0 {
+		t.Fatalf("recovery block carries %d transactions, want an empty one", len(stalled.Txs))
+	}
+	if stalled.Height != height {
+		t.Fatalf("recovery block height = %d, want %d", stalled.Height, height)
+	}
+
+	// But a node that is only MISSING A BODY must stay quiet and let block sync
+	// work. It holds a quorum of precommits for a block the network already
+	// agreed on, so that height is settled and this node is behind, not stalled.
+	// Proposing a competing empty block would have it vote for its own block
+	// instead of the one that already won.
+	eng.mu.Lock()
+	eng.heightEnteredAt = time.Now().Add(-2 * eng.stallRecoveryAfter)
+	eng.precommits = map[uint64]map[string]map[string]Vote{
+		0: {"deadbeef": {self.AccountID(): Vote{
+			Type: VoteTypePrecommit, Height: eng.height, Round: 0,
+			BlockHash: []byte{0xde, 0xad, 0xbe, 0xef}, VoterID: self.AccountID(),
+		}}},
+	}
+	if !eng.quorumWithoutBodyLocked() {
+		eng.mu.Unlock()
+		t.Fatal("test did not reproduce a quorum without a body")
+	}
+	missingBody, _ := eng.buildProposalLocked()
+	eng.mu.Unlock()
+
+	if missingBody != nil {
+		t.Fatal("a node missing only the body proposed a competing block; it must wait for block sync")
+	}
+}
+
 // --- ejecting a validator caught equivocating ---------------------------
 
 // TestProvenEquivocationEjectsTheOffender is what the evidence store was

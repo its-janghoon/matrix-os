@@ -113,6 +113,38 @@ func (s *SelfVoteStore) AtHeight(height uint64) ([]Vote, error) {
 	return out, nil
 }
 
+// MaxRoundAt returns the highest round this node recorded a vote in at height,
+// and whether it recorded any at all.
+//
+// It exists because a persisted vote OCCUPIES its position permanently. The
+// engine refuses to cast a second, different vote at a position it has already
+// voted in - that refusal is the whole point of this store - so a node that
+// resumes a height at round 0 while holding records for rounds 0..N cannot vote
+// on any proposal until the clock has burned N rounds again. Those rounds each
+// cost a full round timeout, and a round timeout writes two MORE nil votes, so
+// the occupied range grows at least as fast as the node walks it and the height
+// can never commit. A production chain stalled exactly this way: 1418 rounds of
+// nil votes at one height, no vote ever cast for a real block, and every
+// restart resetting the round to 0 to start the walk over.
+//
+// So resume must skip past what is already written rather than replay it.
+func (s *SelfVoteStore) MaxRoundAt(height uint64) (uint64, bool, error) {
+	votes, err := s.AtHeight(height)
+	if err != nil {
+		return 0, false, err
+	}
+	if len(votes) == 0 {
+		return 0, false, nil
+	}
+	var max uint64
+	for i := range votes {
+		if votes[i].Round > max {
+			max = votes[i].Round
+		}
+	}
+	return max, true, nil
+}
+
 // PruneBelow drops the records for heights this node has already committed.
 //
 // A committed height is settled: the chain itself is now the record of what

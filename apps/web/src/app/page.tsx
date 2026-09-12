@@ -1,7 +1,10 @@
 import { Button } from '@/components/Button';
+import { AnimatedTerminal } from '@/components/AnimatedTerminal';
 import { CopyButton } from '@/components/CopyButton';
 import { Footer } from '@/components/Footer';
 import HeroBackdrop from '@/components/HeroBackdrop';
+import { LaunchBanner } from '@/components/LaunchBanner';
+import { LaunchDetails } from '@/components/LaunchDetails';
 import Navigation from '@/components/Navigation';
 import { MarketFlow } from '@/components/diagrams';
 import { Card, CheckItem, Eyebrow, IconBadge, Section } from '@/components/marketing';
@@ -17,6 +20,8 @@ import {
   FiTerminal,
 } from 'react-icons/fi';
 import { GITHUB_URL, REPO, getLatestRelease } from '@/lib/releases';
+import { launchFacts } from '@/lib/launch';
+import Link from 'next/link';
 
 // Re-checked hourly, like /download, so the hero's version pill follows a newly
 // published release without a redeploy.
@@ -123,6 +128,18 @@ export default async function Home() {
             <div className='mx-auto max-w-4xl text-center animate-fade-up'>
               <div className='mb-6 flex flex-wrap items-center justify-center gap-2'>
                 {release ? <Eyebrow>{release.tag}</Eyebrow> : null}
+                {launchFacts ? (
+                  <Link
+                    href='/bridge'
+                    className='inline-flex items-center gap-1.5 rounded-full border border-secondary/25 bg-secondary/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.12em] text-secondary-300 transition-colors hover:border-secondary/50'
+                  >
+                    <span className='relative flex h-1.5 w-1.5'>
+                      <span className='absolute inline-flex h-full w-full animate-ping rounded-full bg-secondary-300 opacity-75' />
+                      <span className='relative inline-flex h-1.5 w-1.5 rounded-full bg-secondary-300' />
+                    </span>
+                    wMATRIX live on Base
+                  </Link>
+                ) : null}
                 <a
                   href={GITHUB_URL}
                   className='inline-flex items-center gap-1.5 rounded-full border border-white/10 bg-white/[0.04] px-3 py-1 text-xs font-medium text-grayscale-300 transition-colors hover:border-white/20 hover:text-white'
@@ -153,29 +170,26 @@ export default async function Home() {
                 </Button>
               </div>
 
-              {/* Copy-paste quickstart: zero to a funded account and a first job. */}
-              <div className='mx-auto mt-10 max-w-2xl rounded-2xl border border-white/10 bg-black/60 p-4 text-left font-mono text-sm shadow-lg backdrop-blur-sm'>
-                <div className='mb-3 flex items-center justify-between'>
-                  <span className='text-[11px] uppercase tracking-[0.12em] text-grayscale-500'>
-                    Quickstart: zero to first job
-                  </span>
-                  <CopyButton value={quickstart} label='Copy quickstart commands' />
-                </div>
-                {/*
-                  Rendered from the same string the copy button carries. These
-                  were two separate literals and had already drifted: the block
-                  showed `matrixd --init` while the copied text said `-init`,
-                  which is the flag the CLI actually defines.
-                */}
-                <pre className='overflow-x-auto whitespace-pre-wrap break-words text-grayscale-300'>
-                  <code>
-                    {quickstart
-                      .split('\n')
-                      .map((line) => `$ ${line}`)
-                      .join('\n')}
-                  </code>
-                </pre>
-              </div>
+              {/*
+                Copy-paste quickstart: zero to a funded account and a first job.
+                The lines are derived from the same string the copy button
+                carries, so the animation cannot drift from what a reader pastes.
+                These were two separate literals once and had already diverged:
+                the block showed `matrixd --init` while the copied text said
+                `-init`, which is the flag the CLI actually defines.
+              */}
+              <AnimatedTerminal
+                className='mx-auto mt-10 max-w-2xl text-left'
+                label='Quickstart: zero to first job'
+                lines={quickstart.split('\n').map((command) => ({ command }))}
+                action={<CopyButton value={quickstart} label='Copy quickstart commands' />}
+                // Slower than the default, and with a real beat between lines.
+                // These are six commands with no output between them, so at the
+                // default pace the whole block resolved in under a second and the
+                // typing was over before a reader could register it as typing.
+                charMs={34}
+                lineDelayMs={420}
+              />
 
               {/* Hero stat strip */}
               <div className='mx-auto mt-16 grid max-w-3xl grid-cols-2 gap-4 sm:grid-cols-4'>
@@ -197,6 +211,14 @@ export default async function Home() {
             </div>
           </div>
         </div>
+
+        {/* Launch announcement. Renders only for the published production
+            deployment, so a preview build cannot announce a mainnet launch. */}
+        {launchFacts ? (
+          <div className='mx-auto max-w-7xl px-4 sm:px-6 lg:px-8'>
+            <LaunchBanner className='-mt-8 sm:-mt-12' />
+          </div>
+        ) : null}
 
         {/* Principles band */}
         <Section className='bg-section-glow'>
@@ -262,6 +284,10 @@ export default async function Home() {
             ))}
           </div>
         </Section>
+
+        {/* Verifiable launch detail. Placed after the product overview so the
+            proof follows the claim rather than opening with numbers. */}
+        <LaunchDetails />
 
         {/* How it works teaser */}
         <Section className='bg-section-glow'>

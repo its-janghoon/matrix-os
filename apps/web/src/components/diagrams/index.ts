@@ -1,4 +1,5 @@
 export { ConsensusRound } from './ConsensusRound';
+export { EscrowBacking } from './EscrowBacking';
 export { InferencePath } from './InferencePath';
 export { JobLifecycle } from './JobLifecycle';
 export { MarketFlow } from './MarketFlow';

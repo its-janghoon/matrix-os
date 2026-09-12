@@ -67,6 +67,19 @@ const (
 	// eventually stop making progress at all; without a backoff it never settles
 	// (see roundTimeoutForLocked).
 	maxRoundTimeoutFactor = 20
+	// stallRecoveryFactor sets how long a height must go unproduced before a
+	// leader proposes an EMPTY block purely to escape, as a multiple of the base
+	// round timeout. It is deliberately well past maxRoundTimeoutFactor, so a
+	// network that is merely slow - every round backing off to the cap and still
+	// committing - never reaches it, and only a height that is genuinely going
+	// nowhere does.
+	//
+	// This exists because an epoch boundary would otherwise be able to stop the
+	// chain permanently: the boundary clears the pending-change and dirty-stake
+	// flags that mustAdvanceToEpochBoundaryLocked reads, and on a chain with no
+	// user traffic those flags were the only reason blocks were being produced.
+	// See heightIsStalledLocked and buildProposalLocked.
+	stallRecoveryFactor = 60
 	// maxFutureStash bounds how many heights ahead a lagging node buffers
 	// proposals/votes for, so a slow node's catch-up buffers cannot grow
 	// unbounded.
@@ -300,6 +313,15 @@ type Engine struct {
 	selfVotes            *SelfVoteStore
 	sets                 *SetStore
 	epochLength          uint64
+	// stallRecoveryAfter is how long a height may go unproduced before a leader
+	// proposes an empty block to escape. Derived from the round timeout so a test
+	// cluster on millisecond timers and a production node on seconds both get a
+	// threshold well past any legitimately slow commit.
+	stallRecoveryAfter time.Duration
+	// heightEnteredAt is when this node entered the height it is now deciding. It
+	// measures the stall; the round number cannot, because rounds rotate on a
+	// short timeout and a high round is the ordinary signature of a slow network.
+	heightEnteredAt      time.Time
 	membershipMode       MembershipMode
 	participateInOpenSet bool
 	approvedChanges      map[string]struct{}
@@ -655,6 +677,10 @@ func New(cfg Config) (*Engine, error) {
 		futureProposals:      make(map[string]*futureBlock),
 		futureVotes:          make(map[uint64]map[string]map[string]Vote),
 	}
+	// Derived from the round timeout so a test cluster on millisecond timers and
+	// a production node on seconds both get a threshold far past any commit that
+	// is merely slow. See stallRecoveryFactor.
+	e.stallRecoveryAfter = time.Duration(stallRecoveryFactor) * e.roundTimeout
 	if membershipMode == MembershipOperatorApproved {
 		for _, c := range cfg.ApprovedSetChanges {
 			spec, err := ParseChangeSpec(c)
@@ -791,6 +817,7 @@ func (e *Engine) Start(ctx context.Context) error {
 	// from re-approving the pardoned slash out of stored evidence.
 	e.pardonVirginiaRestartSlashLocked()
 	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
+	e.heightEnteredAt = time.Now()
 	e.mu.Unlock()
 
 	// Rehydrate the committed-tx dedup set from the persisted chain so a restarted
@@ -1380,6 +1407,30 @@ func (e *Engine) castNilVoteIf(ctx context.Context, should bool, round uint64) {
 // it and release their locks, whereas a fresh value would be refused by every
 // one of them and the round would be wasted. Only when no value has been
 // polka'd is the leader free to batch pending transactions into a new block.
+// heightIsStalledLocked reports whether this height has gone unproduced for so
+// long that the chain needs an empty block to escape, rather than merely being
+// slow or quiet. Callers must hold e.mu.
+//
+// The threshold is a duration and not a round count on purpose. Rounds rotate
+// on a timeout that is itself deliberately short and backed off per round, so a
+// high round number is the normal signature of a loaded network, not of a stuck
+// one. Only elapsed wall-clock time separates "this commit is taking a while"
+// from "nothing is ever going to happen here".
+//
+// The quorumWithoutBodyLocked exception matters as much as the timer. A node
+// holding a quorum of precommits for a block whose body it lacks is not looking
+// at a stalled network at all: that height is settled and this node is simply
+// behind. Block sync is what fixes it, and proposing a competing empty block
+// would have the node vote for its own block instead of the one that already
+// won - which is how a lagging node corrupts a healthy chain rather than
+// catching up to it.
+func (e *Engine) heightIsStalledLocked() bool {
+	if e.heightEnteredAt.IsZero() || e.quorumWithoutBodyLocked() {
+		return false
+	}
+	return time.Since(e.heightEnteredAt) >= e.stallRecoveryAfter
+}
+
 func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 	if e.hasValid {
 		if b, ok := e.proposals[e.validHash]; ok {
@@ -1448,7 +1499,29 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		}
 		txs = append(txs[:lastSetChange], txs[lastSetChange+1:]...)
 	}
-	if len(txs) == 0 && !e.mustAdvanceToEpochBoundaryLocked() {
+	// A height that has been stuck for a long time needs a block to get out,
+	// even an empty one. An idle chain with nothing to say stays silent.
+	//
+	// WHY THIS EXISTS. The epoch boundary is otherwise a trap. It clears
+	// pendingChanges and stakeDirty, so it clears
+	// mustAdvanceToEpochBoundaryLocked - and if that flag was the only reason
+	// blocks were being produced, as it is on a chain whose recent history is
+	// validator-set churn rather than user traffic, then entering the boundary
+	// switches block production off with nothing left to switch it back on. A
+	// production chain stopped dead at height 400 exactly this way and stayed
+	// there for 13 hours across restarts, burning 1418 rounds without one vote
+	// for a real block, because no node would build one.
+	//
+	// WHY TIME AND NOT THE ROUND NUMBER. A round number above zero does not mean
+	// stalled, it only means the last round did not commit in time - which is
+	// ordinary on a loaded or slow network, and permanent on a network whose
+	// round timeout is shorter than a commit needs. Treating round > 0 as a
+	// stall makes every such network mint empty blocks forever, which is worse
+	// than the bug: it turns a quiet chain into an unbounded one and outruns the
+	// block sync of any node trying to catch up. stallRecoveryAfter is deliberately
+	// far longer than the backed-off round timeout can reach, so a network that is
+	// merely slow never trips it.
+	if len(txs) == 0 && !e.mustAdvanceToEpochBoundaryLocked() && !e.heightIsStalledLocked() {
 		return nil, nil
 	}
 
@@ -1953,6 +2026,29 @@ func (e *Engine) resumeSelfVotesLocked() error {
 		fmt.Printf("consensus: recovered %d of this node's own votes at height %d (%s)\n",
 			restored, e.height, locked)
 	}
+	// Resume PAST the rounds already on disk rather than at round 0.
+	//
+	// A persisted vote occupies its position for good: castVoteMsg refuses a
+	// second, different vote at a position this node has already voted in. So
+	// replaying rounds that are already written means this node cannot vote on
+	// any proposal in them, and because each of those rounds ends in a timeout
+	// that writes two more nil votes, the written range grows at least as fast
+	// as the node walks it. The height then never commits, and no restart helps,
+	// because the restart is what resets the round.
+	//
+	// Skipping ahead is safe in the direction that matters. A round this node
+	// has never voted in cannot hold a conflicting signature from it, so there
+	// is nothing here to equivocate against. The LOCK is what carries safety
+	// across rounds, and it is restored above from the recorded precommits
+	// before this runs.
+	if max, any, err := e.selfVotes.MaxRoundAt(e.height); err != nil {
+		return err
+	} else if any && max >= e.round {
+		e.round = max + 1
+		e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
+		fmt.Printf("consensus: resuming height %d at round %d, past %d round(s) already voted in\n",
+			e.height, e.round, max+1)
+	}
 	// Heights below the resumed one are committed; their votes are settled.
 	if err := e.selfVotes.PruneBelow(e.height); err != nil {
 		fmt.Printf("consensus: %v\n", err)
@@ -2084,7 +2180,7 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyMaintainerRotateLocked(tx)
 	case IsBridgeLockRecipient(tx.To):
 		return e.verifyBridgeLockLocked(tx)
-	case IsLaunchRepairRecipient(tx.To):
+	case IsPinnedPoolTransferRecipient(tx.To):
 		return e.verifyLaunchRepairLocked(tx)
 	}
 	return nil
@@ -2155,18 +2251,18 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 			return err
 		}
 		valueAllowed = true
-	case IsLaunchRepairRecipient(tx.To):
+	case IsPinnedPoolTransferRecipient(tx.To):
 		spec, ok := repairSpec(tx.To)
 		if !ok {
-			return fmt.Errorf("%w: unknown production launch repair", ErrInvalidMessage)
+			return fmt.Errorf("%w: unknown pinned reward-pool transfer", ErrInvalidMessage)
 		}
 		if tx.SenderID() != spec.signer {
-			return fmt.Errorf("%w: production launch repair must be signed by %s",
-				ErrInvalidMessage, spec.signer)
+			return fmt.Errorf("%w: pinned reward-pool transfer %q must be signed by %s",
+				ErrInvalidMessage, tx.To, spec.signer)
 		}
 		if tx.Amount != spec.amount {
-			return fmt.Errorf("%w: production launch repair amount is %d, got %d",
-				ErrInvalidMessage, spec.amount, tx.Amount)
+			return fmt.Errorf("%w: pinned reward-pool transfer %q amount is %d, got %d",
+				ErrInvalidMessage, tx.To, spec.amount, tx.Amount)
 		}
 		valueAllowed = true
 	}
@@ -3301,7 +3397,7 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = ok
 				continue
 			}
-			if IsLaunchRepairRecipient(tx.To) {
+			if IsPinnedPoolTransferRecipient(tx.To) {
 				ok, err := applyLaunchRepair(ltx, tx)
 				if err != nil {
 					return err
@@ -3567,6 +3663,7 @@ func (e *Engine) advanceHeight(committed *Block) {
 	e.headHash = committed.Hash()
 	e.round = 0
 	e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
+	e.heightEnteredAt = time.Now()
 	e.proposals = make(map[string]*Block)
 	// The votes for the height just committed are settled by the block itself,
 	// so the own-vote record for it is no longer needed. Discarding it here is
@@ -4153,6 +4250,7 @@ func (e *Engine) reconcileToChainHead() {
 		e.headHash = head
 		e.round = 0
 		e.roundDeadline = time.Now().Add(e.roundTimeoutForLocked(e.round))
+		e.heightEnteredAt = time.Now()
 		e.proposals = make(map[string]*Block)
 		e.prevotes = make(map[uint64]map[string]map[string]Vote)
 		e.precommits = make(map[uint64]map[string]map[string]Vote)
@@ -4228,7 +4326,7 @@ func IsReservedRecipient(to string) bool {
 		IsBurnUnlockRecipient(to) ||
 		IsMaintainerRotateRecipient(to) ||
 		IsBridgeLockRecipient(to) ||
-		IsLaunchRepairRecipient(to)
+		IsPinnedPoolTransferRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value

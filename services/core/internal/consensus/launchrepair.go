@@ -57,15 +57,48 @@ func isPardonedRestartEvidence(eq *Equivocation) bool {
 		eq.Type == VoteTypePrevote
 }
 
-func IsLaunchRepairRecipient(to string) bool {
-	return to == launchRepairRecipient || to == validatorRepairRecipient
+// IsPinnedPoolTransferRecipient reports whether `to` names one of the pinned,
+// single-use reward-pool transfers: the two launch repairs or the treasury
+// allocation. They share one dispatch path because they share one shape - a
+// fixed signer, a fixed amount, and one exact balance precondition that cannot
+// hold twice - and keeping them on one predicate is what stops a new one from
+// being wired into some of the sites that must agree but not all of them.
+func IsPinnedPoolTransferRecipient(to string) bool {
+	return to == launchRepairRecipient ||
+		to == validatorRepairRecipient ||
+		to == treasuryAllocationRecipient
 }
+
+// repairGuard selects WHICH account's exact balance makes an operation
+// single-use. The choice is not cosmetic: guarding the wrong account turns a
+// one-shot transfer into a repeatable withdrawal.
+type repairGuard uint8
+
+const (
+	// guardDestination requires the destination to hold exactly `before`. Sound
+	// only when the destination is not expected to spend back down to that value.
+	guardDestination repairGuard = iota
+	// guardRewardPool requires the reward pool to hold exactly `before`. Sound
+	// for an allocation whose purpose is to be spent, because the pool is
+	// monotonically non-increasing and so cannot return to a past value.
+	guardRewardPool
+)
 
 type launchRepairSpec struct {
 	signer      string
 	destination string
 	amount      uint64
-	before      uint64
+	guard       repairGuard
+	// before is the exact balance guardAccount() must hold before the transfer.
+	before uint64
+}
+
+// guardAccount names the account whose balance gates this operation.
+func (s launchRepairSpec) guardAccount() string {
+	if s.guard == guardRewardPool {
+		return token.RewardPoolAccount
+	}
+	return s.destination
 }
 
 func repairSpec(to string) (launchRepairSpec, bool) {
@@ -75,6 +108,7 @@ func repairSpec(to string) (launchRepairSpec, bool) {
 			signer:      launchRepairFounder,
 			destination: launchRepairFounder,
 			amount:      launchRepairAmount,
+			guard:       guardDestination,
 			before:      launchRepairBefore,
 		}, true
 	case validatorRepairRecipient:
@@ -82,29 +116,40 @@ func repairSpec(to string) (launchRepairSpec, bool) {
 			signer:      validatorRepairAccount,
 			destination: validatorRepairAccount,
 			amount:      validatorRepairAmount,
+			guard:       guardDestination,
 			before:      validatorRepairBefore,
+		}, true
+	case treasuryAllocationRecipient:
+		return launchRepairSpec{
+			signer:      treasuryAllocationAccount,
+			destination: treasuryAllocationAccount,
+			amount:      treasuryAllocationAmount,
+			guard:       guardRewardPool,
+			before:      treasuryAllocationPoolBefore,
 		}, true
 	default:
 		return launchRepairSpec{}, false
 	}
 }
 
-func verifyLaunchRepair(sender, to string, amount, destinationBalance uint64) error {
+// verifyLaunchRepair checks the pinned signer, the pinned amount, and the exact
+// balance precondition. guardBalance must be the balance of spec.guardAccount().
+func verifyLaunchRepair(sender, to string, amount, guardBalance uint64) error {
 	spec, ok := repairSpec(to)
 	if !ok {
-		return fmt.Errorf("%w: not the production launch repair", ErrInvalidMessage)
+		return fmt.Errorf("%w: not a pinned reward-pool transfer", ErrInvalidMessage)
 	}
 	if sender != spec.signer {
-		return fmt.Errorf("%w: production launch repair must be signed by %s",
-			ErrInvalidMessage, spec.signer)
+		return fmt.Errorf("%w: pinned reward-pool transfer %q must be signed by %s",
+			ErrInvalidMessage, to, spec.signer)
 	}
 	if amount != spec.amount {
-		return fmt.Errorf("%w: production launch repair amount is %d, got %d",
-			ErrInvalidMessage, spec.amount, amount)
+		return fmt.Errorf("%w: pinned reward-pool transfer %q amount is %d, got %d",
+			ErrInvalidMessage, to, spec.amount, amount)
 	}
-	if destinationBalance != spec.before {
-		return fmt.Errorf("%w: production launch repair requires destination balance %d, got %d",
-			ErrInvalidMessage, spec.before, destinationBalance)
+	if guardBalance != spec.before {
+		return fmt.Errorf("%w: pinned reward-pool transfer %q requires %s balance %d, got %d",
+			ErrInvalidMessage, to, spec.guardAccount(), spec.before, guardBalance)
 	}
 	return nil
 }
@@ -112,28 +157,28 @@ func verifyLaunchRepair(sender, to string, amount, destinationBalance uint64) er
 func (e *Engine) verifyLaunchRepairLocked(tx *token.Transaction) error {
 	spec, ok := repairSpec(tx.To)
 	if !ok {
-		return fmt.Errorf("%w: unknown production launch repair", ErrInvalidMessage)
+		return fmt.Errorf("%w: unknown pinned reward-pool transfer", ErrInvalidMessage)
 	}
-	balance, err := e.ledger.Balance(spec.destination)
+	balance, err := e.ledger.Balance(spec.guardAccount())
 	if err != nil {
-		return fmt.Errorf("consensus: read destination balance for launch repair: %w", err)
+		return fmt.Errorf("consensus: read guard balance for pinned reward-pool transfer: %w", err)
 	}
 	return verifyLaunchRepair(tx.SenderID(), tx.To, tx.Amount, balance)
 }
 
 // applyLaunchRepair transfers existing native units from the reward pool. The
 // balance precondition is checked again inside the ledger critical section so
-// two repair transactions in one block cannot both apply.
+// two such transactions in one block cannot both apply.
 func applyLaunchRepair(ltx market.LedgerTx, tx *token.Transaction) (bool, error) {
 	spec, ok := repairSpec(tx.To)
 	if !ok {
 		return false, nil
 	}
-	destinationBalance, err := ltx.Balance(spec.destination)
+	guardBalance, err := ltx.Balance(spec.guardAccount())
 	if err != nil {
 		return false, err
 	}
-	if err := verifyLaunchRepair(tx.SenderID(), tx.To, tx.Amount, destinationBalance); err != nil {
+	if err := verifyLaunchRepair(tx.SenderID(), tx.To, tx.Amount, guardBalance); err != nil {
 		return false, nil
 	}
 	pool, err := ltx.Balance(token.RewardPoolAccount)
@@ -141,14 +186,14 @@ func applyLaunchRepair(ltx market.LedgerTx, tx *token.Transaction) (bool, error)
 		return false, err
 	}
 	if pool < spec.amount {
-		return false, fmt.Errorf("consensus: launch repair reward pool has %d, needs %d",
-			pool, spec.amount)
+		return false, fmt.Errorf("consensus: pinned reward-pool transfer needs %d, pool has %d",
+			spec.amount, pool)
 	}
 	if err := ltx.Transfer(token.RewardPoolAccount, spec.destination, spec.amount); err != nil {
 		return false, err
 	}
-	fmt.Printf("consensus: production launch repair moved %d native base units from reward pool to %s\n",
-		spec.amount, spec.destination)
+	fmt.Printf("consensus: pinned reward-pool transfer %q moved %d native base units to %s\n",
+		tx.To, spec.amount, spec.destination)
 	return true, nil
 }
 

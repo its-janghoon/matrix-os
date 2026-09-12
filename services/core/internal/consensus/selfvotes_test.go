@@ -154,6 +154,94 @@ func TestRestartRecoversOwnVotesAndLock(t *testing.T) {
 	}
 }
 
+// A persisted vote occupies its position for good, so resuming a height at
+// round 0 while holding records for rounds 0..N leaves the node unable to vote
+// on any proposal until it has burned N rounds again - and each of those rounds
+// times out and writes two MORE nil votes, so the occupied range grows at least
+// as fast as the node walks it. That is a permanent stall, and restarting makes
+// it worse rather than better because the restart is what resets the round.
+//
+// A production chain died exactly this way: 1418 rounds of nil votes at one
+// height, not one vote ever cast for a real block.
+func TestRestartResumesPastRoundsAlreadyVotedIn(t *testing.T) {
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
+	defer store.Close()
+
+	self, err := token.GenerateAccount()
+	if err != nil {
+		t.Fatalf("GenerateAccount: %v", err)
+	}
+	vs, err := NewValidatorSet([]ed25519.PublicKey{self.PublicKey})
+	if err != nil {
+		t.Fatalf("NewValidatorSet: %v", err)
+	}
+	ledger := market.NewLedger(store)
+	votes := NewSelfVoteStore(store)
+
+	// Three rounds of nil votes at the height this node is deciding, exactly as
+	// three round timeouts would leave behind.
+	const burned = 3
+	for round := uint64(0); round < burned; round++ {
+		for _, typ := range []VoteType{VoteTypePrevote, VoteTypePrecommit} {
+			v := &Vote{
+				Type: typ, Height: 0, Round: round,
+				BlockHash: nilVoteHash(), VoterID: self.AccountID(),
+				PublicKey: self.PublicKey,
+			}
+			if err := v.Sign(self.PrivateKey); err != nil {
+				t.Fatalf("sign: %v", err)
+			}
+			if err := votes.Record(v); err != nil {
+				t.Fatalf("record: %v", err)
+			}
+		}
+	}
+
+	eng, err := New(Config{
+		Transport:       newMemBus().endpoint(peer.ID("selfvote-resume")),
+		Validators:      vs,
+		Chain:           NewBlockChain(store),
+		Ledger:          ledger,
+		Self:            self,
+		ProposeInterval: time.Hour,
+		RoundTimeout:    time.Hour,
+		Evidence:        NewEvidenceStore(store),
+		Sets:            NewSetStore(store),
+		SelfVotes:       votes,
+		Stake:           NewStakeLedger(ledger, store),
+		ZeroMinBond:     true,
+		DisableTxGossip: true,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := eng.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	eng.Wait()
+
+	eng.mu.Lock()
+	round := eng.round
+	eng.mu.Unlock()
+
+	if round != burned {
+		t.Fatalf("resumed at round %d, want %d: the node must skip the rounds it has already voted in, not replay them",
+			round, burned)
+	}
+	// Nil votes carry no lock, so skipping them cannot have invented one.
+	eng.mu.Lock()
+	locked := eng.locked
+	eng.mu.Unlock()
+	if locked {
+		t.Fatal("nil votes produced a lock")
+	}
+}
+
 // A store that cannot be written must stop the vote rather than let it out
 // unrecorded. Bonded-open therefore refuses to build an engine without one at
 // all, since there slashing is automatic.
