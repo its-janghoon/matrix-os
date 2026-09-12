@@ -8,8 +8,10 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/ethrpc"
+	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/version"
 )
@@ -22,8 +24,9 @@ import (
 
 // ethRPCBackend adapts the consensus engine to what internal/ethrpc asks for.
 type ethRPCBackend struct {
-	engine  *consensus.Engine
-	chainID uint64
+	engine   *consensus.Engine
+	treasury *token.Treasury
+	chainID  uint64
 }
 
 func (b *ethRPCBackend) ChainHeight() uint64 { return b.engine.Height() }
@@ -112,8 +115,12 @@ func (n *Node) startEthRPC() error {
 	}
 
 	handler, err := ethrpc.NewHandler(ethrpc.Config{
-		ChainID:       n.config.Consensus.ChainID,
-		Backend:       &ethRPCBackend{engine: n.consensus, chainID: n.config.Consensus.ChainID},
+		ChainID: n.config.Consensus.ChainID,
+		Backend: &ethRPCBackend{
+			engine:   n.consensus,
+			treasury: n.treasury,
+			chainID:  n.config.Consensus.ChainID,
+		},
 		ClientVersion: "matrix-os/" + version.String(),
 	})
 	if err != nil {
@@ -183,4 +190,59 @@ func withEthRPCCORS(next http.Handler, allowed []string) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// StateRoot, AccountProof and Supply make the adapter an ethrpc.SupplyBackend,
+// which is what serves the matrix_ namespace.
+
+func (b *ethRPCBackend) StateRoot() ([]byte, error) {
+	return b.engine.Ledger().StateRoot()
+}
+
+func (b *ethRPCBackend) AccountProof(accountID string) (*market.AccountProof, error) {
+	return b.engine.Ledger().ProveAccount(accountID)
+}
+
+// Supply reports the components of supply rather than one headline number,
+// because "circulating" is a contested definition and a single figure hides
+// which one was used.
+//
+// The escrow is subtracted because those coins are immobile HERE and mobile
+// THERE, as wrapped tokens on another chain. Counting them in both places is the
+// double-count this split exists to prevent, and it is the figure a listing
+// review checks first.
+func (b *ethRPCBackend) Supply() (ethrpc.SupplyReport, error) {
+	issued, err := b.treasury.IssuedSupply()
+	if err != nil {
+		return ethrpc.SupplyReport{}, err
+	}
+	ledger := b.engine.Ledger()
+	pool, err := ledger.Balance(token.RewardPoolAccount)
+	if err != nil {
+		return ethrpc.SupplyReport{}, err
+	}
+	escrow, err := ledger.Balance(bridge.EscrowAccount)
+	if err != nil {
+		return ethrpc.SupplyReport{}, err
+	}
+
+	circulating := issued
+	for _, held := range []uint64{pool, escrow} {
+		if circulating < held {
+			// Cannot happen while the ledger is consistent, and reporting a wrapped
+			// negative as an enormous positive is the worst way to find out it did.
+			circulating = 0
+			break
+		}
+		circulating -= held
+	}
+
+	return ethrpc.SupplyReport{
+		MaxSupply:    token.NativeMaxSupply,
+		Issued:       issued,
+		RewardPool:   pool,
+		BridgeEscrow: escrow,
+		Circulating:  circulating,
+		Decimals:     9,
+	}, nil
 }

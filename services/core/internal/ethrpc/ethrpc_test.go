@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -12,6 +13,8 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/evmtx"
+	"github.com/ecirlabs/matrix-core/internal/kv"
+	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -456,5 +459,145 @@ func TestBatchedCallsAreAnswerdAsABatch(t *testing.T) {
 func TestAChainIDIsRequired(t *testing.T) {
 	if _, err := NewHandler(Config{Backend: newFakeChain()}); err == nil {
 		t.Fatal("a handler with no chain id should be refused")
+	}
+}
+
+// supplyChain adds the matrix_ namespace to the fake, so the proof and supply
+// methods can be driven without a consensus engine.
+type supplyChain struct {
+	*fakeChain
+	root   []byte
+	proof  *market.AccountProof
+	report SupplyReport
+	err    error
+}
+
+func (s *supplyChain) StateRoot() ([]byte, error) { return s.root, s.err }
+func (s *supplyChain) AccountProof(account string) (*market.AccountProof, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if s.proof == nil || s.proof.Account != account {
+		return nil, fmt.Errorf("market: account has no balance in the ledger: %q", account)
+	}
+	return s.proof, nil
+}
+func (s *supplyChain) Supply() (SupplyReport, error) { return s.report, s.err }
+
+// TestTheEscrowCanBeProvenToAnOutsider is the capability a listing review asks
+// about. Wrapped supply is supposed to be backed one-for-one by native coins in
+// escrow, and the only evidence was the attestors' word; a proof against a root
+// the validators signed makes it an audited reserve rather than an asserted one.
+func TestTheEscrowCanBeProvenToAnOutsider(t *testing.T) {
+	// A real ledger, so the proof under test is one that actually verifies.
+	store, err := kv.New(kv.Config{Path: t.TempDir()})
+	if err != nil {
+		t.Fatalf("kv.New: %v", err)
+	}
+	defer store.Close()
+	ledger := market.NewLedger(store)
+	const escrowed = 50_000_000 * token.NativeUnit
+	if err := ledger.Credit("bridge/escrow", escrowed); err != nil {
+		t.Fatalf("Credit: %v", err)
+	}
+	if err := ledger.Credit("somebody-else", 123); err != nil {
+		t.Fatalf("Credit: %v", err)
+	}
+	root, err := ledger.StateRoot()
+	if err != nil {
+		t.Fatalf("StateRoot: %v", err)
+	}
+	proof, err := ledger.ProveAccount("bridge/escrow")
+	if err != nil {
+		t.Fatalf("ProveAccount: %v", err)
+	}
+
+	h := newTestHandler(t, &supplyChain{fakeChain: newFakeChain(), root: root, proof: proof})
+
+	if got := resultString(t, h, "matrix_getStateRoot"); got != "0x"+hex.EncodeToString(root) {
+		t.Fatalf("matrix_getStateRoot = %s", got)
+	}
+
+	resp := rpc(t, h, "matrix_getAccountProof", "bridge/escrow")
+	if resp.Error != nil {
+		t.Fatalf("matrix_getAccountProof: %s", resp.Error.Message)
+	}
+	view, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %v", resp.Result)
+	}
+	// The balance is reported in the wallet's 18-decimal scale, matching
+	// eth_getBalance, so a caller comparing the two is not comparing two scales.
+	if want := hexBig(token.NativeToERC20(escrowed)); view["balance"] != want {
+		t.Fatalf("balance = %v, want %s", view["balance"], want)
+	}
+	if view["root"] != "0x"+hex.EncodeToString(root) {
+		t.Fatalf("the proof is against a different root than matrix_getStateRoot reported")
+	}
+
+	// And the proof it served actually verifies, which is the only thing that
+	// makes any of this worth serving.
+	if err := market.VerifyAccountProof(proof, root); err != nil {
+		t.Fatalf("the served proof does not verify: %v", err)
+	}
+}
+
+// TestSupplyReportsComponentsNotOneNumber pins the reporting choice.
+// "Circulating" is a contested definition and a single figure hides which one
+// was used, so the components are reported and the escrow is excluded - those
+// coins are immobile here and mobile there, and counting them in both places is
+// the double-count the split exists to prevent.
+func TestSupplyReportsComponentsNotOneNumber(t *testing.T) {
+	report := SupplyReport{
+		MaxSupply:    token.NativeMaxSupply,
+		Issued:       1_000_000_000 * token.NativeUnit,
+		RewardPool:   900_000_000 * token.NativeUnit,
+		BridgeEscrow: 50_000_000 * token.NativeUnit,
+		Circulating:  50_000_000 * token.NativeUnit,
+		Decimals:     9,
+	}
+	h := newTestHandler(t, &supplyChain{fakeChain: newFakeChain(), report: report})
+
+	resp := rpc(t, h, "matrix_getSupply")
+	if resp.Error != nil {
+		t.Fatalf("matrix_getSupply: %s", resp.Error.Message)
+	}
+	got, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %v", resp.Result)
+	}
+	for _, field := range []string{"max_supply", "issued", "reward_pool", "bridge_escrow", "circulating", "decimals"} {
+		if _, present := got[field]; !present {
+			t.Fatalf("the report omitted %q: %v", field, got)
+		}
+	}
+	// Circulating must not include the pool or the escrow, or the figure double
+	// counts coins nobody can spend here.
+	if got["circulating"] == got["issued"] {
+		t.Fatal("circulating equals issued, so the pool and escrow were counted as circulating")
+	}
+}
+
+// TestTheMatrixNamespaceIsRefusedWhenUnsupported covers a node that serves the
+// eth_ methods and not these, which must say so rather than answer emptily.
+func TestTheMatrixNamespaceIsRefusedWhenUnsupported(t *testing.T) {
+	h := newTestHandler(t, newFakeChain())
+	for _, method := range []string{"matrix_getStateRoot", "matrix_getSupply", "matrix_getAccountProof"} {
+		resp := rpc(t, h, method, "bridge/escrow")
+		if resp.Error == nil {
+			t.Fatalf("%s answered %v instead of saying it is not served", method, resp.Result)
+		}
+	}
+}
+
+// TestAnUnprovableAccountIsAnErrorNotNull is the opposite call from
+// eth_getTransactionByHash. A caller asking for a proof wants one, and a silent
+// null reads as "proved nothing", which is not the same as "this account has no
+// balance to prove".
+func TestAnUnprovableAccountIsAnErrorNotNull(t *testing.T) {
+	h := newTestHandler(t, &supplyChain{fakeChain: newFakeChain(), root: bytes.Repeat([]byte{1}, 32)})
+	resp := rpc(t, h, "matrix_getAccountProof", "0x00000000000000000000000000000000000000aa")
+	if resp.Error == nil {
+		t.Fatalf("an unprovable account answered %v, want an error", resp.Result)
 	}
 }

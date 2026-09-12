@@ -257,6 +257,9 @@ func (h *Handler) call(method string, params []json.RawMessage) (any, *rpcError)
 		return nil, &rpcError{Code: codeMethodNotFound,
 			Message: "eth_call is not available: this chain runs no EVM, so there is no contract to call"}
 	default:
+		if strings.HasPrefix(method, "matrix_") {
+			return h.callMatrix(method, params)
+		}
 		return nil, &rpcError{Code: codeMethodNotFound, Message: "unsupported method " + method}
 	}
 }

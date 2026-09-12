@@ -101,12 +101,12 @@ func (e *Engine) stateRootLocked() []byte {
 	if e.stateRootEpoch == epoch && e.stateRoot != nil {
 		return e.stateRoot
 	}
-	digest, err := e.ledger.StateDigest()
+	digest, err := e.ledger.StateRoot()
 	if err != nil {
 		// A ledger that cannot be read is not a state this node can commit to.
 		// Returning nil makes the proposal carry no root, which every validator
 		// then rejects - louder than proposing a root that is a guess.
-		fmt.Printf("consensus: could not compute the ledger state digest: %v\n", err)
+		fmt.Printf("consensus: could not compute the ledger state root: %v\n", err)
 		return nil
 	}
 	e.stateRoot = digest

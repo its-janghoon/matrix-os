@@ -1,71 +1,15 @@
 package market
 
 import (
-	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
 )
 
-// A hash of every balance, so two nodes can discover they disagree.
+// Reading the whole ledger out, and knowing when it has changed.
 //
-// THE PROBLEM THIS EXISTS FOR. Consensus agrees on the ORDER of transactions and
-// nothing else: each node then applies them itself, and the block carries no
-// commitment to the result. So two nodes running different apply logic - one
-// upgraded, one not, or one with a different fee constant - produce identical
-// block hashes and different balances, and NOTHING reports it. The chain does
-// not fork, no node errors, and the disagreement surfaces weeks later as numbers
-// that do not add up.
-//
-// The digest is the missing commitment. It is cheap because the ledger is a
-// single flat keyspace that pebble already iterates in sorted order, so there is
-// no tree to maintain and no ordering to impose - the hash is a fold over keys
-// and values in the order they are stored.
-//
-// WHAT IT IS NOT. It is not a Merkle root: there is no way to prove ONE balance
-// against it without sending every balance, so it cannot serve a light client or
-// an external verifier. It answers "do we agree", which is the question that is
-// actually open, and it does so without the tree a proof system would need. A
-// Merkle root is the upgrade when proofs are wanted; this is what makes silent
-// divergence loud today.
-
-// stateDigestDomain separates this hash from any other sha256 over ledger bytes.
-const stateDigestDomain = "matrix/ledger/state-digest/v1"
-
-// StateDigest returns a hash over every persisted balance.
-//
-// Determinism is the whole point, so every input is length-prefixed - without it
-// an account named "ab" holding value X and one named "a" holding a value
-// beginning with "b" could fold into the same bytes - and the iteration order is
-// pebble's key order, which is a property of the store rather than of this
-// node's memory.
-func (l *Ledger) StateDigest() ([]byte, error) {
-	l.mu.RLock()
-	defer l.mu.RUnlock()
-
-	h := sha256.New()
-	_, _ = h.Write([]byte(stateDigestDomain))
-
-	var count uint64
-	var scratch [8]byte
-	err := l.store.Iterate([]byte(balanceKeyPrefix), func(key, value []byte) error {
-		binary.BigEndian.PutUint64(scratch[:], uint64(len(key)))
-		_, _ = h.Write(scratch[:])
-		_, _ = h.Write(key)
-		binary.BigEndian.PutUint64(scratch[:], uint64(len(value)))
-		_, _ = h.Write(scratch[:])
-		_, _ = h.Write(value)
-		count++
-		return nil
-	})
-	if err != nil {
-		return nil, fmt.Errorf("market: compute the ledger state digest: %w", err)
-	}
-	// The count is folded in as well, so a truncated iteration cannot produce the
-	// digest of a shorter but otherwise identical ledger.
-	binary.BigEndian.PutUint64(scratch[:], count)
-	_, _ = h.Write(scratch[:])
-	return h.Sum(nil), nil
-}
+// Both exist for things built on top of the ledger rather than inside it: the
+// state root in merkle.go folds every balance, and a cache of anything derived
+// from the ledger needs to know when it is stale.
 
 // ForEachBalance calls fn for every persisted account balance, in the store's
 // key order.
