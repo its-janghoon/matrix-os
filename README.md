@@ -166,6 +166,15 @@ declaring it under `inference.backends`, pricing tokens against an observed cost
 basis, and which single port a buyer is actually meant to reach. A provider is
 not a validator and needs no stake, no attestor keystore, and no genesis.
 
+The buying side is the [consumer runbook](docs/runbooks/consumer.md): getting
+MATRIX into an account, and the two doors a buyer can come through. The
+OpenAI-compatible `/v1/chat/completions` is a drop-in for any OpenAI SDK and is
+custodial - that protocol carries no buyer field, so the API key is what names
+the account to charge and the node must hold its key. A buyer who is not the node
+operator wants the other door instead, where a signed `RunAuthorization` asks for
+the work and a signed transfer accepts the bill, and nobody but the buyer ever
+holds the key. Both are served on `connect.addr`.
+
 ## License
 
 Matrix OS is [MIT licensed](LICENSE).
