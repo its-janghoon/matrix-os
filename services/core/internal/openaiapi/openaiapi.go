@@ -183,6 +183,19 @@ type chatResponse struct {
 	// network "who served this" is a marketplace fact the caller paid for and
 	// can check; an SDK ignores the extra field.
 	Provider string `json:"provider,omitempty"`
+	// Receipt is the serving node's SIGNED account of what it charged and for
+	// what: the model, the token counts, the money, over a digest of this exact
+	// prompt and completion.
+	//
+	// It is here rather than in a header because a buyer who needs it needs to
+	// keep it, and the body is what an SDK hands back. An SDK ignores the extra
+	// field, so the response stays a valid chat completion for a client that
+	// does not care - and a client that does gets evidence it can store, verify
+	// offline, and put in front of somebody.
+	//
+	// Absent when the node holds no signing key. A receipt nobody signed would be
+	// a claim with no author, which is what there was before.
+	Receipt *inference.Receipt `json:"receipt,omitempty"`
 }
 
 type chatChoice struct {
@@ -307,6 +320,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			TotalTokens:      done.Usage.TotalTokens,
 		},
 		Provider: done.Provider,
+		Receipt:  done.Receipt,
 	})
 }
 

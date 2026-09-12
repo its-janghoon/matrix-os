@@ -1538,6 +1538,11 @@ func (n *Node) Start() error {
 		Registry: inferenceRegistry,
 		Settler:  n.consensus,
 		Accounts: n.signingAccts,
+		// The key that signs the receipt handed to each buyer. The node's own,
+		// not the payout account's: a payout account may be a wallet address
+		// whose key this node does not hold, and the node is the party
+		// answerable for the claim anyway - it is what ran the model.
+		Node: n.consensusAccount,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create inference service: %w", err)

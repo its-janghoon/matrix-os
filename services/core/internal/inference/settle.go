@@ -167,10 +167,19 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 	}
 
 	// Identical clamping to FulfillJob: the charge can never exceed the reserved,
-	// affordability-checked price, whichever path settles it.
+	// affordability-checked price, or what the text can honestly have cost -
+	// whichever path settles it.
+	//
+	// Both clamps, not just the first. The reservation is a budget and a generous
+	// one; without the ceiling a provider bills the whole budget whatever it did,
+	// and a buyer on THIS path has more at stake than one on the hosted path, not
+	// less: they are here precisely because the node is not theirs.
 	billableUnits := resp.Units
 	if billableUnits > mjob.Units {
 		billableUnits = mjob.Units
+	}
+	if ceiling := MaxUnitsFor(request, resp.Completion); billableUnits > ceiling {
+		billableUnits = ceiling
 	}
 	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
 	if err != nil {
@@ -315,9 +324,33 @@ func (s *Service) SettleSigned(ctx context.Context, jobID string, tx *token.Tran
 	job.Status = InferenceJobCompleted
 	job.UpdatedAt = time.Now().UTC()
 	job.payment = nil
+	// The self-custody door gets a receipt too, and if anything needs one more:
+	// this is the path a buyer takes when the node running the model is not
+	// theirs, so the seller is a stranger and the buyer's only recourse is
+	// evidence they can hold.
+	//
+	// Units are recovered by dividing the charge by the price rather than being
+	// carried: job.Units is the settled CHARGE, and a receipt that put it in the
+	// units field would claim a total that does not follow from its own
+	// arithmetic.
+	if price := s.providerPrice(job.Provider); price > 0 {
+		job.Receipt = s.issueReceipt(job, pr.Usage, job.Units/price, price, job.Units)
+	}
 	cp := job.snapshot()
 	s.mu.Unlock()
 	return &cp, nil
+}
+
+// providerPrice reads what a provider charges per unit, for reconstructing the
+// two halves of a bill on the self-custody path. Zero when the provider is no
+// longer on the order book, in which case no receipt is issued rather than one
+// whose arithmetic cannot be checked.
+func (s *Service) providerPrice(providerID string) uint64 {
+	p, ok := s.market.GetProvider(providerID)
+	if !ok {
+		return 0
+	}
+	return p.PricePerUnit
 }
 
 // ExpireUnpaid releases the reservation of every job that has been awaiting

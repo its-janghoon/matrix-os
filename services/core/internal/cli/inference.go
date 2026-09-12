@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -263,6 +264,11 @@ type inferenceJobRow struct {
 	Status     string `json:"status"`
 	Units      uint64 `json:"units"`
 	Completion string `json:"completion"`
+	// Receipt is the serving node's signed account of what it charged, as the
+	// exact bytes it signed. Carried verbatim because re-encoding it would
+	// invalidate the signature, and because the buyer keeping those bytes is the
+	// whole of what makes it evidence. `matrix receipt verify` reads it back.
+	Receipt json.RawMessage `json:"receipt,omitempty"`
 }
 
 // inferenceStatusString renders an inference job status enum as a lowercase
@@ -294,6 +300,7 @@ func printInferenceJob(w io.Writer, asJSON bool, j *inferencev1.InferenceJob) er
 		Status:     inferenceStatusString(j.GetStatus()),
 		Units:      j.GetUnits(),
 		Completion: j.GetCompletion(),
+		Receipt:    j.GetReceipt(),
 	}
 	if asJSON {
 		return printJSON(w, r)
@@ -305,5 +312,11 @@ func printInferenceJob(w io.Writer, asJSON bool, j *inferencev1.InferenceJob) er
 	fmt.Fprintf(w, "status:     %s\n", r.Status)
 	fmt.Fprintf(w, "units:      %d\n", r.Units)
 	fmt.Fprintf(w, "completion: %s\n", r.Completion)
+	if len(r.Receipt) > 0 {
+		// Printed in full rather than summarised: it is a signed document, and
+		// what makes it worth anything is that the buyer keeps the exact bytes.
+		// `matrix receipt verify` reads this back.
+		fmt.Fprintf(w, "receipt:    %s\n", r.Receipt)
+	}
 	return nil
 }

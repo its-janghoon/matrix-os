@@ -125,6 +125,15 @@ func run(keep bool, timeout time.Duration) error {
 	}
 	buyer := newWallet()
 	theBuyer = buyer
+	// A buyer holding its OWN ed25519 wallet, for the self-custody purchase
+	// below. Created before the genesis file is written because that is how it
+	// gets funded: `matrix fund` moves value out of the reward pool, which is not
+	// consensus-ordered and would leave three validators with three different
+	// pools, so the node refuses it on a real network and is right to.
+	receiptBuyer, err := createDevWallet(matrixCLI, dir)
+	if err != nil {
+		return err
+	}
 	// One payout wallet per node, so each announces a distinct seller account and
 	// a payment to one cannot be mistaken for a payment to another.
 	sellers := make([]*wallet, len(nodes))
@@ -135,7 +144,7 @@ func run(keep bool, timeout time.Duration) error {
 	for i := range sellers {
 		sellerAddrs[i] = sellers[i].address
 	}
-	if err := writeConfigs(nodes, buyer.address, sellerAddrs); err != nil {
+	if err := writeConfigs(nodes, buyer.address, sellerAddrs, receiptBuyer.accountID); err != nil {
 		return err
 	}
 	ok("three configs written, chain id %d", devnetChainID)
@@ -188,6 +197,9 @@ func run(keep bool, timeout time.Duration) error {
 	if err := checkBondIsCapitalAtRisk(matrixCLI, nodes, sellers[0], timeout); err != nil {
 		return err
 	}
+	if err := checkSignedReceipt(matrixCLI, nodes[0], dir, receiptBuyer); err != nil {
+		return err
+	}
 	if !keep {
 		if err := checkGenesisSnapshot(matrixd, nodes); err != nil {
 			return err
@@ -218,6 +230,8 @@ type devNode struct {
 	// this node publishes to the directory for buyers to dial.
 	market  string
 	connect string
+	// inference is the inference gRPC address, which the CLI takes separately.
+	inference string
 	// apiKey is the admin key `matrixd -init` generated for this node, read back
 	// so the checks can drive the CLI the way an operator does.
 	apiKey string
@@ -275,12 +289,13 @@ func initNode(matrixd, root string, i int) (*devNode, error) {
 		p2pPort:     base,
 		ethRPC:      fmt.Sprintf("http://127.0.0.1:%d", base+5),
 		market:      fmt.Sprintf("127.0.0.1:%d", base+2),
+		inference:   fmt.Sprintf("127.0.0.1:%d", base+3),
 		connect:     fmt.Sprintf("http://127.0.0.1:%d", base+4),
 	}, nil
 }
 
 // writeConfigs patches every node's config into one network.
-func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Address) error {
+func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Address, receiptBuyer string) error {
 	validators := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		validators = append(validators, n.consensusID)
@@ -292,8 +307,9 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Addre
 	allocations := []map[string]any{
 		{"account": "bridge/escrow", "amount": escrowFunds},
 		{"account": token.EthAccountID(buyer), "amount": buyerFunds},
+		{"account": receiptBuyer, "amount": buyerFunds},
 	}
-	allocated := uint64(escrowFunds + buyerFunds)
+	allocated := uint64(escrowFunds + 2*buyerFunds)
 	for _, n := range nodes {
 		allocations = append(allocations, map[string]any{"account": n.consensusID, "amount": uint64(perValidator)})
 		allocated += perValidator
@@ -1320,4 +1336,155 @@ func runCLI(matrixCLI string, n *devNode, args ...string) ([]byte, error) {
 		return nil, fmt.Errorf("%v on node %d: %v\n%s", args, n.index, err, stderr.String())
 	}
 	return out, nil
+}
+
+// checkSignedReceipt proves a buyer walks away with evidence.
+//
+// Two frauds survive the billing ceiling and the bond: a seller can serve a
+// cheaper model than it advertised, and it can answer with rubbish. Neither is
+// provable to a chain - no consensus can judge whether a completion was really
+// llama-70b - so neither is slashed, and pretending otherwise would be worse
+// than leaving them open.
+//
+// What is left is to make the CLAIM non-repudiable. This buys one inference on
+// the SELF-CUSTODY path - the one a buyer takes when the node running the model
+// is not theirs, which is when a stranger's claims matter most - keeps the
+// receipt that came back, and verifies it with a command that talks to NOTHING:
+// no node, no chain, no account. That is the property that matters, because a
+// receipt only works as evidence if the person a buyer shows it to can check it
+// without asking the seller for anything.
+func checkSignedReceipt(matrixCLI string, n *devNode, dir string, w devWallet) error {
+	step("buying one inference and checking the receipt offline, as a third party would")
+
+	walletEnv := devWalletEnv()
+	provider, err := localProviderID(matrixCLI, n)
+	if err != nil {
+		return err
+	}
+
+	const prompt = "what is the capital of france"
+	submit := exec.Command(matrixCLI,
+		"--addr", n.market, "--api-key", n.apiKey, "--json",
+		"inference", "--inference-addr", n.inference, "submit",
+		"--buyer", w.accountID, "--provider", provider, "--model", "echo",
+		"--prompt", prompt, "--client-signed", "--wallet", w.path)
+	submit.Env = walletEnv
+	var submitErr bytes.Buffer
+	submit.Stderr = &submitErr
+	job, err := submit.Output()
+	if err != nil {
+		return fmt.Errorf("buying an inference with the buyer's own key: %v\n%s", err, submitErr.String())
+	}
+	var settled struct {
+		Completion string          `json:"completion"`
+		Receipt    json.RawMessage `json:"receipt"`
+	}
+	if err := json.Unmarshal(job, &settled); err != nil {
+		return fmt.Errorf("the settled job is not json: %v\n%s", err, job)
+	}
+	if len(settled.Receipt) == 0 {
+		return fmt.Errorf("the job carried no receipt, so the buyer has nothing to hold: %s", job)
+	}
+	ok("the buyer signed the invoice with its own key and got a receipt back")
+
+	// Write the three files a buyer would keep, and verify with a command that
+	// reaches nothing.
+	evidence := filepath.Join(dir, "evidence")
+	if err := os.MkdirAll(evidence, 0o755); err != nil {
+		return err
+	}
+	for name, content := range map[string][]byte{
+		"receipt.json":   settled.Receipt,
+		"prompt.txt":     []byte(prompt),
+		"completion.txt": []byte(settled.Completion),
+		"other.txt":      []byte("a different question entirely"),
+	} {
+		if err := os.WriteFile(filepath.Join(evidence, name), content, 0o600); err != nil {
+			return err
+		}
+	}
+
+	verify := func(promptFile string) ([]byte, error) {
+		return exec.Command(matrixCLI, "receipt", "verify",
+			"--receipt", filepath.Join(evidence, "receipt.json"),
+			"--prompt", filepath.Join(evidence, promptFile),
+			"--completion", filepath.Join(evidence, "completion.txt"),
+		).CombinedOutput()
+	}
+
+	out, err := verify("prompt.txt")
+	if err != nil {
+		return fmt.Errorf("the receipt the node just issued does not verify: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "issued over the prompt and completion given") {
+		return fmt.Errorf("the receipt verified but was not bound to this exchange:\n%s", out)
+	}
+	ok("it verifies against this exact prompt and completion, with no node involved")
+
+	// And it is evidence about ONE exchange: shown for a different question it is
+	// refused, so an honest receipt cannot be handed out as a reference.
+	if out, err = verify("other.txt"); err == nil {
+		return fmt.Errorf("the receipt verified for a prompt it was never issued over:\n%s", out)
+	}
+	ok("and it is refused for any other exchange, so one honest receipt cannot cover many")
+	return nil
+}
+
+// localProviderID reads the provider this node serves from its own order book.
+func localProviderID(matrixCLI string, n *devNode) (string, error) {
+	out, err := runCLI(matrixCLI, n, "provider", "list")
+	if err != nil {
+		return "", err
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return "", fmt.Errorf("provider list is not json: %v\n%s", err, out)
+	}
+	for _, r := range rows {
+		if asString(r["origin"]) == "local" {
+			return asString(r["id"]), nil
+		}
+	}
+	return "", fmt.Errorf("node %d serves no local provider", n.index)
+}
+
+// devWallet is a throwaway ed25519 wallet the harness drives the CLI with.
+type devWallet struct {
+	path      string
+	accountID string
+}
+
+// devWalletEnv supplies the passphrase the way a script or a systemd unit does.
+// The prompt is for a person at a terminal, and there is not one here.
+func devWalletEnv() []string {
+	return append(os.Environ(), "MATRIX_WALLET_PASSPHRASE=devnet")
+}
+
+// createDevWallet makes a wallet with the real CLI and reads back its account id.
+func createDevWallet(matrixCLI, dir string) (devWallet, error) {
+	path := filepath.Join(dir, "buyer-wallet.json")
+	env := devWalletEnv()
+
+	create := exec.Command(matrixCLI, "wallet", "create", "--wallet", path)
+	create.Env = env
+	if out, err := create.CombinedOutput(); err != nil {
+		return devWallet{}, fmt.Errorf("create a buyer wallet: %v\n%s", err, out)
+	}
+
+	show := exec.Command(matrixCLI, "--json", "wallet", "show", "--wallet", path)
+	show.Env = env
+	shown, err := show.Output()
+	if err != nil {
+		return devWallet{}, fmt.Errorf("read the buyer wallet: %v", err)
+	}
+	var got struct {
+		AccountID string `json:"account_id"`
+	}
+	if err := json.Unmarshal(shown, &got); err != nil {
+		return devWallet{}, fmt.Errorf("wallet show is not json: %v\n%s", err, shown)
+	}
+	if got.AccountID == "" {
+		return devWallet{}, fmt.Errorf("wallet show reported no account id: %s", shown)
+	}
+	return devWallet{path: path, accountID: got.AccountID}, nil
 }

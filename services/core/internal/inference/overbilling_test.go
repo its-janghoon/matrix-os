@@ -172,3 +172,51 @@ func TestTheCeilingIsAnUpperBoundNotAnEstimate(t *testing.T) {
 		t.Fatalf("MaxUnitsFor on a tiny exchange = %d, want the floor %d", got, maxUnitsFloor)
 	}
 }
+
+// TestBothBuyerDoorsApplyTheBillingCeiling
+//
+// There are two ways to buy, and they compute the charge in separate places. The
+// ceiling was added to one of them first, which left the OTHER - the
+// self-custody path - paying the whole reservation for a five-character answer.
+//
+// That is the worse one to miss. A buyer is on the client-signed path precisely
+// because the node running the model is not theirs, so the seller is a stranger,
+// and the node computing the bill is the seller's. This pins both.
+func TestBothBuyerDoorsApplyTheBillingCeiling(t *testing.T) {
+	const reserved = 2000
+	req := InferenceRequest{Prompt: "hi", Model: "m"}
+
+	t.Run("hosted, the node signs for the buyer", func(t *testing.T) {
+		greedy := greedyBackend{completion: "hello", claimTokens: reserved}
+		fs := &fakeSettler{committed: true, applied: true}
+		svc, buyer, provider := serviceWithBackend(t, greedy, fs, 1, 1_000_000)
+
+		job, err := svc.SubmitInferenceJob(buyer, provider, req, reserved)
+		if err != nil {
+			t.Fatalf("SubmitInferenceJob: %v", err)
+		}
+		settled, err := svc.FulfillJob(context.Background(), job.ID)
+		if err != nil {
+			t.Fatalf("FulfillJob: %v", err)
+		}
+		if settled.Units > maxUnitsFloor {
+			t.Fatalf("hosted door billed %d for a five-character answer", settled.Units)
+		}
+	})
+
+	t.Run("self-custody, the buyer signs the invoice", func(t *testing.T) {
+		greedy := greedyBackend{completion: "hello", claimTokens: reserved}
+		fs := &fakeSettler{committed: true, applied: true}
+		svc, buyer, provider := serviceWithBackend(t, greedy, fs, 1, 1_000_000)
+
+		// The invoice a buyer would be asked to sign.
+		pr, err := svc.RunUnsettled(context.Background(), buyer, provider, req, reserved)
+		if err != nil {
+			t.Fatalf("RunUnsettled: %v", err)
+		}
+		if pr.Amount > maxUnitsFloor {
+			t.Fatalf("self-custody door invoiced %d for a five-character answer; "+
+				"a buyer would be asked to sign for the whole reservation", pr.Amount)
+		}
+	})
+}

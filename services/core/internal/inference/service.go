@@ -112,6 +112,11 @@ type InferenceJob struct {
 	Usage Usage
 	// Model is the model that produced the completion.
 	Model string
+	// Receipt is the serving node's signed account of this sale, set once the
+	// payment has actually applied. It is what lets a buyer hold the seller to
+	// what it claimed: the model, the token counts, and the money, over this
+	// exact prompt and completion. Nil when the node holds no signing key.
+	Receipt *Receipt
 	// CreatedAt / UpdatedAt track timing.
 	CreatedAt time.Time
 	UpdatedAt time.Time
@@ -144,6 +149,11 @@ type Service struct {
 	// through consensus requires the payer's private key to sign the transfer, so
 	// the Service is given an Accounts resolver rather than assuming key custody.
 	accounts Accounts
+	// node is the serving node's own key, which signs the receipt handed to a
+	// buyer. Not the payout account: that may be a wallet address whose key this
+	// node does not hold, and the node is the party answerable for the claim
+	// anyway - it is what ran the model.
+	node *token.Account
 
 	// unpaidJobTTL bounds how long a job may sit awaiting a buyer's signature
 	// before its reservation is released. Zero means DefaultUnpaidJobTTL.
@@ -190,6 +200,11 @@ type Config struct {
 	// Accounts resolves buyer accounts to their signing keys for settlement
 	// (required).
 	Accounts Accounts
+	// Node is the serving node's own account, used to sign the receipt it hands
+	// a buyer for each settled job. Optional: with no key the service issues no
+	// receipts rather than unsigned ones, because a receipt nobody signed is a
+	// claim with no author, which is what there was before.
+	Node *token.Account
 }
 
 // NewService constructs an inference Service.
@@ -211,6 +226,7 @@ func NewService(cfg Config) (*Service, error) {
 		registry: cfg.Registry,
 		settler:  cfg.Settler,
 		accounts: cfg.Accounts,
+		node:     cfg.Node,
 		jobs:     make(map[string]*InferenceJob),
 		nonce:    make(map[string]uint64),
 		runAuth:  newRunAuthSeen(),
@@ -458,6 +474,10 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 	s.mu.Lock()
 	job.Status = InferenceJobCompleted
 	job.UpdatedAt = nowUTC()
+	// Issued here and not earlier, because a receipt is an account of a SALE. A
+	// job whose payment was skipped as unaffordable was not one, and a signed
+	// document saying otherwise would be the node's own word against its chain.
+	job.Receipt = s.issueReceipt(job, resp.Usage, billableUnits, mjob.PricePerUnit, amount)
 	cp := job.snapshot()
 	s.mu.Unlock()
 
