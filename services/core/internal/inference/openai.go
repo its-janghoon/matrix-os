@@ -21,6 +21,18 @@ const DefaultOpenAIBaseURL = "https://api.openai.com"
 // stall a marketplace job indefinitely.
 const defaultHTTPTimeout = 60 * time.Second
 
+// effectiveTimeout resolves a configured per-request timeout, falling back to
+// defaultHTTPTimeout when the operator set none. A non-positive value is the
+// "unset" signal rather than "no timeout": a backend with no deadline at all
+// lets one wedged upstream hold a marketplace job open forever, so it is not a
+// value config is allowed to express.
+func effectiveTimeout(configured time.Duration) time.Duration {
+	if configured <= 0 {
+		return defaultHTTPTimeout
+	}
+	return configured
+}
+
 // OpenAIBackend implements the PROVIDER-API contribution mode: it fulfills
 // inference by POSTing to an OpenAI-compatible /v1/chat/completions endpoint on
 // a configurable base URL, authenticating with a Bearer API key. The API key is
@@ -39,8 +51,18 @@ type OpenAIConfig struct {
 	// APIKeyEnv is the environment variable holding the API key. Empty means
 	// "OPENAI_API_KEY". The key is read at construction time; it is required.
 	APIKeyEnv string
+	// RequestTimeout bounds one upstream request end to end, INCLUDING the time
+	// spent reading a streamed body, because http.Client.Timeout covers the body
+	// read and not just the response headers. Zero means defaultHTTPTimeout.
+	//
+	// It is configurable because 60s is a reasonable cap on somebody else's API
+	// and a wrong one on a GPU the provider owns. A local model emitting a few
+	// thousand tokens runs past a minute as a matter of course, and the fixed cap
+	// cut the request off after the GPU had already done the work - the provider
+	// paid for the tokens in electricity and the job failed anyway.
+	RequestTimeout time.Duration
 	// HTTPClient overrides the HTTP client (mainly for tests). When nil a client
-	// with defaultHTTPTimeout is used.
+	// with RequestTimeout, or defaultHTTPTimeout when that is zero, is used.
 	HTTPClient *http.Client
 }
 
@@ -65,7 +87,7 @@ func NewOpenAIBackend(cfg OpenAIConfig) (*OpenAIBackend, error) {
 
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: defaultHTTPTimeout}
+		client = &http.Client{Timeout: effectiveTimeout(cfg.RequestTimeout)}
 	}
 
 	return &OpenAIBackend{baseURL: baseURL, apiKey: apiKey, client: client}, nil

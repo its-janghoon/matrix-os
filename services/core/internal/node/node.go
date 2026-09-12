@@ -435,6 +435,17 @@ type InferenceBackendConfig struct {
 	// APIKeyEnv names the environment variable holding the upstream API key for
 	// "openai". Empty defaults to OPENAI_API_KEY.
 	APIKeyEnv string `yaml:"api_key_env"`
+	// RequestTimeout bounds one upstream request to this backend end to end,
+	// including the time spent reading a streamed body. Zero means the inference
+	// package default (60s).
+	//
+	// A provider serving a model on its own GPU is the reason this is
+	// configurable. 60s is a fair cap on a hosted API, but a local model asked
+	// for a few thousand tokens routinely runs longer, and the fixed cap failed
+	// the job AFTER the GPU had already produced the answer. Size it from the
+	// model and the completion length actually advertised, not generously: the
+	// timeout is also what stops a wedged runner from holding a reservation.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
 	// Models are the model identifiers this backend serves. They are what a
 	// request naming a model is routed on; a backend that declares none can
 	// still be reached by naming its provider ID explicitly.
@@ -2276,9 +2287,10 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 		// Build and install the backend first: a bad kind or a missing API key
 		// should stop the node before it advertises capacity it cannot serve.
 		if _, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
-			Kind:      inference.BackendKind(b.Kind),
-			BaseURL:   b.BaseURL,
-			APIKeyEnv: b.APIKeyEnv,
+			Kind:           inference.BackendKind(b.Kind),
+			BaseURL:        b.BaseURL,
+			APIKeyEnv:      b.APIKeyEnv,
+			RequestTimeout: b.RequestTimeout,
 		}); err != nil {
 			return fmt.Errorf("inference.backends[%d] (%s): %w", i, b.ID, err)
 		}

@@ -140,6 +140,14 @@ Start every node from `matrixd -init` and merge—do not run standalone—the
 The example intentionally contains unresolved deployment inputs and no real
 accounts, addresses, origins, RPC credentials, or secrets.
 
+To contribute GPU capacity to a network that is already running, the
+[GPU provider runbook](docs/runbooks/gpu-provider.md) and its
+[overlay example](services/core/configs/gpu-provider.overlay.yaml.example) cover
+the whole path: sizing a model to one card, running the model server on loopback,
+declaring it under `inference.backends`, pricing tokens against an observed cost
+basis, and which single port a buyer is actually meant to reach. A provider is
+not a validator and needs no stake, no attestor keystore, and no genesis.
+
 ## License
 
 Matrix OS is [MIT licensed](LICENSE).

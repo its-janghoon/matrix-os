@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // LocalHTTPBackend implements the LOCAL contribution mode against a local model
@@ -34,8 +35,13 @@ type LocalHTTPConfig struct {
 	// BaseURL is the runner root (e.g. "http://127.0.0.1:11434"). A trailing
 	// slash is trimmed. Required.
 	BaseURL string
+	// RequestTimeout bounds one runner request end to end. Zero means
+	// defaultHTTPTimeout. A local runner on the provider's own GPU is exactly the
+	// case where the 60s default is too short: it is generating every token
+	// itself, so a long completion outlasts a cap sized for a hosted API.
+	RequestTimeout time.Duration
 	// HTTPClient overrides the HTTP client (mainly for tests). When nil a client
-	// with defaultHTTPTimeout is used.
+	// with RequestTimeout, or defaultHTTPTimeout when that is zero, is used.
 	HTTPClient *http.Client
 }
 
@@ -47,7 +53,7 @@ func NewLocalHTTPBackend(cfg LocalHTTPConfig) (*LocalHTTPBackend, error) {
 	}
 	client := cfg.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: defaultHTTPTimeout}
+		client = &http.Client{Timeout: effectiveTimeout(cfg.RequestTimeout)}
 	}
 	return &LocalHTTPBackend{baseURL: baseURL, client: client}, nil
 }

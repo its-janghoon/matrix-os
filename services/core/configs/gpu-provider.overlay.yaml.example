@@ -1,0 +1,156 @@
+# GPU inference provider overlay EXAMPLE - NOT A STANDALONE matrixd config.
+#
+# 1. Run: matrixd -init -config /absolute/path/to/gpu-provider.yaml
+# 2. Start it once to print this node's peer id and multiaddrs.
+# 3. Merge only the leaf values below into that generated file.
+# 4. Preserve the generated API keys, storage paths, identity, and every
+#    unrelated section.
+# 5. Resolve EVERY <placeholder> before start. Do not commit resolved secrets,
+#    real account ids, or peer addresses.
+# 6. matrixd does not load or merge this overlay automatically and accepts only
+#    one -config file. Review the final full config on the box.
+#
+# See docs/runbooks/gpu-provider.md for the procedure this overlay belongs to.
+
+network:
+  # BIND address, not the advertised one. On EC2 the public/Elastic IP belongs
+  # to the NAT and is not bindable; bind the wildcard and publish
+  # /ip4/<this host's public IP>/tcp/9000/p2p/<its printed peer id> to buyers.
+  listen_addr: "/ip4/0.0.0.0/tcp/9000"
+  bootstrap_peers:
+    # One entry per node already on the network, each with that node's own
+    # printed peer id. A peer id cannot be guessed: it is derived from a key
+    # generated on that node's first start.
+    - "/ip4/<an-existing-node-public-ip>/tcp/9000/p2p/<its-printed-peer-id>"
+
+consensus:
+  # A provider is NOT a validator. It sells compute; it does not order blocks.
+  # Leaving this false is what keeps the GPU box out of the validator set, so it
+  # needs no bonded stake and no attestor keystore.
+  participate_in_open_set: false
+  # Must match the rest of the network. The provider still needs the real value
+  # because its quotes are grossed up for this fee when cost_per_unit is used.
+  fee_basis_points: <the-network's-protocol-fee-in-basis-points>
+  round_timeout: <the-network's-round-timeout>
+
+admin:
+  # Loopback ONLY. The admin API's key can move funds. Nothing in a security
+  # group should ever open 9090; reach it over an SSH tunnel.
+  addr: "127.0.0.1:9090"
+
+connect:
+  # THE BUYER DOOR. This is the endpoint a buyer's openai SDK points base_url at,
+  # and it is the only listener that has any business being public. Terminate TLS
+  # in front of it: an API key travels in an Authorization header.
+  addr: "0.0.0.0:9093"
+  # Exact browser origins only, and only if a browser actually calls this node.
+  # curl, the Go client and the SDK under Node send no Origin header and need no
+  # entry here. A wildcard is for development.
+  allowed_origins:
+    - "https://<exact-buyer-origin-host>"
+  # A public provider endpoint serves reads to callers with no key. Chain data is
+  # public; this cannot move money or reserve capacity.
+  public_reads: true
+  # Opens the signature-authorised writes, and ALSO makes RunInferenceJob require
+  # the buyer's signed RunAuthorization. One field sets both on purpose: without
+  # the authorization `buyer` is just a string, and anyone could name a funded
+  # account, have this GPU do the work, and never sign for it.
+  signed_writes: true
+  rate_limit_per_minute: 600
+  rate_limit_burst: 120
+
+security:
+  enable_acls: true
+  api_keys:
+    # `account` is what makes a key able to BUY over /v1/chat/completions: that
+    # protocol carries no buyer field, so the key has to say whose balance to
+    # charge, and this node must hold that account's signing key. A key with no
+    # account drives every other surface and cannot buy inference.
+    #
+    # Issue one key per buyer you custody for. Preserve the generated local-admin
+    # key rather than replacing this list wholesale.
+    - key: "<generated-or-issued-key>"
+      role: "user"
+      name: "<buyer-label>"
+      account: "<64-lowercase-hex-matrix-account-this-key-spends-from>"
+
+inference:
+  addr: "0.0.0.0:9092"
+  # CLEAR THE DEMO PROVIDER. `matrixd -init` sets this to
+  # "demo-inference-provider" and registers a GPU-free echo backend so a fresh
+  # node can fulfill inference without hardware. On a real provider that is a
+  # listing that answers paying prompts with a stub.
+  echo_provider: ""
+  backends:
+    - # The provider id buyers see on the order book and `--provider` names.
+      # Unique across this node and never equal to echo_provider.
+      id: "<gpu-box-1>"
+
+      # "openai" speaks /v1/chat/completions, which is what vLLM, SGLang, TGI and
+      # llama.cpp's server expose. It is the one backend that STREAMS, and
+      # streaming plus continuous batching is what lets a single GPU serve more
+      # than one buyer at a time. Use "local-http" only for an Ollama-style
+      # /api/chat runner, and accept that it does not stream.
+      kind: "openai"
+
+      # Loopback. The model server has no auth worth exposing and no rate
+      # limiting; this node is what authenticates, meters and charges. A model
+      # server on a public interface is free inference for whoever finds it.
+      base_url: "http://127.0.0.1:8000"
+
+      # NAMES the environment variable; never carries the key itself. Put it in
+      # the node PROCESS environment (systemd EnvironmentFile=, root-owned 0600),
+      # not just an interactive shell. An empty variable fails construction at
+      # startup, which is better than advertising capacity that cannot be served.
+      api_key_env: "MATRIX_VLLM_API_KEY"
+
+      # Bounds one upstream request end to end, INCLUDING reading a streamed
+      # body. Default 60s, which is a fair cap on somebody else's hosted API and
+      # the wrong one on a GPU you own: a local model asked for a few thousand
+      # tokens runs past a minute routinely, and the fixed cap failed the job
+      # AFTER the GPU had already produced the answer.
+      #
+      # Size it from the model and the completion length actually advertised.
+      # Not enormous either: this timeout is also what stops a wedged runner from
+      # holding a reservation forever.
+      request_timeout: 10m
+
+      # What a buyer puts in "model". Must match the model server's
+      # --served-model-name; the order book lowercases these. A backend that
+      # advertises none is reachable by provider id only and is never selected by
+      # model, so it will look invisible to /v1/chat/completions.
+      models:
+        - "<the-served-model-name>"
+
+      # A CONCURRENCY budget in token units, not a monthly quota. Each job
+      # reserves its estimate up front and the reservation returns on completion
+      # or expiry. Derive it from what the GPU actually runs at once
+      # (--max-num-seqs x --max-model-len), not from ambition: capacity far above
+      # real throughput converts a queue into timeouts, and a timeout after the
+      # work is done is the expensive kind.
+      capacity: <tokens-in-flight-at-once>
+
+      # PRICING - pick exactly one of the two forms below.
+      #
+      # Form A: an already-final gross customer quote in native MATRIX base units
+      # (9 decimals). You absorb the protocol fee out of it yourself.
+      price_per_unit: <base-units-per-token>
+      #
+      # Form B (loss-protected, preferred): your own manually observed cost basis
+      # plus a markup, grossed up for consensus.fee_basis_points so the markup
+      # survives the fee. cost_per_unit is NOT a peg and NOT a DEX oracle. On
+      # owned hardware the honest basis is the instance hour divided by the
+      # tokens that hour actually produces under load. Mutually exclusive with
+      # price_per_unit - set one or the other, never both.
+      # cost_per_unit: <your-observed-cost-per-token-in-base-units>
+      # markup_basis_points: 2000
+
+      # How long this quote stays usable. Default 24h. A stale quote fails the
+      # job BEFORE any upstream work, which is the right direction to fail. Every
+      # restart re-applies the config quote with a fresh observation time and
+      # keeps live reservations, so a scheduled restart is a legitimate refresh.
+      quote_ttl: 24h
+
+# Genesis, bridge and rewards are deliberately omitted. A provider joining an
+# existing network applies neither: it syncs the chain it joins. Do not paste a
+# genesis block or an attestor keystore onto a GPU box.

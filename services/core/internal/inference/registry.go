@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"time"
 )
 
 // BackendKind names a backend implementation for config-driven selection.
@@ -30,6 +31,11 @@ type BackendConfig struct {
 	// APIKeyEnv names the environment variable holding the provider API key for
 	// KindOpenAI. Empty defaults to OPENAI_API_KEY.
 	APIKeyEnv string
+	// RequestTimeout bounds one upstream request for KindOpenAI and
+	// KindLocalHTTP. Zero means the package default (60s). It exists so a
+	// provider serving a model on its own GPU can allow a completion that runs
+	// longer than a cap sized for a hosted API.
+	RequestTimeout time.Duration
 	// EchoPrefix optionally sets the EchoBackend prefix for KindEcho.
 	EchoPrefix string
 }
@@ -42,9 +48,16 @@ func NewBackend(cfg BackendConfig) (Backend, error) {
 	case KindEcho:
 		return &EchoBackend{Prefix: cfg.EchoPrefix}, nil
 	case KindOpenAI:
-		return NewOpenAIBackend(OpenAIConfig{BaseURL: cfg.BaseURL, APIKeyEnv: cfg.APIKeyEnv})
+		return NewOpenAIBackend(OpenAIConfig{
+			BaseURL:        cfg.BaseURL,
+			APIKeyEnv:      cfg.APIKeyEnv,
+			RequestTimeout: cfg.RequestTimeout,
+		})
 	case KindLocalHTTP:
-		return NewLocalHTTPBackend(LocalHTTPConfig{BaseURL: cfg.BaseURL})
+		return NewLocalHTTPBackend(LocalHTTPConfig{
+			BaseURL:        cfg.BaseURL,
+			RequestTimeout: cfg.RequestTimeout,
+		})
 	default:
 		return nil, fmt.Errorf("%w: unknown kind %q", ErrBackendNotFound, cfg.Kind)
 	}
