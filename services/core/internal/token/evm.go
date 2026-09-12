@@ -39,6 +39,21 @@ import (
 // or destroyed in the conversion.
 const EVMDecimals = 18
 
+// ReservedResolver translates a reserved ADDRESS into the recipient string the
+// operation it names is spelled as, given the account that signed.
+//
+// It exists because the two namespaces cannot be reconciled any other way. A
+// consensus operation is addressed by a string - "consensus/stake/bond/<id>" -
+// and an Ethereum transaction's `to` is twenty bytes with no room for one. A
+// small set of fixed addresses stands in for the operations an account performs
+// ON ITSELF, and the parameter that would not fit comes from the SENDER, which
+// is recovered from the signature and therefore cannot be claimed.
+//
+// It is a function rather than a table here because the recipient strings belong
+// to consensus, which imports this package; the engine supplies the mapping.
+// Returning ("", false) means the address is an ordinary account.
+type ReservedResolver func(to ethsig.Address, sender string) (recipient string, ok bool)
+
 // NewTransactionFromEVM builds a chain transaction from the raw bytes an
 // Ethereum wallet produced, after checking they authorise exactly what the
 // resulting transaction says.
@@ -46,7 +61,9 @@ const EVMDecimals = 18
 // chainID is this chain's id. A transaction signed for any other chain is
 // refused here, which is the whole reason EIP-155 exists and the property the
 // layout this supplements did not have.
-func NewTransactionFromEVM(raw []byte, chainID uint64) (*Transaction, error) {
+//
+// reserved may be nil, in which case every recipient is an ordinary account.
+func NewTransactionFromEVM(raw []byte, chainID uint64, reserved ReservedResolver) (*Transaction, error) {
 	parsed, err := evmtx.DecodeRaw(raw)
 	if err != nil {
 		return nil, err
@@ -55,7 +72,7 @@ func NewTransactionFromEVM(raw []byte, chainID uint64) (*Transaction, error) {
 	if err != nil {
 		return nil, err
 	}
-	to, amount, err := evmRecipientAndAmount(parsed)
+	to, amount, err := evmRecipientAndAmount(parsed, EthAccountID(sender), reserved)
 	if err != nil {
 		return nil, err
 	}
@@ -80,7 +97,7 @@ func NewTransactionFromEVM(raw []byte, chainID uint64) (*Transaction, error) {
 
 // evmRecipientAndAmount translates an envelope's recipient and value into the
 // ledger's account id and base units.
-func evmRecipientAndAmount(parsed *evmtx.Transaction) (to string, amount uint64, err error) {
+func evmRecipientAndAmount(parsed *evmtx.Transaction, senderID string, reserved ReservedResolver) (to string, amount uint64, err error) {
 	if parsed.To == nil {
 		return "", 0, fmt.Errorf("%w: contract creation is not supported: this chain runs no EVM",
 			ErrInvalidTransaction)
@@ -99,6 +116,14 @@ func evmRecipientAndAmount(parsed *evmtx.Transaction) (to string, amount uint64,
 	amount, err = ERC20ToNative(value)
 	if err != nil {
 		return "", 0, fmt.Errorf("%w: value %s: %v", ErrInvalidTransaction, value, err)
+	}
+	// A reserved address is an operation, not an account. Resolved AFTER the value
+	// is converted, so an operation that must carry no value is still rejected by
+	// its own rule rather than here.
+	if reserved != nil {
+		if recipient, ok := reserved(*parsed.To, senderID); ok {
+			return recipient, amount, nil
+		}
 	}
 	return EthAccountID(*parsed.To), amount, nil
 }
@@ -123,11 +148,11 @@ func (t *Transaction) EVMHash() ([]byte, error) {
 // this safe to receive from a peer. The envelope is the only thing signed, so a
 // field that disagrees with it is a field nobody authorised, whether it was
 // changed in transit or by a malicious proposer.
-func (t *Transaction) VerifyEVM(chainID uint64) error {
+func (t *Transaction) VerifyEVM(chainID uint64, reserved ReservedResolver) error {
 	if !t.IsEVM() {
 		return fmt.Errorf("%w: not an ethereum-enveloped transaction", ErrInvalidTransaction)
 	}
-	derived, err := NewTransactionFromEVM(t.Raw, chainID)
+	derived, err := NewTransactionFromEVM(t.Raw, chainID, reserved)
 	if err != nil {
 		return err
 	}
@@ -162,9 +187,9 @@ func (t *Transaction) VerifyEVM(chainID uint64) error {
 // Non-EVM transactions fall through to Verify unchanged. They carry no chain id
 // at all, which is a gap this scheme closes only for transactions that use it;
 // see the migration note in docs.
-func (t *Transaction) VerifyForChain(chainID uint64) error {
+func (t *Transaction) VerifyForChain(chainID uint64, reserved ReservedResolver) error {
 	if t.IsEVM() {
-		return t.VerifyEVM(chainID)
+		return t.VerifyEVM(chainID, reserved)
 	}
 	return t.Verify()
 }

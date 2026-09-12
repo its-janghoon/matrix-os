@@ -54,7 +54,7 @@ func (f *fakeChain) SubmitRaw(raw []byte) ([]byte, error) {
 	if f.rejectSubmit != nil {
 		return nil, f.rejectSubmit
 	}
-	tx, err := token.NewTransactionFromEVM(raw, testChainID)
+	tx, err := token.NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		return nil, err
 	}

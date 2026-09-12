@@ -8,6 +8,7 @@ import (
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // Bonded stake: what a validator has at risk.
@@ -141,8 +142,25 @@ func ParseStakeRecipient(to string) (StakeRequest, error) {
 // checkAccountID requires a 64-hex-character account id, the form every
 // ed25519-derived id takes.
 func checkAccountID(id string) error {
+	// Both account kinds, because a reserved recipient names an ACCOUNT and there
+	// are two kinds of those. Accepting only the ed25519 form meant a wallet-held
+	// account could hold a balance and be paid, but could not bond, withdraw or
+	// leave the set - its own id was refused as malformed by the parser for the
+	// operation it was trying to perform.
+	if token.IsEthAccountID(id) {
+		if _, err := token.ParseEthAccountID(id); err != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidMessage, err)
+		}
+		// Lowercase because EthAccountID produces one form per address, and two
+		// spellings of one account would be two bond accounts.
+		if id != strings.ToLower(id) {
+			return fmt.Errorf("%w: an ethereum account id must be lowercase", ErrInvalidMessage)
+		}
+		return nil
+	}
 	if len(id) != 64 {
-		return fmt.Errorf("%w: must be a 64-hex-character account id, got %d characters", ErrInvalidMessage, len(id))
+		return fmt.Errorf("%w: must be a 64-hex-character account id or an eth:0x... address, got %d characters",
+			ErrInvalidMessage, len(id))
 	}
 	for i := 0; i < len(id); i++ {
 		c := id[i]

@@ -149,9 +149,10 @@ func (t *Transaction) Verify() error {
 	// path below is untouched.
 	if t.IsEVM() {
 		// The envelope names the chain it was signed for, so it can be verified
-		// self-consistently here; confirming it is THIS chain needs config and
-		// happens in VerifyForChain, which every consensus path calls.
-		return t.VerifyEVM(t.ChainID)
+		// self-consistently here; confirming it is THIS chain, and resolving any
+		// reserved address, needs config and happens in VerifyForChain, which
+		// every consensus path calls.
+		return t.VerifyEVM(t.ChainID, nil)
 	}
 	if t.SenderIsEth() {
 		return t.VerifyEthTransfer()

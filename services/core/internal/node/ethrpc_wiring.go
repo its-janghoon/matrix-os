@@ -41,7 +41,7 @@ func (b *ethRPCBackend) NextNonce(accountID string, pending bool) uint64 {
 // ADMITTED: a wallet handed an id for something that was refused shows it
 // pending forever, and the user has no way to learn it never existed.
 func (b *ethRPCBackend) SubmitRaw(raw []byte) ([]byte, error) {
-	tx, err := token.NewTransactionFromEVM(raw, b.chainID)
+	tx, err := token.NewTransactionFromEVM(raw, b.chainID, consensus.ReservedRecipientFor)
 	if err != nil {
 		return nil, err
 	}

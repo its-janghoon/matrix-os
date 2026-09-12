@@ -52,7 +52,7 @@ func walletSigned(t *testing.T, mutate func(*evmtx.Transaction)) ([]byte, ethsig
 func TestEnvelopeBecomesAChainTransaction(t *testing.T) {
 	raw, signer := walletSigned(t, nil)
 
-	tx, err := NewTransactionFromEVM(raw, testChainID)
+	tx, err := NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		t.Fatalf("NewTransactionFromEVM: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestEnvelopeBecomesAChainTransaction(t *testing.T) {
 	if !tx.IsEVM() {
 		t.Fatal("the transaction should report itself as ethereum-enveloped")
 	}
-	if err := tx.VerifyForChain(testChainID); err != nil {
+	if err := tx.VerifyForChain(testChainID, nil); err != nil {
 		t.Fatalf("VerifyForChain: %v", err)
 	}
 
@@ -94,7 +94,7 @@ func TestEnvelopeBecomesAChainTransaction(t *testing.T) {
 // because only the bytes were ever signed.
 func TestTamperedFieldsAreRejected(t *testing.T) {
 	raw, _ := walletSigned(t, nil)
-	base, err := NewTransactionFromEVM(raw, testChainID)
+	base, err := NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		t.Fatalf("NewTransactionFromEVM: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestTamperedFieldsAreRejected(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			tampered := *base
 			tc.tamper(&tampered)
-			if err := tampered.VerifyForChain(testChainID); err == nil {
+			if err := tampered.VerifyForChain(testChainID, nil); err == nil {
 				t.Fatalf("editing %s should have failed verification", tc.name)
 			}
 		})
@@ -125,19 +125,19 @@ func TestTamperedFieldsAreRejected(t *testing.T) {
 // before: a transaction signed for a different network must not apply here.
 func TestAnotherChainsTransactionIsRejected(t *testing.T) {
 	raw, _ := walletSigned(t, nil)
-	if _, err := NewTransactionFromEVM(raw, testChainID+1); !errors.Is(err, evmtx.ErrChainIDMismatch) {
+	if _, err := NewTransactionFromEVM(raw, testChainID+1, nil); !errors.Is(err, evmtx.ErrChainIDMismatch) {
 		t.Fatalf("building for the wrong chain = %v, want ErrChainIDMismatch", err)
 	}
-	tx, err := NewTransactionFromEVM(raw, testChainID)
+	tx, err := NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		t.Fatalf("NewTransactionFromEVM: %v", err)
 	}
-	if err := tx.VerifyForChain(testChainID + 1); err == nil {
+	if err := tx.VerifyForChain(testChainID+1, nil); err == nil {
 		t.Fatal("verifying against the wrong chain should have failed")
 	}
 	// A node that configured no chain id accepts nothing on this path, rather
 	// than treating zero as a wildcard.
-	if err := tx.VerifyForChain(0); err == nil {
+	if err := tx.VerifyForChain(0, nil); err == nil {
 		t.Fatal("a node with no chain id must not accept an enveloped transaction")
 	}
 }
@@ -151,7 +151,7 @@ func TestValueMustBeExactlyRepresentable(t *testing.T) {
 	raw, _ := walletSigned(t, func(tx *evmtx.Transaction) {
 		tx.Value = new(big.Int).Sub(NativeToERC20(NativeUnit), big.NewInt(1))
 	})
-	if _, err := NewTransactionFromEVM(raw, testChainID); err == nil {
+	if _, err := NewTransactionFromEVM(raw, testChainID, nil); err == nil {
 		t.Fatal("a value that is not an exact multiple of the native unit must be refused")
 	}
 
@@ -159,7 +159,7 @@ func TestValueMustBeExactlyRepresentable(t *testing.T) {
 	raw, _ = walletSigned(t, func(tx *evmtx.Transaction) {
 		tx.Value = NativeToERC20(1)
 	})
-	tx, err := NewTransactionFromEVM(raw, testChainID)
+	tx, err := NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		t.Fatalf("one native base unit should be representable: %v", err)
 	}
@@ -169,7 +169,7 @@ func TestValueMustBeExactlyRepresentable(t *testing.T) {
 
 	// Zero is representable and is an ordinary transfer of nothing.
 	raw, _ = walletSigned(t, func(tx *evmtx.Transaction) { tx.Value = big.NewInt(0) })
-	if _, err := NewTransactionFromEVM(raw, testChainID); err != nil {
+	if _, err := NewTransactionFromEVM(raw, testChainID, nil); err != nil {
 		t.Fatalf("a zero-value transfer should decode: %v", err)
 	}
 }
@@ -179,12 +179,12 @@ func TestValueMustBeExactlyRepresentable(t *testing.T) {
 // worst available answer, because the wallet would report success.
 func TestWhatThisChainCannotDoIsRefusedNotIgnored(t *testing.T) {
 	raw, _ := walletSigned(t, func(tx *evmtx.Transaction) { tx.To = nil })
-	if _, err := NewTransactionFromEVM(raw, testChainID); !errors.Is(err, ErrInvalidTransaction) {
+	if _, err := NewTransactionFromEVM(raw, testChainID, nil); !errors.Is(err, ErrInvalidTransaction) {
 		t.Fatalf("contract creation = %v, want ErrInvalidTransaction", err)
 	}
 
 	raw, _ = walletSigned(t, func(tx *evmtx.Transaction) { tx.Data = []byte{0xa9, 0x05, 0x9c, 0xbb} })
-	if _, err := NewTransactionFromEVM(raw, testChainID); !errors.Is(err, ErrInvalidTransaction) {
+	if _, err := NewTransactionFromEVM(raw, testChainID, nil); !errors.Is(err, ErrInvalidTransaction) {
 		t.Fatalf("calldata = %v, want ErrInvalidTransaction", err)
 	}
 }
@@ -197,14 +197,14 @@ func TestDynamicFeeEnvelopeWorksToo(t *testing.T) {
 		tx.Type = evmtx.TxDynamicFee
 		tx.GasTipCap = big.NewInt(1_000_000)
 	})
-	tx, err := NewTransactionFromEVM(raw, testChainID)
+	tx, err := NewTransactionFromEVM(raw, testChainID, nil)
 	if err != nil {
 		t.Fatalf("NewTransactionFromEVM: %v", err)
 	}
 	if tx.SenderID() != EthAccountID(signer) {
 		t.Fatalf("sender = %s, want %s", tx.SenderID(), EthAccountID(signer))
 	}
-	if err := tx.VerifyForChain(testChainID); err != nil {
+	if err := tx.VerifyForChain(testChainID, nil); err != nil {
 		t.Fatalf("VerifyForChain: %v", err)
 	}
 }
@@ -225,10 +225,10 @@ func TestNonEVMTransactionsAreUnaffected(t *testing.T) {
 	if tx.IsEVM() {
 		t.Fatal("an ed25519 transaction must not report itself as enveloped")
 	}
-	if err := tx.VerifyForChain(testChainID); err != nil {
+	if err := tx.VerifyForChain(testChainID, nil); err != nil {
 		t.Fatalf("VerifyForChain on an ed25519 transaction: %v", err)
 	}
-	if err := tx.VerifyForChain(0); err != nil {
+	if err := tx.VerifyForChain(0, nil); err != nil {
 		t.Fatalf("an ed25519 transaction carries no chain id and must still verify: %v", err)
 	}
 }

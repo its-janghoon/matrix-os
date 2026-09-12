@@ -1006,7 +1006,7 @@ func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
 	// VerifyForChain rather than Verify: an Ethereum envelope's signature proves
 	// which chain it was signed FOR, and only this node's config knows which
 	// chain this IS. Verify alone would accept another network's transaction.
-	if err := tx.VerifyForChain(e.chainID); err != nil {
+	if err := tx.VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 		return err
 	}
 	if tx.To == "" {
@@ -1265,7 +1265,7 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 	if err := json.Unmarshal(msg.Payload, &tx); err != nil || !isOpenMembershipTransaction(&tx) {
 		return
 	}
-	if err := tx.VerifyForChain(e.chainID); err != nil {
+	if err := tx.VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 		return
 	}
 	// Submit may echo a newly-seen transaction once. The mempool dedup makes
@@ -1871,7 +1871,7 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		// chain check is part of block validity and not only a mempool filter. A
 		// proposer that includes another chain's transaction proposes an invalid
 		// block rather than one honest nodes merely decline to relay.
-		if err := b.Txs[i].VerifyForChain(e.chainID); err != nil {
+		if err := b.Txs[i].VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 			return fmt.Errorf("%w: tx %d: %v", ErrInvalidMessage, i, err)
 		}
 		if b.Txs[i].To == "" {
