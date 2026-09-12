@@ -151,6 +151,20 @@ type Config struct {
 		RateLimitBurst int `yaml:"rate_limit_burst"`
 	} `yaml:"connect"`
 	Consensus struct {
+		// ChainID is this chain's EIP-155 identifier. It is inside the signature
+		// of every transaction an Ethereum wallet produces, which is what stops a
+		// transaction signed for another network - a testnet, or someone else's
+		// chain - from being replayed here.
+		//
+		// It must be IDENTICAL on every node and must never be changed on a
+		// running chain: a node with a different value reaches a different verdict
+		// on the same block, and changing it invalidates every signature already
+		// made for the old one. Pick an id nobody else uses (chainlist.org is the
+		// registry people check) before any wallet connects.
+		//
+		// Zero, the default, means this node accepts no Ethereum-enveloped
+		// transaction at all. It is never read as "any chain".
+		ChainID uint64 `yaml:"chain_id"`
 		// MembershipMode is "operator-approved" for the legacy allow-list or
 		// "bonded-open" for permissionless, self-signed admission after the
 		// configured minimum bond has committed.
@@ -1216,6 +1230,7 @@ func (n *Node) Start() error {
 		Providers:                consensus.NewProviderRegistry(n.kvStore),
 		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
 		ProviderEmissionHalfLife: n.config.Consensus.Rewards.HalfLife,
+		ChainID:                  n.config.Consensus.ChainID,
 		ApprovedProviders:        n.config.Consensus.Rewards.ApprovedProviders,
 		OnEquivocation: func(eq *consensus.Equivocation) {
 			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+

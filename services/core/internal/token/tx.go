@@ -40,6 +40,18 @@ type Transaction struct {
 	Timestamp int64             `json:"timestamp"`
 	PrevHash  []byte            `json:"prev_hash"`
 	Signature []byte            `json:"signature"`
+
+	// ChainID is the chain this transaction is for. It is set only on the
+	// Ethereum-envelope path, where it is derived from the signature, and is
+	// zero on the two older paths, which carry no chain identifier at all.
+	ChainID uint64 `json:"chain_id,omitempty"`
+	// Raw is the exact signed Ethereum envelope, present only on that path.
+	//
+	// It is the AUTHORITY, not a copy: every other field above is derived from
+	// these bytes and re-derived on verification, so a peer cannot gossip an
+	// envelope with the amount field edited. Signature is empty on this path
+	// because the envelope carries its own r, s and v.
+	Raw []byte `json:"raw,omitempty"`
 }
 
 // SenderID returns the sender's stable account identifier derived from From.
@@ -135,6 +147,12 @@ func (t *Transaction) Verify() error {
 	// An Ethereum-controlled sender has a different signable payload, because
 	// MetaMask signs EIP-712 typed data and never arbitrary bytes. The ed25519
 	// path below is untouched.
+	if t.IsEVM() {
+		// The envelope names the chain it was signed for, so it can be verified
+		// self-consistently here; confirming it is THIS chain needs config and
+		// happens in VerifyForChain, which every consensus path calls.
+		return t.VerifyEVM(t.ChainID)
+	}
 	if t.SenderIsEth() {
 		return t.VerifyEthTransfer()
 	}

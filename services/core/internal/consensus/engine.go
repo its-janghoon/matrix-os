@@ -243,6 +243,15 @@ type Config struct {
 	// ProviderEmissionHalfLife is how many blocks halve the emission. Zero means
 	// DefaultProviderEmissionHalfLife.
 	ProviderEmissionHalfLife uint64
+	// ChainID identifies this chain inside the signature of every
+	// Ethereum-enveloped transaction, which is what stops one signed for another
+	// network from being replayed here. It must be identical on every node: a
+	// node with a different value reaches a different verdict on the same block.
+	//
+	// Zero means no Ethereum-enveloped transaction is accepted at all, which is
+	// the safe reading for a network that has not chosen an id. It is never
+	// treated as "any chain".
+	ChainID uint64
 	// ApprovedProviders is this operator's allow-list of provider registry
 	// changes, as "add:<account id>" / "remove:<account id>". Same veto model as
 	// ApprovedSetChanges: a node offers what its operator listed and votes
@@ -324,7 +333,10 @@ type Engine struct {
 	heightEnteredAt      time.Time
 	membershipMode       MembershipMode
 	participateInOpenSet bool
-	approvedChanges      map[string]struct{}
+	// chainID is what an Ethereum-enveloped transaction's signature must commit
+	// to for this node to accept it. See Config.ChainID.
+	chainID         uint64
+	approvedChanges map[string]struct{}
 	// approvedSpecs is the same allow-list in parsed form. A node does not only
 	// vote for the changes its operator approved, it also PROPOSES them: without
 	// that, approving a change would have no effect until some other node
@@ -659,6 +671,7 @@ func New(cfg Config) (*Engine, error) {
 		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
 		membershipMode:       membershipMode,
 		participateInOpenSet: participateInOpenSet,
+		chainID:              cfg.ChainID,
 		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
 		committedNonces:      make(map[string]struct{}),
@@ -945,7 +958,10 @@ func (e *Engine) handleTx(_ context.Context, msg transport.Message) {
 }
 
 func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
-	if err := tx.Verify(); err != nil {
+	// VerifyForChain rather than Verify: an Ethereum envelope's signature proves
+	// which chain it was signed FOR, and only this node's config knows which
+	// chain this IS. Verify alone would accept another network's transaction.
+	if err := tx.VerifyForChain(e.chainID); err != nil {
 		return err
 	}
 	if tx.To == "" {
@@ -1204,7 +1220,7 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 	if err := json.Unmarshal(msg.Payload, &tx); err != nil || !isOpenMembershipTransaction(&tx) {
 		return
 	}
-	if err := tx.Verify(); err != nil {
+	if err := tx.VerifyForChain(e.chainID); err != nil {
 		return
 	}
 	// Submit may echo a newly-seen transaction once. The mempool dedup makes
@@ -1792,7 +1808,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	seenNonceInBlock := make(map[string]struct{}, len(b.Txs))
 	seenMembershipIdentities := make(map[string]struct{})
 	for i := range b.Txs {
-		if err := b.Txs[i].Verify(); err != nil {
+		// Every node validating this block must reach the same verdict, so the
+		// chain check is part of block validity and not only a mempool filter. A
+		// proposer that includes another chain's transaction proposes an invalid
+		// block rather than one honest nodes merely decline to relay.
+		if err := b.Txs[i].VerifyForChain(e.chainID); err != nil {
 			return fmt.Errorf("%w: tx %d: %v", ErrInvalidMessage, i, err)
 		}
 		if b.Txs[i].To == "" {
