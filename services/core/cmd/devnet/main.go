@@ -155,6 +155,11 @@ func run(keep bool, timeout time.Duration) error {
 	if err := checkRejections(nodes[0], buyer); err != nil {
 		return err
 	}
+	if !keep {
+		if err := checkGenesisSnapshot(matrixd, nodes); err != nil {
+			return err
+		}
+	}
 
 	fmt.Printf("\nPASS - a three-validator network came up, agreed, and settled a wallet-signed transfer.\n")
 	if keep {
@@ -789,3 +794,101 @@ func checkRejections(n *devNode, w *wallet) error {
 	ok("a second transfer reusing a spent nonce is refused")
 	return nil
 }
+
+// checkGenesisSnapshot proves the one irreversible step of a relaunch.
+//
+// A new genesis is a new ledger: nothing carries over on its own, and a balance
+// survives only because somebody wrote it into genesis.allocations. Doing that
+// by hand is the step nobody can review and everybody can get wrong, and it
+// happens exactly once, under a freeze, with wrapped tokens on the other side of
+// a bridge depending on the escrow figure being right.
+//
+// So this reads the ledger of a chain that actually ran - one that has been
+// through a wallet-signed transfer, so the balances are not the ones genesis
+// wrote - and checks the file that comes back would be accepted by the same
+// preflight a production launch runs. It needs the node stopped, because the
+// store is opened directly.
+func checkGenesisSnapshot(matrixd string, nodes []*devNode) error {
+	step("reading a stopped node's ledger back as a relaunch genesis")
+
+	// The store is a single-writer database, so the snapshot reads what the node
+	// has committed rather than racing it.
+	for _, n := range nodes {
+		n.stop()
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(matrixd, "-genesis-snapshot", "-config", nodes[0].configPath)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		// A non-zero exit is the snapshot saying it needs a human decision, and
+		// what needs deciding is in its REPORT on stdout, not in the error.
+		return fmt.Errorf("genesis snapshot failed: %v\n%s\n%s", err, stdout.String(), stderr.String())
+	}
+	rendered := stdout.String()
+
+	var parsed struct {
+		Genesis struct {
+			Allocations []struct {
+				Account string `yaml:"account"`
+				Amount  uint64 `yaml:"amount"`
+			} `yaml:"allocations"`
+			RewardPool uint64 `yaml:"reward_pool"`
+		} `yaml:"genesis"`
+	}
+	if err := yaml.Unmarshal([]byte(rendered), &parsed); err != nil {
+		return fmt.Errorf("the snapshot is not valid yaml: %v\n%s", err, rendered)
+	}
+
+	// The supply identity is the property that matters: a relaunch that does not
+	// close at the cap is one where somebody's balance was dropped or counted
+	// twice, and production preflight refuses it.
+	total := parsed.Genesis.RewardPool
+	for _, a := range parsed.Genesis.Allocations {
+		total += a.Amount
+	}
+	if total != nativeMaxSupply {
+		return fmt.Errorf("the snapshot's supply is %d, want the cap %d - a balance was "+
+			"dropped or double counted:\n%s", total, nativeMaxSupply, rendered)
+	}
+	if !strings.Contains(rendered, "Supply closes exactly at the cap") {
+		return fmt.Errorf("the snapshot does not report that supply closes:\n%s", rendered)
+	}
+	if strings.Contains(rendered, "NOT READY") {
+		return fmt.Errorf("the snapshot reports it is incomplete:\n%s", rendered)
+	}
+	ok("%d allocations plus a reward pool, totalling the supply cap exactly", len(parsed.Genesis.Allocations))
+
+	// Paste it under a consensus block, the way the runbook tells an operator to,
+	// and run the production preflight the real launch runs.
+	config := fmt.Sprintf(`consensus:
+  validators:
+    - %s
+    - %s
+    - %s
+  epoch_length: 100
+  round_timeout: "3s"
+  stake:
+    enabled: true
+    min_bond: 1000
+    bond: 1000
+%s`, nodes[0].consensusID, nodes[1].consensusID, nodes[2].consensusID, rendered)
+
+	path := filepath.Join(filepath.Dir(nodes[0].configPath), "relaunch-genesis.yaml")
+	if err := os.WriteFile(path, []byte(config), 0o600); err != nil {
+		return err
+	}
+	out, err := exec.Command(matrixd, "-preflight-production", "-config", path).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("production preflight refused the snapshot's own output: %v\n%s\n\n%s",
+			err, out, config)
+	}
+	ok("production preflight accepts it as a genesis file, unedited")
+	return nil
+}
+
+// nativeMaxSupply is the cap a production genesis must close at exactly. It is
+// repeated here rather than imported so this stays a black-box check: it runs
+// the real binary and reads its output, the way an operator would.
+const nativeMaxSupply = 1_000_000_000_000_000_000

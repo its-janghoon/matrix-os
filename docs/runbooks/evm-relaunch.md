@@ -150,8 +150,43 @@ the config, do not restart around it.
 2. **Run `matrix bridge reconcile`** and record its output in the evidence file
    with the Base block `totalSupply()` was read at. An error here stops the
    relaunch until it is understood.
-3. **Give every node a fresh data directory and read its new identity.** This
-   comes BEFORE the genesis file, because the genesis names these ids.
+3. **Read the old ledger back as a genesis file.** Do this FIRST, while the
+   old data directory is still in place, with the node stopped:
+
+   ```sh
+   matrixd -genesis-snapshot -config <the node's OLD config> > genesis-block.yaml
+   ```
+
+   It prints the `genesis:` block to paste, with a report above it of what it
+   decided. Copying accounts by hand is the one irreversible step of a relaunch
+   and the one nobody can review, so do not do it by hand.
+
+   What it decides, and why each would otherwise be a quiet loss:
+
+   - **The reward pool** becomes `reward_pool`, not an allocation. As an
+     allocation it would be credited to the account AND counted again as the
+     pool, and the supply would not close.
+   - **Bonds go back to the accounts that posted them.** A bond lives in a
+     reserved account genesis does not accept, so it cannot carry as itself.
+     Dropped, every validator loses its stake in a file that still looks
+     complete. It is returned to its owner and re-bonded in step 7.
+   - **Undistributed fees go back to the reward pool.** That account holds the
+     remainder of an uneven split, owed to the validator set collectively and to
+     no member in particular - which is why no block has paid it out. Carrying it
+     to an account would hand it to whoever was named first.
+   - **The escrow is emitted first** and flagged, because it is an accounting
+     fact rather than a policy choice and must match wrapped supply.
+
+   It refuses to guess. A reserved account it does not recognise is reported
+   under `NOT READY`, left out of the total, and the command exits non-zero, so
+   a script cannot mistake an unfinished file for a finished one. Decide where
+   that value goes and add it by hand.
+
+   Check the supply line says it closes exactly at the cap. Short or over means a
+   balance was dropped or counted twice, and production preflight refuses either.
+4. **Give every node a fresh data directory and read its new identity.** This
+   comes after the snapshot above, which needs the old store, and before the
+   genesis file, which names these ids.
 
    The hosts do not need reinstalling and nothing needs uninstalling: a relaunch
    is a new binary, a new config, and an empty store. But the store is also
@@ -183,32 +218,38 @@ the config, do not restart around it.
    old chain's store, which is the thing being replaced. Identities carry nothing
    across a relaunch - bonds do not carry over either - so generating three new
    ones costs nothing.
-4. **Write and review the genesis**, on every node, against the frozen figures
-   and the ids from the step above. Two reviewers, and a diff between the three
+5. **Write and review the genesis**, on every node: the snapshot's block, the
+   chain id, the validator ids from step 4, and the frozen escrow figure
+   confirmed against the contract. Two reviewers, and a diff between the three
    files that shows only the node's own identity differing.
-5. **Set the watcher's start block to the CURRENT Base head**, not to the
+
+   ```sh
+   # The same validation the launch runs. Do this before anything starts.
+   matrixd -preflight-production -config <the node's new config>
+   ```
+6. **Set the watcher's start block to the CURRENT Base head**, not to the
    contract's deployment block. This is where money leaks if it is going to: the
    new chain has no record of past burns, so a watcher rescanning from the
    deployment block would release escrow for burns the old chain already
    released. It is harmless only while nothing has been burned - check
    `released` on the vault and the `Burned` events before relying on that.
-6. **Start the validators** on the new genesis, and confirm they commit past the
+7. **Start the validators** on the new genesis, and confirm they commit past the
    first epoch boundary.
-7. **Re-bond.** Bonds do not carry over: they were balances on a chain that no
+8. **Re-bond.** Bonds do not carry over: they were balances on a chain that no
    longer exists. Each validator funds its account and bonds, either with
    `stake.bond` in config or `matrix stake bond` from a wallet. `matrix stake
    status` shows both numbers.
-8. **Verify the escrow** before announcing anything: run `matrix bridge
+9. **Verify the escrow** before announcing anything: run `matrix bridge
    reconcile` against the NEW chain and check it against the contract again. Also
    check that anyone can: `matrix_getAccountProof` on `bridge/escrow` returns a
    proof against the state root, and that proof is the evidence an exchange or an
    auditor checks without trusting the node that served it. If the figures do not
    line up, stop - the mirror is unbacked and every later step compounds it.
-9. **Point a wallet at it.** Add the network, read a balance, send a transfer to
+10. **Point a wallet at it.** Add the network, read a balance, send a transfer to
    yourself, watch the receipt land. What passes here is what a buyer will see.
    `make devnet` does exactly this against three throwaway nodes, so run it first
    and see it pass there before doing it against the real one.
-10. **Publish the evidence**: genesis hash, chain id, escrow figure and the Base
+11. **Publish the evidence**: genesis hash, chain id, escrow figure and the Base
    block it was read at, the validator set, and the binary's revision and SHA-256
    on each host.
 

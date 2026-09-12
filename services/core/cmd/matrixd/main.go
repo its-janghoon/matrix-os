@@ -19,6 +19,7 @@ func main() {
 	initMode := flag.Bool("init", false, "Write a secure baseline config (not a production launch profile)")
 	initIdentities := flag.Bool("init-identities", false, "Create and print stable node identities without applying genesis")
 	preflightProduction := flag.Bool("preflight-production", false, "Validate consensus-critical production config without applying genesis")
+	genesisSnapshot := flag.Bool("genesis-snapshot", false, "Read this node's ledger and print it as the genesis a relaunch would carry (node must be stopped)")
 	configPath := flag.String("config", "config.yaml", "Path to config file")
 	showVersion := flag.Bool("version", false, "Print the version and exit")
 	flag.Parse()
@@ -52,6 +53,20 @@ func main() {
 			log.Fatalf("Failed to encode identities: %v", err)
 		}
 		fmt.Println(string(out))
+		return
+	}
+
+	if *genesisSnapshot {
+		snap, err := node.SnapshotGenesis(*configPath)
+		if err != nil {
+			log.Fatalf("Failed to snapshot genesis: %v", err)
+		}
+		fmt.Print(node.MarshalGenesisSnapshot(snap))
+		// A snapshot that still needs a human decision must not look like a
+		// finished file to a script that only checks the exit status.
+		if len(snap.Unclassified) > 0 {
+			os.Exit(1)
+		}
 		return
 	}
 
