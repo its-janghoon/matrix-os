@@ -41,9 +41,11 @@ func (h *Handler) streamChatCompletions(
 	req chatRequest,
 	msgs []inference.Message,
 	provider string,
+	guard *idempotencyGuard,
 ) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
+		guard.release()
 		writeError(w, http.StatusInternalServerError, "server_error",
 			"this server cannot stream: the response writer does not support flushing")
 		return
@@ -57,6 +59,7 @@ func (h *Handler) streamChatCompletions(
 	}, estimateUnits(msgs, req.MaxTokens))
 	if err != nil {
 		// Nothing has been written yet, so this can still be a real status code.
+		guard.release()
 		status, kind := classify(err)
 		writeError(w, status, kind, err.Error())
 		return
@@ -64,6 +67,7 @@ func (h *Handler) streamChatCompletions(
 
 	streamer, ok := h.cfg.Inference.(Streamer)
 	if !ok {
+		guard.release()
 		writeError(w, http.StatusInternalServerError, "server_error",
 			"this server cannot stream: no streaming inference service is configured")
 		return
@@ -114,9 +118,13 @@ func (h *Handler) streamChatCompletions(
 
 	done, result, err := streamer.StreamJob(r.Context(), job.ID, onChunk)
 	if err != nil {
+		// Including the case where the client hung up mid-stream: that job charged
+		// nobody, so the key must not outlive it and block an honest retry.
+		guard.release()
 		writeSSEError(w, flusher, err)
 		return
 	}
+	guard.complete(job.ID)
 
 	// The stop frame, then the usage frame OpenAI sends when asked for it, then
 	// [DONE]. Usage last matches the upstream ordering, so a client accumulating

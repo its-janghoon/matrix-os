@@ -1672,6 +1672,10 @@ func (n *Node) Start() error {
 			Inference: n.inferenceSvc,
 			Router:    n.market,
 			Auth:      openAIAuth(marketAuth),
+			// Persisted, because the failure it prevents outlives a process: a node
+			// that restarted between a charge and the retry of it would forget the
+			// key and charge again.
+			Idempotency: newIdempotencyStore(n.kvStore),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to build the OpenAI-compatible handler: %w", err)
