@@ -31,6 +31,7 @@ func buildSignedBlock(t *testing.T, leader *token.Account, height, round uint64,
 		PrevBlockHash: append([]byte(nil), prevHash...),
 		Txs:           txs,
 		ProposerID:    leader.AccountID(),
+		Timestamp:     time.Now().Unix(),
 	}
 	if err := b.Sign(leader.PrivateKey); err != nil {
 		t.Fatalf("sign block: %v", err)

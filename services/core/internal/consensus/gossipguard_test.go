@@ -131,6 +131,7 @@ func TestARealProposalPasses(t *testing.T) {
 		PrevBlockHash: make([]byte, HashSize),
 		ProposerID:    acct.AccountID(),
 		Txs:           txs,
+		Timestamp:     time.Now().Unix(),
 	}
 	if err := b.Sign(acct.PrivateKey); err != nil {
 		t.Fatalf("Sign block: %v", err)

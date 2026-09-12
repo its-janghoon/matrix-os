@@ -65,6 +65,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
@@ -184,8 +185,32 @@ type Block struct {
 	PrevBlockHash []byte              `json:"prev_block_hash"`
 	Txs           []token.Transaction `json:"txs"`
 	ProposerID    string              `json:"proposer_id"`
-	Signature     []byte              `json:"signature"`
+	// Timestamp is the proposer's wall clock in unix seconds when it built the
+	// block, and it is inside the signature.
+	//
+	// The chain had no time in it at all. Nothing could say when a block was
+	// produced, which leaves an explorer with nothing to show, a wallet with
+	// nothing to date a transfer by, and an exchange with no way to timestamp a
+	// deposit. Every node can only agree on what a block CARRIES, so the time has
+	// to be a signed field rather than each node's own clock at apply time.
+	//
+	// It is the proposer's claim, bounded by two rules every validator checks
+	// (see verifyBlockTimestamp): it must not go backwards from the parent, and
+	// it must be within BlockTimestampSkew of the validator's own clock. That
+	// makes it usable for ordering and display without pretending it is a trusted
+	// time source - a proposer can still choose any value inside that window.
+	Timestamp int64  `json:"timestamp"`
+	Signature []byte `json:"signature"`
 }
+
+// BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
+// the validating node's own clock, in either direction.
+//
+// It has to tolerate ordinary clock drift between hosts in different regions and
+// still refuse a proposer that stamps a block a year out. Too tight and honest
+// proposals are rejected whenever NTP wanders; too loose and the timestamp stops
+// meaning anything.
+const BlockTimestampSkew = 15 * time.Minute
 
 // PolkaCertificate is a quorum of PREVOTES for one block at one (height,
 // round),
@@ -215,6 +240,7 @@ type PolkaCertificate struct {
 //	uint64(Height) | uint64(Round) |
 //	uint32(len(PrevBlockHash)) | PrevBlockHash |
 //	uint32(len(ProposerID)) | ProposerID |
+//	int64(Timestamp) |
 //	uint64(len(Txs)) | for each tx: uint32(len(txSig)) | txSig
 //
 // Each transaction is bound by its own signature bytes, which uniquely commit to
@@ -226,6 +252,7 @@ func (b *Block) signingBytes() []byte {
 	buf = appendUint64(buf, b.Round)
 	buf = appendLenPrefixed(buf, b.PrevBlockHash)
 	buf = appendLenPrefixed(buf, []byte(b.ProposerID))
+	buf = appendUint64(buf, uint64(b.Timestamp))
 	buf = appendUint64(buf, uint64(len(b.Txs)))
 	for i := range b.Txs {
 		// Bind each tx by its signature; a tx with no signature contributes an

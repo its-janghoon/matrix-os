@@ -335,7 +335,10 @@ type Engine struct {
 	participateInOpenSet bool
 	// chainID is what an Ethereum-enveloped transaction's signature must commit
 	// to for this node to accept it. See Config.ChainID.
-	chainID         uint64
+	chainID uint64
+	// now is the wall clock the block-timestamp rules read, injectable so a test
+	// can drive a proposer and a validator whose clocks disagree.
+	now             func() time.Time
 	approvedChanges map[string]struct{}
 	// approvedSpecs is the same allow-list in parsed form. A node does not only
 	// vote for the changes its operator approved, it also PROPOSES them: without
@@ -433,6 +436,20 @@ type Engine struct {
 	// node computes the identical set.
 	committedNonces map[string]struct{}
 	mempoolNonces   map[string]struct{}
+	// nonceHigh is the highest nonce each sender has had committed, which is
+	// what eth_getTransactionCount reports the successor of.
+	//
+	// A wallet expects a COUNTER, because on Ethereum a sender's nonces are
+	// consecutive. This chain treats a nonce as a uniquifier instead - a set
+	// membership test, not a sequence - so it has no counter to report. Tracking
+	// the high-water mark bridges the two: a wallet handed high+1 produces
+	// consecutive nonces from there, and the set accepts them because none has
+	// been seen. Counting the sender's committed transfers instead would be a
+	// scan of the whole chain on every wallet poll.
+	nonceHigh map[string]uint64
+	// evmIndex maps an Ethereum transaction id to where it committed, so a
+	// wallet polling for a receipt can be answered. See evmindex.go.
+	evmIndex map[string]TxLocation
 	// pendingMembership gives each identity one stable slot per open-membership
 	// operation. Unlike mempoolKey, its key excludes nonce, timestamp and
 	// signature, so re-signing the same admission, exit, bond or withdrawal
@@ -672,10 +689,13 @@ func New(cfg Config) (*Engine, error) {
 		membershipMode:       membershipMode,
 		participateInOpenSet: participateInOpenSet,
 		chainID:              cfg.ChainID,
+		now:                  time.Now,
 		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
 		committedNonces:      make(map[string]struct{}),
 		mempoolNonces:        make(map[string]struct{}),
+		nonceHigh:            make(map[string]uint64),
+		evmIndex:             make(map[string]TxLocation),
 		pendingMembership:    make(map[string]string),
 		bridgeLocker:         cfg.BridgeLocker,
 		burnAttestations:     make(map[string]map[string]struct{}),
@@ -843,6 +863,8 @@ func (e *Engine) Start(ctx context.Context) error {
 		e.mu.Lock()
 		for i := range b.Txs {
 			e.committedTxs[mempoolKey(&b.Txs[i])] = struct{}{}
+			e.recordNonceHighLocked(&b.Txs[i])
+			e.recordEVMIndexLocked(&b.Txs[i], TxLocation{Height: h, Index: i})
 			if nk, checked := nonceKey(&b.Txs[i]); checked {
 				e.committedNonces[nk] = struct{}{}
 			}
@@ -1547,6 +1569,7 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		PrevBlockHash: append([]byte(nil), e.headHash...),
 		Txs:           txs,
 		ProposerID:    e.selfID,
+		Timestamp:     e.proposalTimestampLocked(),
 	}
 	if err := b.Sign(e.self.PrivateKey); err != nil {
 		return nil, nil
@@ -1799,6 +1822,9 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 		return ErrWrongLeader
 	}
 	if err := b.VerifySignature(pub); err != nil {
+		return err
+	}
+	if err := e.verifyBlockTimestampLocked(b); err != nil {
 		return err
 	}
 	// Every transaction must be individually validly signed. A single bad tx
@@ -3631,6 +3657,8 @@ func (e *Engine) advanceHeight(committed *Block) {
 			e.committedNonces[nk] = struct{}{}
 			delete(e.mempoolNonces, nk)
 		}
+		e.recordNonceHighLocked(&committed.Txs[i])
+		e.recordEVMIndexLocked(&committed.Txs[i], TxLocation{Height: committed.Height, Index: i})
 	}
 	kept := e.mempool[:0]
 	for i := range e.mempool {
