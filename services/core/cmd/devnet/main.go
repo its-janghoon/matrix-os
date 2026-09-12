@@ -152,6 +152,9 @@ func run(keep bool, timeout time.Duration) error {
 	if err := checkAgreement(nodes); err != nil {
 		return fmt.Errorf("after a transfer: %w", err)
 	}
+	if err := checkRejections(nodes[0], buyer); err != nil {
+		return err
+	}
 
 	fmt.Printf("\nPASS - a three-validator network came up, agreed, and settled a wallet-signed transfer.\n")
 	if keep {
@@ -700,4 +703,89 @@ func step(format string, args ...any) {
 
 func ok(format string, args ...any) {
 	fmt.Printf("   ok  "+format+"\n", args...)
+}
+
+// checkRejections proves the two refusals that carry the most weight, by
+// actually making the chain refuse them rather than by reading the code that
+// should.
+//
+// Both are properties the layout this replaced did not have at all: it carried
+// no chain identifier, so a testnet signature was byte-for-byte valid on
+// mainnet, and it is worth confirming on a running network rather than trusting
+// a unit test that never leaves one process.
+func checkRejections(n *devNode, w *wallet) error {
+	step("checking what the chain refuses")
+
+	nonceHex, err := n.rpcString("eth_getTransactionCount", w.address.Hex(), "pending")
+	if err != nil {
+		return err
+	}
+	nonce, err := parseHex(nonceHex)
+	if err != nil {
+		return err
+	}
+	recipient := newWallet().address
+
+	sign := func(chainID, nonce uint64) (string, error) {
+		env := &evmtx.Transaction{
+			Type:      evmtx.TxLegacy,
+			Nonce:     nonce,
+			GasFeeCap: big.NewInt(0),
+			Gas:       21000,
+			To:        &recipient,
+			Value:     token.NativeToERC20(1_000_000),
+		}
+		if err := env.Sign(w.priv, chainID); err != nil {
+			return "", err
+		}
+		raw, err := env.MarshalBinary()
+		if err != nil {
+			return "", err
+		}
+		return "0x" + hex.EncodeToString(raw), nil
+	}
+
+	// Signed for a neighbouring chain. Perfectly valid bytes, a real signature by
+	// a funded account, and this chain must not be able to apply it.
+	foreign, err := sign(devnetChainID+1, nonce)
+	if err != nil {
+		return err
+	}
+	if id, err := n.rpcString("eth_sendRawTransaction", foreign); err == nil {
+		return fmt.Errorf("a transaction signed for chain %d was accepted here as %s",
+			devnetChainID+1, id)
+	}
+	ok("a transaction signed for another chain is refused")
+
+	// The same nonce twice. The first is accepted, the second must not be: a
+	// nonce a sender has already used cannot authorise a second payment.
+	first, err := sign(devnetChainID, nonce)
+	if err != nil {
+		return err
+	}
+	if _, err := n.rpcString("eth_sendRawTransaction", first); err != nil {
+		return fmt.Errorf("the first transfer at nonce %d was refused: %w", nonce, err)
+	}
+	// A DIFFERENT transaction at the same nonce, which is the dangerous shape:
+	// resending the identical one is idempotent and harmless.
+	replayed := &evmtx.Transaction{
+		Type:      evmtx.TxLegacy,
+		Nonce:     nonce,
+		GasFeeCap: big.NewInt(0),
+		Gas:       21000,
+		To:        &recipient,
+		Value:     token.NativeToERC20(9_000_000),
+	}
+	if err := replayed.Sign(w.priv, devnetChainID); err != nil {
+		return err
+	}
+	raw, err := replayed.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	if id, err := n.rpcString("eth_sendRawTransaction", "0x"+hex.EncodeToString(raw)); err == nil {
+		return fmt.Errorf("a second, different transfer at nonce %d was accepted as %s", nonce, id)
+	}
+	ok("a second transfer reusing a spent nonce is refused")
+	return nil
 }

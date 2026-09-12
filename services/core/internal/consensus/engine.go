@@ -1276,10 +1276,32 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 	_ = e.Submit(&tx)
 }
 
-// mempoolKey is a stable dedup key for a transaction: sender + nonce +
-// signature hex. Two submissions of the same signed tx collapse to one.
+// mempoolKey is a stable dedup key for a transaction: sender, nonce, and
+// whatever carries its signature. Two submissions of the same signed tx collapse
+// to one; two DIFFERENT transactions must never collapse.
+//
+// The signature is what makes it an identity, and an Ethereum-enveloped
+// transaction keeps its signature INSIDE the envelope rather than in the
+// Signature field, which is empty on that path. Keying on Signature alone
+// therefore gave every transaction from one sender at one nonce the same key,
+// whatever it paid or to whom - and the consequences all pointed the same way:
+//
+//   - The second transaction was accepted as an idempotent resubmission of the
+//     first and silently dropped, so a transfer a user signed simply vanished.
+//   - The nonce-reuse rule never fired, because the early idempotent return is
+//     ahead of it.
+//   - committedTxs is the replay set, so once one committed the other could
+//     never be included in any block by anyone.
+//   - appliedTxs is keyed the same way, so a receipt for the second would report
+//     the first's outcome - a success for a transfer that never applied.
+//
+// So the envelope's own bytes are the identity when there is an envelope.
 func mempoolKey(tx *token.Transaction) string {
-	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, tx.Signature)
+	signature := tx.Signature
+	if tx.IsEVM() {
+		signature = tx.Raw
+	}
+	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, signature)
 }
 
 // nonceKey identifies a sender's use of one nonce, and reports whether the
