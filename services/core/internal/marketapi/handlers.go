@@ -279,7 +279,9 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 			if model != "" && (rp.Available == 0 || !rp.ServesModel(model)) {
 				continue
 			}
-			out = append(out, remoteProviderToProto(rp))
+			entry := remoteProviderToProto(rp)
+			s.attachEarnings(entry)
+			out = append(out, entry)
 		}
 	}
 
@@ -672,4 +674,32 @@ func (s *Service) GetLockAttestation(ctx context.Context, req *marketv1.GetLockA
 		Attestor:     att.Attestor,
 		NativeAmount: att.NativeAmount,
 	}, nil
+}
+
+// attachEarnings fills in what this node's chain says a provider's payout
+// account has been paid.
+//
+// Read for REMOTE providers only, and read from the answering node's own chain.
+// That is the point of putting it here rather than in the announcement: a
+// figure the seller publishes about itself is a claim, and one the buyer's own
+// node computes from blocks it validated is not. The seller cannot influence it
+// and does not know it is being asked.
+//
+// A read failure leaves the fields zero rather than failing the listing. The
+// directory's job is to say who is selling; losing a history figure should not
+// take the address with it.
+func (s *Service) attachEarnings(p *marketv1.Provider) {
+	if s.earnings == nil || p == nil || p.GetId() == "" {
+		return
+	}
+	received, payments, payers, first, last, from, err := s.earnings.Earnings(p.GetId())
+	if err != nil {
+		return
+	}
+	p.SettledReceived = received
+	p.SettledPayments = payments
+	p.SettledPayers = payers
+	p.SettledFirstHeight = first
+	p.SettledLastHeight = last
+	p.SettledIndexedFrom = from
 }

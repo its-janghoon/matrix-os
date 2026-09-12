@@ -83,6 +83,9 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		// The provider reward registry, for the same reason: a test that uses it
 		// must not reach into a running engine to install one.
 		providers := NewProviderRegistry(store)
+		// The settled-history tally, wired for every cluster for the same reason:
+		// it must record what a real commit did, not what a test told it to.
+		earnings := NewEarningsStore(store)
 		cfg := Config{
 			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
@@ -96,6 +99,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			SelfVotes:       selfVotes,
 			Stake:           stake,
 			Providers:       providers,
+			Earnings:        earnings,
 			// Nothing is bonded in most tests, so an admission floor would refuse
 			// every set change. Tests about the floor set one.
 			ZeroMinBond:     true,

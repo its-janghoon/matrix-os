@@ -99,6 +99,32 @@ message Provider {
     // and should be shown to a buyer as exactly that.
     google.protobuf.Timestamp first_seen = 16;
     uint64 announcements_heard = 17;
+
+    // What this provider's payout account has actually been PAID, read from the
+    // answering node's own copy of the committed chain. The seller has no say in
+    // these numbers: a payment that did not happen leaves no block to find.
+    //
+    // What they do NOT prove, because the figure will be read as more than it
+    // is: an inference settlement is an ordinary transfer and the chain does not
+    // mark it as one, so this counts every payment the account received, not
+    // only what it earned. A seller can pay itself from an account it controls.
+    // That costs the protocol fee on each transfer plus the capital to move it,
+    // which is why `settled_payers` is the number worth weighing - inflating
+    // `settled_received` is one self-transfer, inflating the payer count means
+    // funding a fresh account for every one.
+    //
+    // Present them as history, never as a rating.
+    uint64 settled_received = 18;
+    uint64 settled_payments = 19;
+    uint64 settled_payers = 20;
+    // Heights bracketing the activity, so a seller working for months reads
+    // differently from one paid twice yesterday.
+    uint64 settled_first_height = 21;
+    uint64 settled_last_height = 22;
+    // The first height the answering node's tally covers. A node that upgraded
+    // into this counts from the upgrade, not from genesis, and a display that
+    // does not say so is claiming more than it knows.
+    uint64 settled_indexed_from = 23;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.

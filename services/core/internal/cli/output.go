@@ -43,6 +43,15 @@ type providerRow struct {
 	Endpoint           string `json:"endpoint,omitempty"`
 	FirstSeen          string `json:"first_seen,omitempty"`
 	AnnouncementsHeard uint64 `json:"announcements_heard,omitempty"`
+	// What this seller's payout account has been PAID, according to the chain
+	// this node holds. Not a claim the seller made; not a rating either - see
+	// the directory header for what it does and does not prove.
+	SettledReceived    uint64 `json:"settled_received,omitempty"`
+	SettledPayments    uint64 `json:"settled_payments,omitempty"`
+	SettledPayers      uint64 `json:"settled_payers,omitempty"`
+	SettledFirstHeight uint64 `json:"settled_first_height,omitempty"`
+	SettledLastHeight  uint64 `json:"settled_last_height,omitempty"`
+	SettledIndexedFrom uint64 `json:"settled_indexed_from,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -65,6 +74,13 @@ func providerToRow(p *marketv1.Provider) providerRow {
 		Endpoint:           p.GetEndpoint(),
 		FirstSeen:          timestampString(p.GetFirstSeen()),
 		AnnouncementsHeard: p.GetAnnouncementsHeard(),
+
+		SettledReceived:    p.GetSettledReceived(),
+		SettledPayments:    p.GetSettledPayments(),
+		SettledPayers:      p.GetSettledPayers(),
+		SettledFirstHeight: p.GetSettledFirstHeight(),
+		SettledLastHeight:  p.GetSettledLastHeight(),
+		SettledIndexedFrom: p.GetSettledIndexedFrom(),
 	}
 }
 
@@ -287,7 +303,7 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 		return nil
 	}
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tSEEN FOR\tHEARD\tNODE\tPAYS")
+	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tPAID\tPAYERS\tSEEN FOR\tHEARD\tNODE")
 	for _, r := range rows {
 		endpoint := r.Endpoint
 		if endpoint == "" {
@@ -295,12 +311,25 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 			// discoverable for compute units and cannot take an inference request.
 			endpoint = "(no address; compute only)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%d\t%s\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\n",
 			endpoint, strings.Join(r.Models, ","), r.PricePerUnit, r.Available,
+			r.SettledPayments, r.SettledPayers,
 			seenFor(r.FirstSeen, now), r.AnnouncementsHeard,
-			shortID(r.NodeID), shortID(r.ID))
+			shortID(r.NodeID))
 	}
-	return tw.Flush()
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// Said once under the table rather than in a column, because it qualifies
+	// every row and a reader who takes PAID for a rating is the failure mode
+	// this whole design is avoiding.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "PAID and PAYERS are settled transfers on the chain this node holds, not")
+	fmt.Fprintln(w, "claims by the seller. A settlement is an ordinary transfer, so they count")
+	fmt.Fprintln(w, "every payment the account received - a seller can pay itself. PAYERS is the")
+	fmt.Fprintln(w, "harder one to inflate: it costs a funded account each. SEEN FOR and HEARD")
+	fmt.Fprintln(w, "are what this node observed, not uptime the seller reported.")
+	return nil
 }
 
 // seenFor renders how long this node has been hearing a seller, rounded to

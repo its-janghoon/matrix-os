@@ -1285,6 +1285,7 @@ func (n *Node) Start() error {
 		MaintainerFeeShareBasisPoints: n.config.Consensus.MaintainerFeeShareBasisPoints,
 		// The provider emission and the registry that decides who earns it.
 		Providers:                consensus.NewProviderRegistry(n.kvStore),
+		Earnings:                 consensus.NewEarningsStore(n.kvStore),
 		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
 		ProviderEmissionHalfLife: n.config.Consensus.Rewards.HalfLife,
 		ChainID:                  n.config.Consensus.ChainID,
@@ -1457,6 +1458,9 @@ func (n *Node) Start() error {
 		Funder:          n.treasury,
 		Settler:         settlementCoordinator,
 		TransferSettler: transferCoordinator,
+		// Settled history for directory listings, read from THIS node's chain so a
+		// seller has no say in the figures shown for it.
+		Earnings: engineEarnings{engine: n.consensus},
 		// Reconciler is a marketapi.Reconciler interface value. Passing a typed
 		// nil *bridgeReconciler would be a non-nil interface, defeating the
 		// "no bridge -> FailedPrecondition" check, so only set it when present.

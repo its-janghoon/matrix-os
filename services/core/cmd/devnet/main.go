@@ -119,7 +119,17 @@ func run(keep bool, timeout time.Duration) error {
 		nodes[i] = n
 	}
 	buyer := newWallet()
-	if err := writeConfigs(nodes, buyer.address); err != nil {
+	// One payout wallet per node, so each announces a distinct seller account and
+	// a payment to one cannot be mistaken for a payment to another.
+	sellers := make([]*wallet, len(nodes))
+	for i := range sellers {
+		sellers[i] = newWallet()
+	}
+	sellerAddrs := make([]ethsig.Address, len(nodes))
+	for i := range sellers {
+		sellerAddrs[i] = sellers[i].address
+	}
+	if err := writeConfigs(nodes, buyer.address, sellerAddrs); err != nil {
 		return err
 	}
 	ok("three configs written, chain id %d", devnetChainID)
@@ -164,6 +174,9 @@ func run(keep bool, timeout time.Duration) error {
 		return err
 	}
 	if err := checkDirectory(matrixCLI, nodes, timeout); err != nil {
+		return err
+	}
+	if err := checkSettledHistory(matrixCLI, nodes, buyer, sellers[0].address, timeout); err != nil {
 		return err
 	}
 	if !keep {
@@ -258,7 +271,7 @@ func initNode(matrixd, root string, i int) (*devNode, error) {
 }
 
 // writeConfigs patches every node's config into one network.
-func writeConfigs(nodes []*devNode, buyer ethsig.Address) error {
+func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Address) error {
 	validators := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		validators = append(validators, n.consensusID)
@@ -307,6 +320,12 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address) error {
 			setPath(cfg, []string{"market", "endpoint"}, fmt.Sprintf("http://127.0.0.1:%d", base+4))
 			// Fast enough that the check does not wait out a production interval.
 			setPath(cfg, []string{"market", "announce_interval"}, "1s")
+			// Sell under a WALLET address, which is what the GPU runbook tells an
+			// operator to use so revenue lands where they can spend it. It is also
+			// what lets the buyer's wallet pay this seller directly below, so the
+			// settled-history check has a real payment to find rather than one the
+			// test wrote into a ledger by hand.
+			setPath(cfg, []string{"inference", "echo_provider"}, token.EthAccountID(sellers[n.index]))
 
 			setPath(cfg, []string{"consensus", "chain_id"}, devnetChainID)
 			setPath(cfg, []string{"consensus", "validators"}, validators)
@@ -1044,4 +1063,128 @@ func readAPIKey(configPath string) (string, error) {
 		return "", fmt.Errorf("no api key in %s", configPath)
 	}
 	return cfg.Security.APIKeys[0].Key, nil
+}
+
+// checkSettledHistory proves the half of a seller's reputation that cannot be
+// typed in.
+//
+// A marketplace is asked for uptime and a star rating, and a seller can publish
+// any number for both. What it cannot publish is a payment: an inference job
+// settles as a consensus transfer, committed in a block every node holds and
+// applied only if the buyer could afford it. So the figure a buyer weighs is
+// read from the buyer's OWN node, off a chain that node validated, and the
+// seller has no say in it and does not know it is being asked.
+//
+// This pays a seller from a wallet, then reads that seller's entry in the
+// directory of a DIFFERENT node - the one that never saw the payment go out and
+// only has the committed blocks. That is exactly a buyer's position.
+func checkSettledHistory(matrixCLI string, nodes []*devNode, buyer *wallet, seller ethsig.Address, timeout time.Duration) error {
+	step("weighing a seller by what the chain says it was paid")
+
+	before, err := settledFor(matrixCLI, nodes[1], token.EthAccountID(seller))
+	if err != nil {
+		return err
+	}
+
+	const paid = 120_000_000_000_000
+	if err := payFromWallet(nodes[0], buyer, seller, paid, timeout); err != nil {
+		return err
+	}
+
+	// Read from node 1, which never handled the payment.
+	deadline := time.Now().Add(timeout)
+	var after map[string]any
+	for time.Now().Before(deadline) {
+		after, err = settledFor(matrixCLI, nodes[1], token.EthAccountID(seller))
+		if err != nil {
+			return err
+		}
+		if asUint(after["settled_payments"]) > asUint(before["settled_payments"]) {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if asUint(after["settled_payments"]) <= asUint(before["settled_payments"]) {
+		return fmt.Errorf("node 1 never tallied the payment to the seller: %v", after)
+	}
+	if got := asUint(after["settled_payers"]); got != 1 {
+		return fmt.Errorf("settled_payers = %d, want 1 distinct payer", got)
+	}
+	// Net of the protocol fee, which is what the seller actually received - not
+	// what the buyer was charged.
+	received := asUint(after["settled_received"])
+	if received == 0 || received > paid {
+		return fmt.Errorf("settled_received = %d, want at most the %d sent", received, uint64(paid))
+	}
+	if asUint(after["settled_indexed_from"]) == 0 && asUint(after["settled_first_height"]) == 0 {
+		return fmt.Errorf("the entry does not say what window it counted: %v", after)
+	}
+	ok("node 1, which never saw the payment, reports %d received from %d payer across %d payment",
+		received, asUint(after["settled_payers"]), asUint(after["settled_payments"]))
+	return nil
+}
+
+// settledFor reads one seller's directory entry from a node.
+func settledFor(matrixCLI string, n *devNode, account string) (map[string]any, error) {
+	rows, err := listProviders(matrixCLI, n)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range rows {
+		if asString(r["id"]) == account {
+			return r, nil
+		}
+	}
+	// Not an error: before the first announcement crosses, the seller is simply
+	// not listed yet, and the caller compares against a zero baseline.
+	return map[string]any{}, nil
+}
+
+// payFromWallet sends one wallet-signed transfer and waits for its receipt.
+func payFromWallet(n *devNode, w *wallet, to ethsig.Address, amount uint64, timeout time.Duration) error {
+	nonceHex, err := n.rpcString("eth_getTransactionCount", w.address.Hex(), "pending")
+	if err != nil {
+		return err
+	}
+	nonce, err := parseHex(nonceHex)
+	if err != nil {
+		return err
+	}
+	env := &evmtx.Transaction{
+		Type:      evmtx.TxLegacy,
+		Nonce:     nonce,
+		GasFeeCap: big.NewInt(0),
+		Gas:       21000,
+		To:        &to,
+		Value:     token.NativeToERC20(amount),
+	}
+	if err := env.Sign(w.priv, devnetChainID); err != nil {
+		return err
+	}
+	raw, err := env.MarshalBinary()
+	if err != nil {
+		return err
+	}
+	id, err := n.rpcString("eth_sendRawTransaction", "0x"+hex.EncodeToString(raw))
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		receipt, err := n.rpc("eth_getTransactionReceipt", id)
+		if err == nil && len(receipt) > 0 && string(receipt) != "null" {
+			var r struct {
+				Status string `json:"status"`
+			}
+			if err := json.Unmarshal(receipt, &r); err != nil {
+				return err
+			}
+			if r.Status != "0x1" {
+				return fmt.Errorf("the payment committed but did not apply (status %s)", r.Status)
+			}
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("no receipt for the payment to the seller within %s", timeout)
 }

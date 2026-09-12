@@ -228,6 +228,11 @@ type Config struct {
 	// from the same block and forks itself off, which is also why an operator
 	// cannot quietly set it to zero and keep the network.
 	MaintainerFeeShareBasisPoints uint32
+	// Earnings, when non-nil, tallies what each account has been paid as blocks
+	// apply, so a buyer can weigh a seller by settled history rather than by what
+	// the seller says about itself. Leaving it nil turns the tally off; nothing
+	// else changes.
+	Earnings *EarningsStore
 	// Providers, when non-nil, is the registry of accounts that earn provider
 	// rewards from the genesis pool. Without it no emission is paid.
 	Providers *ProviderRegistry
@@ -325,6 +330,7 @@ type Engine struct {
 	maxMempoolTxs        int
 	headAnnounceInterval time.Duration
 	onCommit             CommitObserver
+	earnings             *EarningsStore
 	evidence             *EvidenceStore
 	onEquivocation       func(eq *Equivocation)
 	selfVotes            *SelfVoteStore
@@ -705,6 +711,7 @@ func New(cfg Config) (*Engine, error) {
 		targetBond:           cfg.TargetBond,
 		feeBasisPoints:       cfg.FeeBasisPoints,
 		maintainerShareBPS:   cfg.MaintainerFeeShareBasisPoints,
+		earnings:             cfg.Earnings,
 		providers:            cfg.Providers,
 		emissionPerBlock:     cfg.ProviderEmissionPerBlock,
 		emissionHalfLife:     orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
@@ -3460,6 +3467,12 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	// received, which is how the provider emission is shared out.
 	var feesTaken uint64
 	credited := make(map[string]uint64, len(b.Txs))
+	// What each ordinary account was paid, and by whom, for the settled-history
+	// tally. Collected here and written AFTER the critical section: the tally is
+	// a read of the chain rather than part of it, and holding the ledger's write
+	// lock across a batch of kv reads would stall every other writer for a
+	// derived number nobody is waiting on.
+	var revenue []payment
 	// emitted is what the pool actually paid out this block, for the log line.
 	var emitted uint64
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
@@ -3570,6 +3583,13 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				} else {
 					credited[tx.To] += net
 				}
+				// Counted as revenue only when the recipient is an ordinary
+				// ACCOUNT. paysFee is the same question asked for the same reason:
+				// a bond reaches this branch deliberately, and an account moving
+				// its own coins into its own bond has not been paid by anyone.
+				if paysFee(tx.To) {
+					revenue = append(revenue, payment{payer: sender, payee: tx.To, amount: net})
+				}
 			}
 			if fee > 0 {
 				if err := ltx.Transfer(sender, feeAccrualAccount, fee); err != nil {
@@ -3612,6 +3632,16 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 		return nil
 	}); err != nil {
 		return err
+	}
+	// Tally what this block paid out, now that the transfers are durable.
+	//
+	// A failure here is logged and not returned: the block is committed and
+	// applied on every node, and refusing it because a DERIVED number could not
+	// be written would fork this node off over a display figure. The tally
+	// undercounts instead, which is the safe direction for something read as a
+	// seller's track record.
+	if err := e.earnings.record(b.Height, revenue); err != nil {
+		fmt.Printf("consensus: could not record settled earnings for block %d: %v\n", b.Height, err)
 	}
 	// Return the bonds of every withdrawal the block carried. Deterministic: the
 	// whole bond moves, and the block was only valid at this height if the
