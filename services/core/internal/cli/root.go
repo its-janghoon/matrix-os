@@ -83,6 +83,7 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		newAgentCommand(opts),
 		newTxCommand(opts),
 		newWalletCommand(opts),
+		newStakeCommand(opts),
 		newBridgeCommand(opts),
 	)
 
