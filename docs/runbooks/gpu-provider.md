@@ -56,7 +56,7 @@ Turning on `signed_writes` also makes `RunInferenceJob` require that signature. 
   ```
 
 - The peer id and reachable address of at least one node already on the network, for `bootstrap_peers`.
-- A funded native account for this provider to be paid into, and its wallet file in the node's wallet directory.
+- An account for this provider to be paid into. Use the Ethereum address you hold in MetaMask: the order-book id a provider registers under IS the account it is paid into, so listing under `eth:0x...` means the proceeds land somewhere you can already see and spend from. There is no wallet file to manage and the node never holds your key.
 - Outbound TCP to your bootstrap peers, and inbound TCP on the P2P port (default 9000) from them.
 
 ## 1. Size the model to the GPU
@@ -117,7 +117,9 @@ The whole of provider onboarding is one config block. Before `inference.backends
 ```yaml
 inference:
   backends:
-    - id: gpu-box-1
+    # The id IS the payout account. Use your wallet's address so revenue lands
+    # where you can spend it, rather than in an account whose key the node holds.
+    - id: "eth:0x<your-wallet-address-lowercase>"
       kind: openai
       base_url: "http://127.0.0.1:8000"
       api_key_env: MATRIX_VLLM_API_KEY
@@ -140,6 +142,40 @@ Two registrations happen from this one block and both are needed. The inference 
 A failed probe suspends on the first failure, deliberately. The two outcomes are not symmetric: being off the market for one interval costs the provider a few routing decisions and reverses on the next good probe, while staying on it costs a buyer a reservation, a wait, and a failed request. Suspension never cancels work already reserved, because a probe cannot tell a dead backend from one busy finishing a real completion.
 
 `MATRIX_VLLM_API_KEY` has to be in the node process's environment, not only in your shell. Under systemd use `EnvironmentFile=` with a root-owned `0600` file. The key is never carried in config; `api_key_env` names the variable and the backend reads it at construction.
+
+## 4b. Let buyers reach you from a wallet
+
+Two node settings turn the chain into something an ordinary Ethereum wallet can
+use, and a buyer paying you from MetaMask needs both:
+
+```yaml
+consensus:
+  # This chain's EIP-155 id. It is inside the signature of every wallet-signed
+  # transaction, which is what stops one signed for another network being
+  # replayed here. Identical on every node; never changed on a running chain.
+  chain_id: <this-network's-chain-id>
+
+eth_rpc:
+  # The endpoint a wallet adds as a network. Public by intent, so put TLS in
+  # front of it. It holds no keys: the only write is eth_sendRawTransaction,
+  # which carries the sender's own signature and cannot spend anyone else's
+  # balance.
+  addr: "0.0.0.0:9095"
+  allowed_origins:
+    - "https://<exact-buyer-origin-host>"
+```
+
+The node refuses to start the endpoint without `chain_id`, because an endpoint on
+a chain that accepts no wallet-signed transaction is a trap: the wallet connects,
+shows a balance, and every send fails.
+
+What a buyer sees is honest in one direction and incomplete in another. Balances
+and transfers are correct, and a receipt reports whether the transfer actually
+applied rather than only that it was ordered. But the wallet shows gas as free -
+which it is, there being no EVM to meter - while this chain's protocol fee is a
+percentage of the value moved, and Ethereum's fee model has nowhere to put that.
+Tell buyers the fee rate; do not let the wallet's zero be the only number they
+see.
 
 ## 5. Price it
 
@@ -219,5 +255,10 @@ matrix --api-key <key> balance --account <provider-account>
 **One box can host several providers.** The registry maps provider id to backend, so a second `inference.backends` entry with a different `id` - a second model, or spare hosted-API credits resold through `kind: openai` against a vendor base URL - is a second listing on the same node. Ids must be unique and must not collide with `inference.echo_provider`.
 
 **Turn off the demo provider.** A freshly initialized node sets `inference.echo_provider: demo-inference-provider` and registers a GPU-free echo backend so a new node can fulfill inference without hardware. On a real provider that is a listing that answers prompts with a stub. Clear it.
+
+**Your payout address is public.** It is your order-book id, so every buyer and
+every peer that receives an announcement sees it, and so does anyone reading the
+chain. That is true of any account that receives payment on a public ledger; it
+is worth knowing before you use an address that is also your personal wallet.
 
 **The provider sees the prompt.** The model runs on your hardware, so the plaintext passes through it. There is no confidential-compute claim here. Say so to buyers rather than letting them assume otherwise.

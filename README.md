@@ -140,6 +140,13 @@ Start every node from `matrixd -init` and merge—do not run standalone—the
 The example intentionally contains unresolved deployment inputs and no real
 accounts, addresses, origins, RPC credentials, or secrets.
 
+An Ethereum wallet is a first-class client. An account can be controlled by a
+secp256k1 key, a transaction can be an ordinary EIP-155 or EIP-1559 envelope
+bound to `consensus.chain_id`, addresses carry an EIP-55 checksum, and
+`eth_rpc.addr` serves the JSON-RPC a wallet needs to add the network. The chain
+still runs no EVM: contract creation and calldata are refused rather than
+ignored, and `eth_call` says so instead of returning an empty result.
+
 To contribute GPU capacity to a network that is already running, the
 [GPU provider runbook](docs/runbooks/gpu-provider.md) and its
 [overlay example](services/core/configs/gpu-provider.overlay.yaml.example) cover

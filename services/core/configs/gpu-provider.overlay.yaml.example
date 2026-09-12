@@ -24,6 +24,12 @@ network:
     - "/ip4/<an-existing-node-public-ip>/tcp/9000/p2p/<its-printed-peer-id>"
 
 consensus:
+  # This chain's EIP-155 id, inside the signature of every wallet-signed
+  # transaction. It is what stops a transaction signed for another network from
+  # being replayed here. IDENTICAL on every node, and never changed on a running
+  # chain: a different value reaches a different verdict on the same block, and a
+  # change invalidates every signature already made for the old one.
+  chain_id: <this-network's-chain-id>
   # A provider is NOT a validator. It sells compute; it does not order blocks.
   # Leaving this false is what keeps the GPU box out of the validator set, so it
   # needs no bonded stake and no attestor keystore.
@@ -59,6 +65,20 @@ connect:
   rate_limit_per_minute: 600
   rate_limit_burst: 120
 
+eth_rpc:
+  # The endpoint a buyer adds to MetaMask as a network. Public by intent - a
+  # wallet has to reach it - so terminate TLS in front of it.
+  #
+  # It holds no keys. The only write is eth_sendRawTransaction, which carries the
+  # sender's own signature and can spend nobody else's balance. The node refuses
+  # to start it without consensus.chain_id above.
+  addr: "0.0.0.0:9095"
+  # Deny-by-default, like the connect surface. A wallet EXTENSION sends no Origin
+  # this gates - it proxies the request itself - so this only matters for a web
+  # page calling the endpoint directly.
+  allowed_origins:
+    - "https://<exact-buyer-origin-host>"
+
 security:
   enable_acls: true
   api_keys:
@@ -82,9 +102,14 @@ inference:
   # listing that answers paying prompts with a stub.
   echo_provider: ""
   backends:
-    - # The provider id buyers see on the order book and `--provider` names.
-      # Unique across this node and never equal to echo_provider.
-      id: "<gpu-box-1>"
+    - # The provider id buyers see on the order book, and ALSO the account this
+      # provider is paid into - they are one field, not two. Use the Ethereum
+      # address you hold in a wallet so revenue lands where you can spend it and
+      # the node never holds your key.
+      #
+      # Unique across this node and never equal to echo_provider. It is public:
+      # every buyer and every peer receiving an announcement sees it.
+      id: "eth:0x<your-wallet-address-lowercase>"
 
       # "openai" speaks /v1/chat/completions, which is what vLLM, SGLang, TGI and
       # llama.cpp's server expose. It is the one backend that STREAMS, and
