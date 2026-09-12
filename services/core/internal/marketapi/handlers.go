@@ -93,26 +93,37 @@ func localProviderToProto(p market.Provider) *marketv1.Provider {
 }
 
 // remoteProviderToProto converts a discovered remote provider to proto, flagged
-// REMOTE and carrying the announcing peer ID.
+// REMOTE and carrying what a buyer needs to act on it: which node is offering,
+// where to reach it, and how long this node has been hearing from it.
+//
+// Before the endpoint was carried, a caller receiving one of these learned that
+// somebody somewhere sold a model and had no way to connect - the peer id is how
+// NODES find each other and is not an address any HTTP client can dial.
 func remoteProviderToProto(rp marketexchange.RemoteProvider) *marketv1.Provider {
 	out := &marketv1.Provider{
-		Id:                rp.ID,
-		Capacity:          rp.Capacity,
-		PricePerUnit:      rp.PricePerUnit,
-		Available:         rp.Available,
-		Origin:            marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
-		PeerId:            rp.PeerID,
-		Models:            rp.Models,
-		CostPerUnit:       rp.CostPerUnit,
-		MarkupBasisPoints: rp.MarkupBasisPoints,
-		QuoteId:           rp.QuoteID,
-		QuoteVersion:      rp.QuoteVersion,
+		Id:                 rp.ID,
+		NodeId:             rp.NodeID,
+		Endpoint:           rp.Endpoint,
+		AnnouncementsHeard: rp.Announcements,
+		Capacity:           rp.Capacity,
+		PricePerUnit:       rp.PricePerUnit,
+		Available:          rp.Available,
+		Origin:             marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
+		PeerId:             rp.PeerID,
+		Models:             rp.Models,
+		CostPerUnit:        rp.CostPerUnit,
+		MarkupBasisPoints:  rp.MarkupBasisPoints,
+		QuoteId:            rp.QuoteID,
+		QuoteVersion:       rp.QuoteVersion,
 	}
 	if !rp.ObservedAt.IsZero() {
 		out.ObservedAt = timestamppb.New(rp.ObservedAt)
 	}
 	if !rp.ValidUntil.IsZero() {
 		out.ValidUntil = timestamppb.New(rp.ValidUntil)
+	}
+	if !rp.FirstSeen.IsZero() {
+		out.FirstSeen = timestamppb.New(rp.FirstSeen)
 	}
 	return out
 }

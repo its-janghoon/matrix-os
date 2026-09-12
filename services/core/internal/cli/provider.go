@@ -2,6 +2,8 @@ package cli
 
 import (
 	"fmt"
+	"strings"
+	"time"
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
@@ -11,13 +13,14 @@ import (
 func newProviderCommand(opts *globalOptions) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "provider",
-		Short: "Register, safely refresh, and list compute providers",
+		Short: "Register, refresh, and list compute providers, and browse the network directory",
 		Args:  cobra.NoArgs,
 	}
 	cmd.AddCommand(
 		newProviderRegisterCommand(opts),
 		newProviderQuoteUpdateCommand(opts),
 		newProviderListCommand(opts),
+		newProviderDirectoryCmd(opts),
 	)
 	return cmd
 }
@@ -158,4 +161,76 @@ func newProviderListCommand(opts *globalOptions) *cobra.Command {
 	}
 	cmd.Flags().BoolVar(&includeRemote, "include-remote", false, "include remote P2P-discovered providers")
 	return cmd
+}
+
+// newProviderDirectoryCmd is the buyer's view: who on this network is selling a
+// model, at what price, and at what address.
+//
+// It exists because discovery had no consumer. Nodes gossiped provider
+// announcements and kept a registry of what they heard, and the only way to read
+// that registry was `provider list --include-remote`, which printed the order
+// book's thirteen columns and - until the endpoint was carried - no address to
+// connect to. So a buyer's actual question, "where do I send this prompt", had no
+// command that answered it and was answered by asking a person.
+func newProviderDirectoryCmd(opts *globalOptions) *cobra.Command {
+	var model string
+	cmd := &cobra.Command{
+		Use:   "directory",
+		Short: "List providers announced on the network, with the address to reach them",
+		Long: `directory shows what this node has heard other nodes announce: the models
+they serve, their price, and the endpoint a buyer connects to.
+
+SEEN FOR and HEARD are what THIS node observed - how long it has been hearing a
+seller and how many announcements it accepted. They are not reported by the
+seller: an announcement carries no self-declared uptime, latency or throughput,
+because a number a seller publishes about its own reliability costs nothing to
+inflate. A long history means this node watched that seller keep announcing, which
+is evidence of presence and not a promise of service.
+
+The endpoint is signed by the announcing node, so a relaying peer cannot redirect
+traffic to a host of its choosing. What it cannot tell you is whether the seller
+is any good - for that, the chain records every job it was actually paid for.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cc, err := dial(opts)
+			if err != nil {
+				return err
+			}
+			defer cc.Close()
+			ctx, cancel := callContext(cmd.Context(), opts)
+			defer cancel()
+
+			resp, err := cc.market.ListProviders(ctx, &marketv1.ListProvidersRequest{IncludeRemote: true})
+			if err != nil {
+				return mapErr(opts.Addr, err)
+			}
+			listed := make([]*marketv1.Provider, 0, len(resp.GetProviders()))
+			for _, p := range resp.GetProviders() {
+				if p.GetOrigin() != marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE {
+					// This node's own listings are not a directory entry: the caller
+					// is the one running them and `provider list` shows them in full.
+					continue
+				}
+				if model != "" && !servesModel(p, model) {
+					continue
+				}
+				listed = append(listed, p)
+			}
+			return printDirectory(cmd.OutOrStdout(), opts.JSON, listed, time.Now().UTC())
+		},
+	}
+	cmd.Flags().StringVar(&model, "model", "", "only sellers advertising this model")
+	return cmd
+}
+
+// servesModel reports whether a provider advertises model, matched the way the
+// order book normalises names: case-insensitively.
+func servesModel(p *marketv1.Provider, model string) bool {
+	want := strings.ToLower(strings.TrimSpace(model))
+	for _, m := range p.GetModels() {
+		if strings.ToLower(m) == want {
+			return true
+		}
+	}
+	return false
 }

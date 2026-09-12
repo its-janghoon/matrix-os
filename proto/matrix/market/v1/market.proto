@@ -69,6 +69,36 @@ message Provider {
     google.protobuf.Timestamp observed_at = 12;
     // Exclusive expiry after which this quote is ineligible for new jobs.
     google.protobuf.Timestamp valid_until = 13;
+
+    // The remaining fields describe a REMOTE provider as the directory sees it.
+    // They are empty for a local one, whose address and history the caller
+    // already has.
+
+    // Account id of the node that signed this announcement. It is the
+    // counterparty a buyer connecting to `endpoint` is choosing, and it is
+    // distinct from `id`: `id` is the payout account the node settles into and
+    // may be a wallet address, while this is the node that holds the model and
+    // answers the request.
+    string node_id = 14;
+    // Base URL a buyer's client connects to, serving both the OpenAI-compatible
+    // route and the Connect API. Empty when the announcing node published no
+    // address, which is the honest state of one selling compute units rather
+    // than inference: there is nothing for an HTTP client to reach.
+    //
+    // Signed by the announcer, so a relaying peer cannot redirect somebody
+    // else's traffic to a host of its choosing.
+    string endpoint = 15;
+    // When THIS node first heard an announcement from that announcer, and how
+    // many it has accepted since.
+    //
+    // Both are OBSERVED, never announced. A seller's own uptime figure is a
+    // claim that costs nothing to inflate, so the protocol carries none; these
+    // are what the reader watched happen. They are one observer's view - gossip
+    // drops messages for reasons that are sometimes the reader's own fault - so
+    // they are evidence of a node's presence rather than a guarantee of service,
+    // and should be shown to a buyer as exactly that.
+    google.protobuf.Timestamp first_seen = 16;
+    uint64 announcements_heard = 17;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.

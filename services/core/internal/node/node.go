@@ -72,6 +72,23 @@ type Config struct {
 	} `yaml:"admin"`
 	Market struct {
 		Addr string `yaml:"addr"`
+		// Endpoint is the base URL buyers reach this node on, published in the
+		// provider announcements this node gossips. It is what turns discovery
+		// into something a buyer can act on: a peer id tells other NODES where to
+		// find each other and is not an address any HTTP client can dial.
+		//
+		// Configured rather than derived, because a node cannot see its own public
+		// address - on a cloud instance the reachable name belongs to a load
+		// balancer or a NAT while the interface holds a private one - and an
+		// advertised address nobody can reach is worse than none, since a buyer
+		// would try it.
+		//
+		// Empty means this node publishes no address. It still announces, so it is
+		// discoverable for compute units, and a buyer's inference client passes
+		// over it.
+		Endpoint string `yaml:"endpoint"`
+		// AnnounceInterval overrides DefaultAnnounceInterval when non-zero.
+		AnnounceInterval time.Duration `yaml:"announce_interval"`
 	} `yaml:"market"`
 	Inference InferenceConfig `yaml:"inference"`
 	// Agent configures the external agent-deployment gRPC API
@@ -1067,11 +1084,16 @@ func (n *Node) Start() error {
 	// It owns background receive loops that terminate when n.ctx is cancelled, so
 	// no explicit stop is required beyond cancelling the node context in Stop().
 	settled := token.NewSettledLedger(n.market.Ledger(), n.tokenChain)
+	endpoint, err := marketEndpoint(n.config)
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
+	}
 	exchange, err := marketexchange.New(marketexchange.Config{
 		Transport: n.transport,
 		Settled:   settled,
 		Market:    n.market,
 		PeerID:    n.p2pHost.GetPeerID().String(),
+		Endpoint:  endpoint,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
@@ -1549,6 +1571,12 @@ func (n *Node) Start() error {
 	// dead model server stops winning routing decisions instead of taking
 	// reservations it cannot serve.
 	n.startInferenceHealthChecks()
+
+	// Publish this node's providers to the directory, now that they are
+	// registered and their health is being tracked. Started here rather than
+	// beside the exchange because announcing before the order book is populated
+	// would spend the first interval advertising nothing.
+	go n.announceLoop(n.ctx, n.config.Market.AnnounceInterval)
 
 	// The endpoint a wallet adds as a network.
 	if err := n.startEthRPC(); err != nil {

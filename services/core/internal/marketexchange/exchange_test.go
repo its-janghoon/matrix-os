@@ -57,11 +57,18 @@ func mustAccount(t *testing.T) *token.Account {
 	return acct
 }
 
-// validProviderAnnouncement returns a complete v2 quote at a deterministic
+// validProviderAnnouncement returns a complete v3 quote at a deterministic
 // instant. Individual tests may override fields before signing.
+//
+// The signer is the announcing NODE, and the payout account it names is a
+// separate id - here the same account, because most of these tests are about the
+// quote rather than the identities, but the two are distinct fields and the
+// signature only binds the first.
 func validProviderAnnouncement(acct *token.Account, now time.Time) ProviderAnnouncement {
 	now = now.UTC()
 	return ProviderAnnouncement{
+		NodeID:            acct.AccountID(),
+		Endpoint:          "https://provider-a.example:9093",
 		ProviderID:        acct.AccountID(),
 		PublicKey:         acct.PublicKey,
 		Capacity:          100,
@@ -177,7 +184,7 @@ func TestProviderAnnouncement_SignVerify(t *testing.T) {
 	t.Run("identity mismatch rejected", func(t *testing.T) {
 		other := mustAccount(t)
 		ann := base()
-		ann.ProviderID = other.AccountID()
+		ann.NodeID = other.AccountID()
 		if err := ann.Sign(acct.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
@@ -531,6 +538,7 @@ func TestExchange_Registry(t *testing.T) {
 
 	// An invalid (unsigned) announcement is dropped and does not add an entry.
 	unsigned := ProviderAnnouncement{
+		NodeID:     provider.AccountID(),
 		ProviderID: provider.AccountID(),
 		PublicKey:  provider.PublicKey,
 		Capacity:   1, PricePerUnit: 1, Available: 1, PeerID: "peer-B",
@@ -682,14 +690,15 @@ func TestExchange_AnnounceProviderQuoteRoundTrip(t *testing.T) {
 		QuoteVersion:      11,
 		ObservedAt:        now.Add(-2 * time.Minute),
 		ValidUntil:        now.Add(45 * time.Minute),
+		ID:                "eth:0x00000000000000000000000000000000000000aa",
 		Available:         21,
 		Models:            []string{"llama-3.3-70b", "qwen-2.5"},
 	}
 	if err := ex.AnnounceProvider(context.Background(), provider, want); err != nil {
 		t.Fatalf("announce provider: %v", err)
 	}
-	if TopicAnnounce != "matrix/market/announce/v2" {
-		t.Fatalf("announcement topic = %q, want explicit v2", TopicAnnounce)
+	if TopicAnnounce != "matrix/market/announce/v3" {
+		t.Fatalf("announcement topic = %q, want explicit v3", TopicAnnounce)
 	}
 	payload := ft.lastPublished(TopicAnnounce)
 	if len(payload) == 0 {
@@ -703,11 +712,17 @@ func TestExchange_AnnounceProviderQuoteRoundTrip(t *testing.T) {
 		t.Fatalf("published announcement does not verify: %v", err)
 	}
 	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
-	rp, ok := ex.LookupRemoteProvider(provider.AccountID())
+	// Looked up by the PAYOUT account, which the quote above deliberately sets to
+	// a wallet address rather than to the signing node - the case v2 could not
+	// express at all, and the one the GPU runbook tells an operator to use.
+	rp, ok := ex.LookupRemoteProvider(want.ID)
 	if !ok {
 		t.Fatal("round-tripped provider not discoverable")
 	}
-	if rp.ID != provider.AccountID() || rp.Capacity != want.Capacity || rp.PricePerUnit != want.PricePerUnit ||
+	if rp.NodeID != provider.AccountID() {
+		t.Fatalf("announcing node = %q, want the signer %q", rp.NodeID, provider.AccountID())
+	}
+	if rp.ID != want.ID || rp.Capacity != want.Capacity || rp.PricePerUnit != want.PricePerUnit ||
 		rp.CostPerUnit != want.CostPerUnit || rp.MarkupBasisPoints != want.MarkupBasisPoints ||
 		rp.QuoteID != want.QuoteID || rp.QuoteVersion != want.QuoteVersion ||
 		!rp.ObservedAt.Equal(want.ObservedAt) || !rp.ValidUntil.Equal(want.ValidUntil) ||
@@ -1063,6 +1078,7 @@ func TestExchange_TwoHostGossip(t *testing.T) {
 		QuoteVersion:      1,
 		ObservedAt:        quoteNow,
 		ValidUntil:        quoteNow.Add(time.Hour),
+		ID:                provider.AccountID(),
 		Available:         10,
 	}
 	for time.Now().Before(deadline) {

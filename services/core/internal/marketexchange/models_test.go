@@ -21,6 +21,7 @@ func TestModelsAreCoveredByTheAnnouncementSignature(t *testing.T) {
 	}
 	now := time.Date(2025, time.June, 7, 8, 9, 10, 11, time.UTC)
 	ann := ProviderAnnouncement{
+		NodeID:            token.AccountIDFromPublicKey(pub),
 		ProviderID:        token.AccountIDFromPublicKey(pub),
 		PublicKey:         pub,
 		Capacity:          10,
@@ -60,7 +61,7 @@ func TestModelsAreCoveredByTheAnnouncementSignature(t *testing.T) {
 // length-prefixed alongside the entries: without it both would serialize to the
 // same bytes and one signature would cover both.
 func TestAnEmptyModelListAndOneEmptyModelDoNotShareAPayload(t *testing.T) {
-	base := ProviderAnnouncement{ProviderID: "p", PeerID: "peer", Timestamp: 1}
+	base := ProviderAnnouncement{NodeID: "n", ProviderID: "p", PeerID: "peer", Timestamp: 1}
 	none := base
 	none.Models = nil
 	blank := base
@@ -71,9 +72,9 @@ func TestAnEmptyModelListAndOneEmptyModelDoNotShareAPayload(t *testing.T) {
 	}
 }
 
-// TestProviderAnnouncementSigningDomainIsExplicitV2 locks the incompatible
+// TestProviderAnnouncementSigningDomainIsExplicitV3 locks the incompatible
 // announcement protocol change to both a v2 gossip topic and a signed v2 domain.
-func TestProviderAnnouncementSigningDomainIsExplicitV2(t *testing.T) {
+func TestProviderAnnouncementSigningDomainIsExplicitV3(t *testing.T) {
 	payload := (&ProviderAnnouncement{}).signingBytes()
 	if len(payload) < 4 {
 		t.Fatal("signing payload is missing its length-prefixed domain")
@@ -85,11 +86,11 @@ func TestProviderAnnouncementSigningDomainIsExplicitV2(t *testing.T) {
 	if got := string(payload[4 : 4+domainLen]); got != providerAnnouncementSigningDomain {
 		t.Fatalf("signed domain = %q, want %q", got, providerAnnouncementSigningDomain)
 	}
-	if providerAnnouncementSigningDomain != "matrix/market/provider-announcement/v2" {
-		t.Fatalf("announcement signing domain = %q, want explicit v2", providerAnnouncementSigningDomain)
+	if providerAnnouncementSigningDomain != "matrix/market/provider-announcement/v3" {
+		t.Fatalf("announcement signing domain = %q, want explicit v3", providerAnnouncementSigningDomain)
 	}
-	if TopicAnnounce != "matrix/market/announce/v2" {
-		t.Fatalf("announcement topic = %q, want explicit v2", TopicAnnounce)
+	if TopicAnnounce != "matrix/market/announce/v3" {
+		t.Fatalf("announcement topic = %q, want explicit v3", TopicAnnounce)
 	}
 }
 

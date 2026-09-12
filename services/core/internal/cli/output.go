@@ -34,6 +34,15 @@ type providerRow struct {
 	Origin            string   `json:"origin"`
 	PeerID            string   `json:"peer_id,omitempty"`
 	Models            []string `json:"models,omitempty"`
+	// The rest describe a remote provider as the directory sees it. They are in
+	// the JSON but not the table: the order-book view is already thirteen columns
+	// wide, and a buyer choosing where to send a prompt wants a different set of
+	// facts than an operator inspecting their own listings. `provider directory`
+	// is that view.
+	NodeID             string `json:"node_id,omitempty"`
+	Endpoint           string `json:"endpoint,omitempty"`
+	FirstSeen          string `json:"first_seen,omitempty"`
+	AnnouncementsHeard uint64 `json:"announcements_heard,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -51,6 +60,11 @@ func providerToRow(p *marketv1.Provider) providerRow {
 		Origin:            originString(p.GetOrigin()),
 		PeerID:            p.GetPeerId(),
 		Models:            p.GetModels(),
+
+		NodeID:             p.GetNodeId(),
+		Endpoint:           p.GetEndpoint(),
+		FirstSeen:          timestampString(p.GetFirstSeen()),
+		AnnouncementsHeard: p.GetAnnouncementsHeard(),
 	}
 }
 
@@ -243,4 +257,82 @@ func printTransaction(w io.Writer, asJSON bool, t *marketv1.Transaction) error {
 	fmt.Fprintf(w, "Nonce:  %d\n", r.Nonce)
 	fmt.Fprintf(w, "Block:  %d\n", r.BlockHeight)
 	return nil
+}
+
+// printDirectory renders the buyer's view of the directory: who is selling what,
+// where to reach them, and how long this node has been hearing from them.
+//
+// A different view from `provider list` rather than more columns on it, because
+// the two answer different questions. An operator inspecting their own order
+// book wants quote identity and markup; a buyer deciding where to send a prompt
+// wants an address, a model, a price, and some reason to believe the seller will
+// still be there in a minute.
+//
+// SEEN FOR and HEARD are what this node OBSERVED, not what the seller said about
+// itself. No self-reported uptime exists to print - the announcement carries
+// none, deliberately - so a long history here means this reader watched that node
+// keep announcing, and nothing more. It is evidence of presence, not a promise of
+// service, and the header says "seen" rather than "uptime" for that reason.
+func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now time.Time) error {
+	rows := make([]providerRow, 0, len(provs))
+	for _, p := range provs {
+		rows = append(rows, providerToRow(p))
+	}
+	if asJSON {
+		return printJSON(w, rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "No providers announced. This node has heard nothing yet -")
+		fmt.Fprintln(w, "either none are selling, or it has no peers to hear them from.")
+		return nil
+	}
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tSEEN FOR\tHEARD\tNODE\tPAYS")
+	for _, r := range rows {
+		endpoint := r.Endpoint
+		if endpoint == "" {
+			// Honest rather than blank: this seller published no address, so it is
+			// discoverable for compute units and cannot take an inference request.
+			endpoint = "(no address; compute only)"
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%s\t%d\t%s\t%s\n",
+			endpoint, strings.Join(r.Models, ","), r.PricePerUnit, r.Available,
+			seenFor(r.FirstSeen, now), r.AnnouncementsHeard,
+			shortID(r.NodeID), shortID(r.ID))
+	}
+	return tw.Flush()
+}
+
+// seenFor renders how long this node has been hearing a seller, rounded to
+// something a person reads at a glance.
+func seenFor(firstSeen string, now time.Time) string {
+	if firstSeen == "" {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339, firstSeen)
+	if err != nil {
+		return "-"
+	}
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// shortID abbreviates an account id so a table stays readable. A 64-hex id and a
+// 42-character address both make a column nothing else fits beside, and the full
+// value is one --json away.
+func shortID(id string) string {
+	const keep = 10
+	if len(id) <= keep*2 {
+		return id
+	}
+	return id[:keep] + "..." + id[len(id)-6:]
 }

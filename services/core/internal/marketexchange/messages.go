@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -33,13 +34,19 @@ import (
 // compatible protocol versions rendezvous on the same pubsub topics. Bumping the
 // version suffix is how an incompatible wire change is rolled out.
 const (
-	// TopicAnnounce carries the v2 ProviderAnnouncement layout. V2 adds signed
-	// economic quote identity, provenance, and validity metadata; it intentionally
-	// does not rendezvous with v1 nodes that cannot validate those fields.
-	TopicAnnounce = "matrix/market/announce/v2"
-	// providerAnnouncementSigningDomain cryptographically separates v2 provider
+	// TopicAnnounce carries the v3 ProviderAnnouncement layout.
+	//
+	// V3 adds the two things that make an announcement usable by a BUYER rather
+	// than only by another node: a reachable endpoint, and an announcer identity
+	// distinct from the payout account. V2 carried neither, so a buyer who
+	// received one learned that somebody somewhere sold a model and had no way to
+	// reach them. It does not rendezvous with v2 for the same reason v2 did not
+	// rendezvous with v1: a node that cannot validate the new fields cannot be
+	// trusted to relay them.
+	TopicAnnounce = "matrix/market/announce/v3"
+	// providerAnnouncementSigningDomain cryptographically separates v3 provider
 	// announcements from every other signed message and protocol version.
-	providerAnnouncementSigningDomain = "matrix/market/provider-announcement/v2"
+	providerAnnouncementSigningDomain = "matrix/market/provider-announcement/v3"
 	// TopicJobs carries the incompatible v2 JobRequest layout. V2 binds the
 	// buyer's signature to the exact provider quote and fixed total accepted.
 	TopicJobs = "matrix/market/jobs/v2"
@@ -62,14 +69,58 @@ var (
 	ErrInvalidMessage = errors.New("marketexchange: invalid message")
 )
 
-// ProviderAnnouncement advertises a provider's compute capacity and complete
-// economic quote over the v2 announce topic. ProviderID is the announcing
-// account's stable ID (hex of PublicKey). PeerID is the libp2p peer ID string the
-// provider is reachable at. ObservedAt and ValidUntil use UTC instants and are
-// encoded as Unix nanoseconds in the canonical signature payload. Timestamp is
-// the announcement's Unix-nanosecond creation time. Signature is an ed25519
-// signature by PublicKey over every field plus the v2 signing domain.
+// ProviderAnnouncement advertises a serving node's capacity, quote and address
+// over the v3 announce topic.
+//
+// WHO SIGNS, AND WHY IT CHANGED. In v2 the signer WAS the provider: ProviderID
+// had to equal the account id of PublicKey. That made two things impossible at
+// once. A provider paid to a wallet - which is what the GPU runbook tells an
+// operator to use, so revenue lands where they can spend it - could not be
+// announced at all, because no ed25519 key derives an `eth:0x` id. And nothing
+// in the node ever called the publish path, so no announcement was ever made on
+// a real network: the discovery half of the marketplace was wired and unused.
+//
+// So v3 separates two identities v2 conflated:
+//
+//   - The ANNOUNCER is the serving node, and it signs. It is the thing reachable
+//     at Endpoint, the thing that takes the reservation, and the thing that runs
+//     the model - so it is the counterparty a buyer is actually choosing, and
+//     its key is the one it has.
+//   - The PAYOUT ACCOUNT (ProviderID) is data. It does not sign because it is
+//     not authorising anything: it names where the node's revenue goes, which
+//     the node already decides locally, and it may be a wallet address.
+//
+// This removes rather than adds an impersonation question. An announcement no
+// longer claims to BE a provider, so there is nothing to impersonate: it says
+// "I, this node, serve these models at this address for this price", and a buyer
+// who disagrees connects to a different node.
+//
+// WHAT IS DELIBERATELY ABSENT: any self-reported uptime, latency or throughput.
+// A number a seller publishes about its own reliability is a claim, not a fact,
+// and it is free to inflate. What a buyer can actually rely on is measured by
+// the OBSERVER - how long this node has been hearing announcements and how many
+// it heard - and settled on the chain, where a paid job is a committed transfer
+// nobody can fabricate. Those live in the registry and the ledger, not here.
+//
+// ObservedAt and ValidUntil use UTC instants and are encoded as Unix nanoseconds
+// in the canonical signature payload. Timestamp is the announcement's
+// Unix-nanosecond creation time. Signature is an ed25519 signature by PublicKey
+// over every field plus the v3 signing domain.
 type ProviderAnnouncement struct {
+	// NodeID is the announcing node's stable account id, hex of PublicKey. The
+	// signature binds it, so an announcement can only be made by the node it
+	// names.
+	NodeID string `json:"node_id"`
+	// Endpoint is the base URL a buyer connects to, serving both the
+	// OpenAI-compatible route and the Connect API. Signed, so a relaying peer
+	// cannot redirect somebody else's traffic to a host of its choosing.
+	//
+	// Optional: a node selling compute units rather than inference has nothing
+	// for a buyer's HTTP client to reach, and requiring an address it does not
+	// have would keep it off the directory entirely.
+	Endpoint string `json:"endpoint,omitempty"`
+	// ProviderID is the payout account the node settles this provider's revenue
+	// into, and the id its local order book uses. It may be an `eth:0x` address.
 	ProviderID        string            `json:"provider_id"`
 	PublicKey         ed25519.PublicKey `json:"public_key"`
 	Capacity          uint64            `json:"capacity"`
@@ -98,6 +149,8 @@ type ProviderAnnouncement struct {
 func (a *ProviderAnnouncement) signingBytes() []byte {
 	buf := make([]byte, 0, 256)
 	buf = appendLenPrefixed(buf, []byte(providerAnnouncementSigningDomain))
+	buf = appendLenPrefixed(buf, []byte(a.NodeID))
+	buf = appendLenPrefixed(buf, []byte(a.Endpoint))
 	buf = appendLenPrefixed(buf, []byte(a.ProviderID))
 	buf = appendLenPrefixed(buf, a.PublicKey)
 	buf = appendUint64(buf, a.Capacity)
@@ -145,11 +198,17 @@ func (a *ProviderAnnouncement) VerifyAt(now time.Time) error {
 	if len(a.PublicKey) != ed25519.PublicKeySize {
 		return fmt.Errorf("%w: public key must be %d bytes", ErrInvalidMessage, ed25519.PublicKeySize)
 	}
+	if a.NodeID == "" {
+		return fmt.Errorf("%w: node id must not be empty", ErrInvalidMessage)
+	}
+	if a.NodeID != token.AccountIDFromPublicKey(a.PublicKey) {
+		return fmt.Errorf("%w: node id does not match public key", ErrInvalidMessage)
+	}
 	if a.ProviderID == "" {
 		return fmt.Errorf("%w: provider id must not be empty", ErrInvalidMessage)
 	}
-	if a.ProviderID != token.AccountIDFromPublicKey(a.PublicKey) {
-		return fmt.Errorf("%w: provider id does not match public key", ErrInvalidMessage)
+	if err := ValidateEndpoint(a.Endpoint); err != nil {
+		return err
 	}
 	if len(a.Signature) == 0 {
 		return ErrUnsignedMessage
@@ -379,4 +438,62 @@ func appendUint32(dst []byte, v uint32) []byte {
 	var b [4]byte
 	binary.BigEndian.PutUint32(b[:], v)
 	return append(dst, b[:]...)
+}
+
+// MaxEndpointLen bounds an announced address. Generous for a hostname and a
+// port, small enough that the field cannot be used to push payload around the
+// gossip network.
+const MaxEndpointLen = 512
+
+// ValidateEndpoint checks an announced address before anyone is handed it.
+//
+// This is the one field in an announcement that a buyer's client CONNECTS TO,
+// which makes it the one field where being permissive is a security decision
+// rather than a convenience. Everything else in a message that fails to validate
+// costs a bad quote; a bad endpoint costs a request sent somewhere the buyer did
+// not intend.
+//
+// So the rules are narrow and the reasons are specific:
+//
+//   - Only http and https. A scheme this does not constrain is whatever the
+//     client library happens to support - file://, and in some stacks gopher://
+//     or ftp:// - which turns a directory listing into a request generator
+//     pointed at the buyer's own machine.
+//   - No user info. `https://user:pass@host` puts credentials the announcer
+//     chose into the buyer's request, and a client that follows it authenticates
+//     as somebody it never agreed to be.
+//   - A host, and no path, query or fragment. A base URL is what the OpenAI SDK
+//     appends `/v1/chat/completions` to; a path here is either ignored or
+//     silently changes where the request lands.
+//
+// An empty endpoint is valid and means "not reachable by HTTP", which is the
+// honest state of a node selling compute units rather than inference.
+func ValidateEndpoint(endpoint string) error {
+	if endpoint == "" {
+		return nil
+	}
+	if len(endpoint) > MaxEndpointLen {
+		return fmt.Errorf("%w: endpoint is %d bytes, limit is %d",
+			ErrInvalidMessage, len(endpoint), MaxEndpointLen)
+	}
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return fmt.Errorf("%w: endpoint is not a url: %v", ErrInvalidMessage, err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return fmt.Errorf("%w: endpoint scheme %q is not http or https", ErrInvalidMessage, u.Scheme)
+	}
+	if u.User != nil {
+		return fmt.Errorf("%w: endpoint must not carry credentials", ErrInvalidMessage)
+	}
+	if u.Host == "" {
+		return fmt.Errorf("%w: endpoint has no host", ErrInvalidMessage)
+	}
+	if u.Path != "" && u.Path != "/" {
+		return fmt.Errorf("%w: endpoint must be a base url with no path, got %q", ErrInvalidMessage, u.Path)
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("%w: endpoint must carry no query or fragment", ErrInvalidMessage)
+	}
+	return nil
 }

@@ -39,6 +39,7 @@ import (
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/evmtx"
 	"github.com/ecirlabs/matrix-core/internal/market"
+	"github.com/ecirlabs/matrix-core/internal/marketexchange"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -99,7 +100,14 @@ func run(keep bool, timeout time.Duration) error {
 	if out, err := exec.Command("go", "build", "-o", matrixd, "./cmd/matrixd").CombinedOutput(); err != nil {
 		return fmt.Errorf("build matrixd: %v\n%s", err, out)
 	}
-	ok("built matrixd")
+	// The CLI too, because the directory check reads the registry through the
+	// same command a buyer would rather than through the exchange's own types.
+	// A check that bypasses the tooling can pass while the tooling is broken.
+	matrixCLI := filepath.Join(binDir, "matrix")
+	if out, err := exec.Command("go", "build", "-o", matrixCLI, "./cmd/matrix").CombinedOutput(); err != nil {
+		return fmt.Errorf("build matrix: %v\n%s", err, out)
+	}
+	ok("built matrixd and matrix")
 
 	step("initialising three nodes")
 	nodes := make([]*devNode, 3)
@@ -155,6 +163,9 @@ func run(keep bool, timeout time.Duration) error {
 	if err := checkRejections(nodes[0], buyer); err != nil {
 		return err
 	}
+	if err := checkDirectory(matrixCLI, nodes, timeout); err != nil {
+		return err
+	}
 	if !keep {
 		if err := checkGenesisSnapshot(matrixd, nodes); err != nil {
 			return err
@@ -181,8 +192,15 @@ type devNode struct {
 	peerID      string
 	p2pPort     int
 	ethRPC      string
-	cmd         *exec.Cmd
-	log         *os.File
+	// market is the gRPC address the CLI talks to, and connect is the address
+	// this node publishes to the directory for buyers to dial.
+	market  string
+	connect string
+	// apiKey is the admin key `matrixd -init` generated for this node, read back
+	// so the checks can drive the CLI the way an operator does.
+	apiKey string
+	cmd    *exec.Cmd
+	log    *os.File
 }
 
 // initNode writes a baseline config and reads back the identity it generated.
@@ -220,8 +238,13 @@ func initNode(matrixd, root string, i int) (*devNode, error) {
 	if err := json.Unmarshal(out, &ids); err != nil {
 		return nil, fmt.Errorf("parse node %d identity: %v (%s)", i, err, out)
 	}
+	apiKey, err := readAPIKey(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("read node %d api key: %v", i, err)
+	}
 	base := basePort + i*portsPerNode
 	return &devNode{
+		apiKey:      apiKey,
 		index:       i,
 		dir:         dir,
 		configPath:  configPath,
@@ -229,6 +252,8 @@ func initNode(matrixd, root string, i int) (*devNode, error) {
 		peerID:      ids.PeerID,
 		p2pPort:     base,
 		ethRPC:      fmt.Sprintf("http://127.0.0.1:%d", base+5),
+		market:      fmt.Sprintf("127.0.0.1:%d", base+2),
+		connect:     fmt.Sprintf("http://127.0.0.1:%d", base+4),
 	}, nil
 }
 
@@ -276,6 +301,12 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address) error {
 			setPath(cfg, []string{"connect", "addr"}, fmt.Sprintf("127.0.0.1:%d", base+4))
 			setPath(cfg, []string{"eth_rpc", "addr"}, fmt.Sprintf("127.0.0.1:%d", base+5))
 			setPath(cfg, []string{"agent", "addr"}, fmt.Sprintf("127.0.0.1:%d", base+6))
+			// The address this node publishes to the directory, which is the
+			// Connect endpoint a buyer's client actually dials. Each node gets a
+			// distinct one so the discovery check below can tell whose is whose.
+			setPath(cfg, []string{"market", "endpoint"}, fmt.Sprintf("http://127.0.0.1:%d", base+4))
+			// Fast enough that the check does not wait out a production interval.
+			setPath(cfg, []string{"market", "announce_interval"}, "1s")
 
 			setPath(cfg, []string{"consensus", "chain_id"}, devnetChainID)
 			setPath(cfg, []string{"consensus", "validators"}, validators)
@@ -892,3 +923,125 @@ func checkGenesisSnapshot(matrixd string, nodes []*devNode) error {
 // repeated here rather than imported so this stays a black-box check: it runs
 // the real binary and reads its output, the way an operator would.
 const nativeMaxSupply = 1_000_000_000_000_000_000
+
+// checkDirectory proves a buyer can find a seller without being told its address.
+//
+// This is the half of the marketplace that was wired and never invoked. Nodes
+// subscribed to the announce topic and kept a registry of what they heard, and
+// nothing anywhere published: the only caller of the publish path was a test. On
+// a real network every registry was empty, so the only way to find a provider was
+// to be handed its address by a person - which is not a marketplace, whatever the
+// code says.
+//
+// So it asserts the whole round trip on a real network: node 0 announces the
+// provider it is actually serving, the announcement crosses gossip, and node 1
+// can name both the seller and the URL to send a prompt to. Reading the registry
+// through the same RPC a buyer's client would use, not through the exchange.
+func checkDirectory(matrixCLI string, nodes []*devNode, timeout time.Duration) error {
+	step("finding a seller the way a buyer would, with nobody handing over an address")
+
+	// Announcements are published on a timer, so the first one may not have been
+	// sent when the earlier checks finished.
+	deadline := time.Now().Add(timeout)
+	var found map[string]any
+	for time.Now().Before(deadline) {
+		listed, err := listProviders(matrixCLI, nodes[1])
+		if err != nil {
+			return err
+		}
+		for _, p := range listed {
+			// Node 1's view of node 0, which is the only interesting direction: a
+			// node's own listings are not discovery.
+			if asString(p["node_id"]) == nodes[0].consensusID {
+				found = p
+				break
+			}
+		}
+		if found != nil {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	if found == nil {
+		return fmt.Errorf("node 1 never heard node 0 announce a provider\n%s", nodes[1].tail(15))
+	}
+
+	endpoint := asString(found["endpoint"])
+	if endpoint == "" {
+		return fmt.Errorf("the announcement carried no endpoint, so a buyer has nothing to connect to: %v", found)
+	}
+	// It has to be the address the SELLER serves on, not the reader's own: an
+	// endpoint that is merely present would satisfy a check and route every buyer
+	// to the wrong host.
+	if endpoint != nodes[0].connect {
+		return fmt.Errorf("announced endpoint is %q, want node 0's own %q", endpoint, nodes[0].connect)
+	}
+	if err := marketexchange.ValidateEndpoint(endpoint); err != nil {
+		return fmt.Errorf("the directory carries an endpoint a buyer should not dial: %w", err)
+	}
+	ok("node 1 found node 0's provider at %s, with nobody configuring it", endpoint)
+
+	// The observed half of a reputation: measured by the reader, not claimed by
+	// the seller. It must be counting up, or it says nothing a buyer can use.
+	if heard := asUint(found["announcements_heard"]); heard == 0 {
+		return fmt.Errorf("the directory entry reports zero announcements heard: %v", found)
+	}
+	if asString(found["first_seen"]) == "" {
+		return fmt.Errorf("the directory entry records no first sighting: %v", found)
+	}
+	ok("and reports what it observed itself: %d announcements heard since first contact",
+		asUint(found["announcements_heard"]))
+	return nil
+}
+
+// listProviders reads one node's directory through the CLI's own JSON, so the
+// check sees exactly what a buyer's tooling would.
+func listProviders(matrixCLI string, n *devNode) ([]map[string]any, error) {
+	cmd := exec.Command(matrixCLI, "--addr", n.market, "--api-key", n.apiKey, "--json", "provider", "directory")
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("provider directory on node %d: %v\n%s", n.index, err, stderr.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("provider directory output is not json: %v\n%s", err, out)
+	}
+	return rows, nil
+}
+
+func asString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+
+func asUint(v any) uint64 {
+	f, _ := v.(float64)
+	return uint64(f)
+}
+
+// readAPIKey pulls the admin key `matrixd -init` generated into a node's config.
+// The key is never printed at init - the generated file is 0600 and echoing it
+// would put it in shell history - so reading the file is how an operator gets it
+// too.
+func readAPIKey(configPath string) (string, error) {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return "", err
+	}
+	var cfg struct {
+		Security struct {
+			APIKeys []struct {
+				Key string `yaml:"key"`
+			} `yaml:"api_keys"`
+		} `yaml:"security"`
+	}
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		return "", err
+	}
+	if len(cfg.Security.APIKeys) == 0 {
+		return "", fmt.Errorf("no api key in %s", configPath)
+	}
+	return cfg.Security.APIKeys[0].Key, nil
+}
