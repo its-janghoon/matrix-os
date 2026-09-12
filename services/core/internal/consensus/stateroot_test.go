@@ -69,6 +69,15 @@ func TestABlockIsRefusedWhenItsLedgerDisagrees(t *testing.T) {
 	}{
 		{"a different ledger", bytes.Repeat([]byte{0xaa}, 32)},
 		{"no state root at all", nil},
+		// A block is a message from the network and the length of this field is
+		// whatever its sender put there. The mismatch branch used to render it by
+		// slicing a fixed 8 bytes, so a peer could crash every honest node that
+		// checked its block by proposing a short root - and that branch runs
+		// precisely when a block is already suspect. These must be refused, not
+		// panicked on.
+		{"a one-byte root", []byte{0x01}},
+		{"a seven-byte root", bytes.Repeat([]byte{0xaa}, 7)},
+		{"a root longer than a digest", bytes.Repeat([]byte{0xaa}, 129)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng.mu.Lock()

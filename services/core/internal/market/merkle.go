@@ -97,7 +97,13 @@ func merkleNode(left, right []byte) []byte {
 // node rather than duplicating it.
 func merkleRootOf(level [][]byte) []byte {
 	if len(level) == 0 {
-		return sha256.New().Sum(merkleEmptyDomain)[len(merkleEmptyDomain):]
+		// sha256.Sum256(domain), NOT h.Sum(domain): Sum APPENDS the digest of what
+		// was written to its argument, so hashing nothing and slicing the prefix
+		// back off threw the domain away and returned sha256("") - a value with no
+		// domain separation at all, which is the one thing the constant exists to
+		// provide.
+		sum := sha256.Sum256(merkleEmptyDomain)
+		return sum[:]
 	}
 	for len(level) > 1 {
 		next := make([][]byte, 0, (len(level)+1)/2)

@@ -133,11 +133,16 @@ func (e *Engine) verifyBlockStateRootLocked(b *Block) error {
 		return fmt.Errorf("%w: block %d carries no state root", ErrInvalidMessage, b.Height)
 	}
 	if !bytes.Equal(b.StateRoot, mine) {
+		// Rendered through shortHex, which tolerates any length. b.StateRoot is a
+		// field of a message from the network and its length is whatever the sender
+		// put there, so slicing it to a fixed width would let a peer crash every
+		// honest node that checks its block simply by proposing a 4-byte root - and
+		// this path runs precisely when a block is suspect.
 		return fmt.Errorf("%w: block %d says the ledger is %s but this node's is %s - "+
 			"the two nodes have applied the same transactions and reached different balances, "+
 			"which means they are running different rules; compare binaries and genesis before "+
 			"restarting either",
-			ErrInvalidMessage, b.Height, hex.EncodeToString(b.StateRoot[:8]), hex.EncodeToString(mine[:8]))
+			ErrInvalidMessage, b.Height, shortHex(b.StateRoot), shortHex(mine))
 	}
 	return nil
 }

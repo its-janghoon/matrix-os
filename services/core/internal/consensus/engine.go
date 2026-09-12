@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/transport"
@@ -1298,8 +1299,18 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 // So the envelope's own bytes are the identity when there is an envelope.
 func mempoolKey(tx *token.Transaction) string {
 	signature := tx.Signature
-	if tx.IsEVM() {
+	switch {
+	case tx.IsEVM():
 		signature = tx.Raw
+	case tx.SenderIsEth():
+		// Canonicalised, because an ecrecover signature is accepted in BOTH the
+		// {0,1} and {27,28} conventions - the envelope path emits one and wallets
+		// emit the other, so neither can be refused - and that gives one
+		// authorisation two byte-distinct encodings. Keyed on the raw bytes, the
+		// twin reads as a new transaction: the replay set misses, and for a
+		// reserved recipient (exempt from the nonce rule) the operation its
+		// signer authorised once applies again.
+		signature = ethsig.CanonicalSignature(tx.Signature)
 	}
 	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, signature)
 }

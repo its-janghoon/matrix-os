@@ -2,6 +2,7 @@ package market
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"testing"
@@ -263,5 +264,32 @@ func TestAnEmptyLedgerHasAStableRoot(t *testing.T) {
 	}
 	if bytes.Equal(ra, rc) {
 		t.Fatal("an empty ledger and one holding a zero balance produced the same root")
+	}
+}
+
+// TestTheEmptyRootIsDomainSeparated
+//
+// merkleEmptyDomain exists so "no balances" is a statement rather than an
+// absence. It was being discarded: `h.Sum(domain)[len(domain):]` APPENDS the
+// digest of what was written - nothing - to the domain and then slices the
+// domain back off, so the root was sha256(""), a value with no domain
+// separation and one that any other empty-hash scheme would also produce.
+func TestTheEmptyRootIsDomainSeparated(t *testing.T) {
+	got := merkleRootOf(nil)
+
+	if want := sha256.Sum256(merkleEmptyDomain); !bytes.Equal(got, want[:]) {
+		t.Fatalf("empty root = %x, want sha256(domain) = %x", got, want)
+	}
+	if bare := sha256.Sum256(nil); bytes.Equal(got, bare[:]) {
+		t.Fatal("the empty root is sha256(\"\"); the domain constant is being discarded")
+	}
+	// It must also be distinct from any real leaf or node, which is the whole
+	// point of separating the domains.
+	leaf := MerkleLeaf("alice", 1)
+	if bytes.Equal(got, leaf) {
+		t.Fatal("the empty root collides with a leaf hash")
+	}
+	if bytes.Equal(got, merkleNode(leaf, leaf)) {
+		t.Fatal("the empty root collides with an interior node hash")
 	}
 }

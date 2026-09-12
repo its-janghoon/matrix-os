@@ -142,3 +142,91 @@ func TestAMalformedSIsNotCanonical(t *testing.T) {
 		}
 	}
 }
+
+// TestARecoveryByteOutsideTheTwoConventionsIsRefused
+//
+// THE PROBLEM. `v` has exactly four legal spellings: {0,1} and {27,28}. This
+// function used to normalise "anything below 27" and hand everything else to
+// dcrd's RecoverCompact, which accepts 27-34 and reads bit 2 as a
+// compressed-pubkey flag - a flag AddressFromPubKey then ignores, because it
+// always serialises uncompressed.
+//
+// So one signature had FOUR byte-distinct encodings that all verified and all
+// recovered the same signer: v, v+4, v+27 and v+31. Same defect class as high-S:
+// anything keyed on the signature BYTES sees a malleated twin as a new
+// signature, and an operation its signer authorised once applies again.
+func TestARecoveryByteOutsideTheTwoConventionsIsRefused(t *testing.T) {
+	priv, err := secp256k1.GeneratePrivateKey()
+	if err != nil {
+		t.Fatalf("GeneratePrivateKey: %v", err)
+	}
+	digest := Keccak256([]byte("one authorisation, one encoding"))
+	sig, err := SignDigest(priv, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	signer := AddressFromPubKey(priv.PubKey())
+
+	// Sweep every byte value. Only the two conventions may be accepted, and only
+	// the two that carry this signature's own recovery parity may recover the
+	// signer. (The other parity recovers SOME address - that is ordinary ECDSA,
+	// and it is not this key's.)
+	encodings := map[string]bool{}
+	for v := 0; v < 256; v++ {
+		twin := make([]byte, SignatureLen)
+		copy(twin, sig)
+		twin[64] = byte(v)
+		got, err := RecoverAddress(digest, twin)
+		if err != nil {
+			continue
+		}
+		if v != 0 && v != 1 && v != 27 && v != 28 {
+			t.Fatalf("recovery byte %d was accepted; only 0, 1, 27 and 28 are legal", v)
+		}
+		if got == signer {
+			encodings[string(twin)] = true
+		}
+	}
+	if len(encodings) != 2 {
+		t.Fatalf("%d byte-distinct encodings recover the signer, want exactly 2 "+
+			"(the {0,1} and {27,28} spellings of one parity)", len(encodings))
+	}
+
+	// Both must be accepted: this repo's own envelope path emits {0,1} and
+	// wallets emit {27,28}, so refusing either breaks a real caller. What must
+	// NOT survive is two IDENTITIES - so anything keying on the bytes takes them
+	// from CanonicalSignature, which collapses the pair to one.
+	identities := map[string]bool{}
+	for enc := range encodings {
+		identities[string(CanonicalSignature([]byte(enc)))] = true
+	}
+	if len(identities) != 1 {
+		t.Fatalf("CanonicalSignature left %d identities for one authorisation, want 1", len(identities))
+	}
+	for id := range identities {
+		if v := id[64]; v != 27 && v != 28 {
+			t.Fatalf("canonical form has v=%d, want the {27,28} convention", v)
+		}
+	}
+}
+
+// TestCanonicalSignatureLeavesAMalformedSignatureAlone. Rewriting a malformed
+// signature into a well-formed one would be worse than letting it fail:
+// RecoverAddress refuses it, and it should keep refusing the same bytes.
+func TestCanonicalSignatureLeavesAMalformedSignatureAlone(t *testing.T) {
+	for _, n := range []int{0, 1, 64, 66} {
+		in := make([]byte, n)
+		for i := range in {
+			in[i] = 0xAB
+		}
+		if got := CanonicalSignature(in); string(got) != string(in) {
+			t.Fatalf("a %d-byte signature was rewritten", n)
+		}
+	}
+	// A 65-byte signature with an illegal v is left as-is too.
+	bad := make([]byte, SignatureLen)
+	bad[64] = 31
+	if got := CanonicalSignature(bad); got[64] != 31 {
+		t.Fatalf("an illegal recovery byte was rewritten to %d", got[64])
+	}
+}
