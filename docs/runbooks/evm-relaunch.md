@@ -25,7 +25,7 @@ Every change below breaks something that cannot be un-broken later:
 | Change | What it invalidates |
 | --- | --- |
 | Ethereum transaction format, EIP-155 | Every signature made for the old layout |
-| Addresses as account ids | Every 64-hex account id, and anything holding one |
+| Addresses as an account kind | Nothing. 64-hex ids keep working alongside them |
 | `chain_id` in the signature | Cross-network replay, which had nothing stopping it |
 | State root in the block | Every block hash from genesis |
 | Block timestamp and protocol version | Every block hash from genesis |
@@ -36,35 +36,58 @@ of doing it is lowest on the first day it can be done and rises every day after.
 
 ## What has to be decided before anything is typed
 
-**The chain id.** Pick one nobody else uses; chainlist.org is the registry people
-check. It goes inside every signature a wallet makes, it must be identical on
-every node, and it can never change on a running chain - a change invalidates
-every signature already made for the old value. Pick it once.
+**The chain id.** Any number nobody else is using. It is not earned or
+registered anywhere before you use it - chainlist.org is a directory people
+publish to, not an authority that grants ids - so the whole decision is "check it
+is free, then never change it".
 
-**The escrow figure.** Native escrow must equal wrapped supply, exactly. Read
-both, at the same moment, before writing a genesis file:
+Checking is one request per candidate:
 
 ```sh
-# Native: what the old chain holds in escrow.
-matrix --api-key <key> balance --account bridge/escrow
+# Anything but 404 means the id is taken; pick another.
+curl -s -o /dev/null -w '%{http_code}\n' https://chainid.network/chain/<candidate>.json
+```
 
-# Wrapped: what exists on Base. Both numbers are in their own scale - native base
-# units are 9 decimals and wMATRIX is 18 - so convert before comparing: one native
-# base unit is 1e9 wrapped base units.
+It goes inside every signature a wallet makes and must be identical on every
+node, and changing it later invalidates every signature already made for the old
+value. That is the only reason it is worth two minutes of care.
+
+**The escrow figure.** The node already computes this - do not read two numbers
+and compare them by hand:
+
+```sh
+matrix --api-key <key> bridge reconcile
+```
+
+It prints what the escrow holds and what `totalSupply()` on the Base contract
+must equal if the backing is intact, and it REFUSES to return a snapshot at all
+when the node's own accounting and its escrow balance disagree. An error there
+is not a reporting problem: it means the two halves have diverged, and nothing
+below is safe until that is understood.
+
+Take the `Outstanding (native)` figure into the genesis file, and confirm it
+against the contract once:
+
+```sh
+# Must equal the erc20 figure reconcile printed.
 cast call <WrappedMatrix> "totalSupply()(uint256)" --rpc-url <base-rpc>
 ```
 
-If the launch evidence is still current these are 50,000,000 MATRIX escrowed
-against 50,000,000 wMATRIX minted to the vesting vault. Do not assume it: if
-anyone has locked native since, the escrow is larger, and that larger number is
-what goes in the genesis file.
+The reason to run this rather than copy the launch record is that the record is a
+snapshot: every native lock since raised the escrow and minted more wMATRIX. If
+nothing has been locked since launch these are the numbers already published, and
+this is a minute's confirmation rather than an afternoon's arithmetic.
 
-**Who holds what.** Old ed25519 accounts do not exist on the new chain. Every
-balance worth carrying over needs a wallet address to carry it to, and that
-mapping is a decision with no technical answer - collect it before the ceremony,
-publish it as part of the genesis, and have the holders confirm their own
-addresses. An address a holder cannot sign for is a balance nobody can ever
-move.
+**Who holds what.** Old 64-hex ed25519 account ids keep working: that account
+kind was never removed, its transactions still verify, and `genesis.allocations`
+still accepts one. So carrying a balance over is copying the id and the amount,
+not remapping anyone to anything.
+
+A holder who WANTS a wallet can be allocated to an `eth:0x...` address instead,
+and that is the only case needing a decision - it is per holder, optional, and
+not a precondition for the relaunch. An address a holder cannot sign for is a
+balance nobody can ever move, so take those from the holder rather than deriving
+them.
 
 ## The genesis file
 
@@ -108,8 +131,9 @@ the config, do not restart around it.
 
 1. **Freeze.** Stop accepting native transfers. Announce a window. Nothing below
    is safe while balances are still moving.
-2. **Read the escrow and the wrapped supply**, at the same moment, and record
-   both in the evidence file with the Base block they were read at.
+2. **Run `matrix bridge reconcile`** and record its output in the evidence file
+   with the Base block `totalSupply()` was read at. An error here stops the
+   relaunch until it is understood.
 3. **Write and review the genesis**, on every node, against the frozen figures.
    Two reviewers, and a diff between the three files that shows only the node's
    own identity differing.
@@ -123,12 +147,18 @@ the config, do not restart around it.
    first epoch boundary.
 6. **Re-bond.** Bonds do not carry over: they were balances on a chain that no
    longer exists. Each validator funds its account and bonds, either with
-   `stake.bond` in config or `matrix stake bond` from a wallet.
-7. **Verify the escrow** before announcing anything: native `bridge/escrow` must
-   equal wrapped supply converted to native base units. If it does not, stop -
-   the mirror is unbacked and every later step compounds it.
+   `stake.bond` in config or `matrix stake bond` from a wallet. `matrix stake
+   status` shows both numbers.
+7. **Verify the escrow** before announcing anything: run `matrix bridge
+   reconcile` against the NEW chain and check it against the contract again. Also
+   check that anyone can: `matrix_getAccountProof` on `bridge/escrow` returns a
+   proof against the state root, and that proof is the evidence an exchange or an
+   auditor checks without trusting the node that served it. If the figures do not
+   line up, stop - the mirror is unbacked and every later step compounds it.
 8. **Point a wallet at it.** Add the network, read a balance, send a transfer to
    yourself, watch the receipt land. What passes here is what a buyer will see.
+   `make devnet` does exactly this against three throwaway nodes, so run it first
+   and see it pass there before doing it against the real one.
 9. **Publish the evidence**: genesis hash, chain id, escrow figure and the Base
    block it was read at, the validator set, and the binary's revision and SHA-256
    on each host.
