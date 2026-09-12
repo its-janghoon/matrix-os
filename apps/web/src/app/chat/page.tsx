@@ -13,6 +13,7 @@ import {
   type Settled,
 } from '@/lib/wallet/node';
 import type { Message } from '@/lib/wallet/signing';
+import { checkReceipt, receiptVerdict, type ReceiptCheck } from '@/lib/wallet/receipt';
 import { browserSigner } from '@/lib/wallet/browserSigner';
 import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
@@ -27,17 +28,34 @@ import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/w
  * non-extractable, and used to sign two things per message - the run
  * authorization before any work happens, and the payment after.
  *
+ * Every answer comes with the seller's signed receipt, checked HERE - the bytes
+ * the node signed, against the prompt this page actually sent and the answer it
+ * got back. A receipt the seller's own node vouched for would be evidence of
+ * nothing; the point of one is that the holder can check it without asking the
+ * seller, or us, for anything.
+ *
  * It is deliberately plain about what it cannot do. There is no on-ramp, so the
  * account starts empty and the page hands over the command to fund it rather
  * than pretending. There is no streaming, because the completion is withheld
- * until the payment is signed. And the provider sees the prompt, which no amount
- * of browser-side key handling changes.
+ * until the payment is signed. The provider sees the prompt, which no amount of
+ * browser-side key handling changes. And a verified receipt means the seller
+ * MADE its claim, not that the claim is true: no signature can tell a buyer that
+ * the model named is the model that ran.
  */
 
 interface Turn {
   role: 'user' | 'assistant';
   content: string;
   settled?: Settled;
+  /**
+   * What checking the seller's receipt concluded, run in this page against the
+   * prompt that was actually sent and the answer that came back.
+   *
+   * Checked here rather than shown as a badge from the node, because a receipt
+   * the seller's own node vouches for is not evidence of anything. This page
+   * holds the text and does the arithmetic itself.
+   */
+  receipt?: ReceiptCheck;
 }
 
 const CARD = 'rounded-xl border border-gray-800 bg-gray-900/50 p-6';
@@ -117,7 +135,8 @@ export default function ChatPage() {
 
     try {
       const settled = await chat(endpoint, signer, { model, messages: history });
-      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled }]);
+      const receipt = await checkReceipt(settled, history, signer.accountId);
+      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled, receipt }]);
       setBalance(await getBalance(endpoint, signer.accountId));
     } catch (err) {
       setProblem(reportProblem(err));
@@ -393,10 +412,21 @@ function Transcript({
           <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
           <p className='whitespace-pre-wrap text-gray-100'>{turn.content}</p>
           {turn.settled ? (
-            <p className='mt-3 font-mono text-xs text-gray-500'>
-              paid {turn.settled.units.toString()} base units to {turn.settled.provider} - {turn.settled.promptTokens}{' '}
-              prompt + {turn.settled.completionTokens} completion tokens
-            </p>
+            <div className='mt-3 space-y-1 font-mono text-xs'>
+              <p className='text-gray-500'>
+                paid {turn.settled.units.toString()} base units to {turn.settled.provider} -{' '}
+                {turn.settled.promptTokens} prompt + {turn.settled.completionTokens} completion tokens
+              </p>
+              <p
+                className={
+                  turn.receipt && !turn.receipt.problem && turn.receipt.boundToExchange !== false
+                    ? 'text-emerald-500/80'
+                    : 'text-amber-500/80'
+                }
+              >
+                {receiptVerdict(turn.receipt)}
+              </p>
+            </div>
           ) : null}
         </div>
       ))}

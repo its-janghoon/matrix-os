@@ -207,6 +207,7 @@ export const BRIDGE_LOCK_PREFIX = 'bridge/lock/';
 // files because they are Ethereum's encoding, not the chain's byte layouts -
 // but exported from here so a client has one import for everything it signs.
 export * from './eip712';
+export * from './receipt';
 export { keccak256 } from './keccak';
 
 

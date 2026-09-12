@@ -38,6 +38,35 @@ export interface ModelOffer {
   pricePerUnit: bigint;
 }
 
+/**
+ * One seller: a node, the terms it offers, and what the reading node's own
+ * chain says about it.
+ *
+ * `endpoint` is the field that makes this usable. Inference is served by the
+ * node that OWNS the provider, so a buyer that picked a seller announced by
+ * somebody else and then sent the request to its own node would be refused -
+ * the order book it asked holds local providers only. The endpoint is where the
+ * request has to go, and it is signed by the announcing node, so a relaying
+ * peer cannot point a buyer's prompt at a host of its choosing.
+ *
+ * `bonded`, `settledPayments` and `settledPayers` come from the CHAIN the
+ * answering node holds, never from the seller's announcement. They are the only
+ * things here a seller cannot simply type: an announcement carries no
+ * self-reported uptime or rating, deliberately.
+ */
+export interface Seller {
+  id: string;
+  nodeId: string;
+  endpoint: string;
+  models: string[];
+  pricePerUnit: bigint;
+  available: bigint;
+  bonded: bigint;
+  settledPayments: bigint;
+  settledPayers: bigint;
+  origin: 'local' | 'remote';
+}
+
 /** What a completed exchange cost, so a UI can show the bill it just paid. */
 export interface Settled {
   completion: string;
@@ -46,6 +75,15 @@ export interface Settled {
   model: string;
   promptTokens: number;
   completionTokens: number;
+  /**
+   * The serving node's signed account of what it charged and for what, as the
+   * exact bytes it signed.
+   *
+   * Kept verbatim rather than parsed into fields, because re-encoding it would
+   * invalidate the signature and the whole value of a receipt is that the buyer
+   * holds the bytes. Empty when the seller's node has no signing key.
+   */
+  receipt: string;
 }
 
 export interface NativeTransaction {
@@ -289,21 +327,85 @@ export async function listModels(endpoint: string): Promise<ModelOffer[]> {
     .sort((a, b) => a.id.localeCompare(b.id));
 }
 
-/** Picks the cheapest provider serving a model that still has capacity. */
-export async function providerFor(endpoint: string, model: string): Promise<string> {
-  const out = await rpc(endpoint, MARKET, 'ListProviders', { includeRemote: true, model });
+/**
+ * Lists the sellers of a model, with the address each is reached at and what the
+ * chain says about them.
+ *
+ * Reading the directory of ONE node, which is a buyer's real position: that node
+ * heard these announcements and holds the chain the bond and settled history are
+ * read from. A different node may have heard others.
+ */
+export async function listSellers(endpoint: string, model?: string): Promise<Seller[]> {
+  const out = await rpc(endpoint, MARKET, 'ListProviders', { includeRemote: true, ...(model ? { model } : {}) });
   const providers = Array.isArray(out.providers) ? out.providers : [];
-  let best: { id: string; price: bigint } | null = null;
+
+  const sellers: Seller[] = [];
   for (const raw of providers) {
     const p = obj(raw);
     const id = str(p.id);
-    if (id === '' || big(p.available) === 0n) continue;
-    const price = big(p.pricePerUnit);
-    // Cheapest, ties on id, so two identical asks reach the same provider.
-    if (!best || price < best.price || (price === best.price && id < best.id)) best = { id, price };
+    if (id === '') continue;
+    const remote = str(p.origin) === 'PROVIDER_ORIGIN_REMOTE';
+    sellers.push({
+      id,
+      nodeId: str(p.nodeId),
+      // A local provider is served by the node being asked, so its address is
+      // the one the caller already has.
+      endpoint: remote ? str(p.endpoint) : endpoint,
+      models: (Array.isArray(p.models) ? p.models : []).filter((m): m is string => typeof m === 'string'),
+      pricePerUnit: big(p.pricePerUnit),
+      available: big(p.available),
+      bonded: big(p.bonded),
+      settledPayments: big(p.settledPayments),
+      settledPayers: big(p.settledPayers),
+      origin: remote ? 'remote' : 'local',
+    });
   }
-  if (!best) throw new NodeError('not_found', `nobody on this network is serving ${model} with capacity to spare`);
-  return best.id;
+  return sellers;
+}
+
+/**
+ * Picks a seller for a model: cheapest that can actually be reached and can
+ * still take the work.
+ *
+ * REACHABLE IS NOT A DETAIL. Inference is served by the node that OWNS the
+ * provider, and this used to return a bare id and let the caller send the
+ * request to its own node. That was invisible only because nothing announced -
+ * every registry was empty, so no remote seller was ever the cheapest. The
+ * moment discovery started working, the cheapest seller was routinely somebody
+ * else's, and the buy failed with "provider not found" from a node that had
+ * never heard of it.
+ *
+ * `minBond` is the buyer's own floor. A bond does not make a seller honest -
+ * nothing can - but it makes a LISTING cost capital, which is what stops one
+ * attacker from filling the directory with cheap fake sellers. A buyer who
+ * wants to refuse strangers sets it.
+ */
+export async function sellerFor(
+  endpoint: string,
+  model: string,
+  opts: { minBond?: bigint } = {},
+): Promise<Seller> {
+  const minBond = opts.minBond ?? 0n;
+  const candidates = (await listSellers(endpoint, model)).filter(
+    (s) => s.available > 0n && s.endpoint !== '' && s.bonded >= minBond,
+  );
+
+  let best: Seller | null = null;
+  for (const s of candidates) {
+    // Cheapest, ties on id, so two identical asks reach the same seller.
+    if (!best || s.pricePerUnit < best.pricePerUnit || (s.pricePerUnit === best.pricePerUnit && s.id < best.id)) {
+      best = s;
+    }
+  }
+  if (!best) {
+    throw new NodeError(
+      'not_found',
+      minBond > 0n
+        ? `nobody serving ${model} has ${minBond} bonded and capacity to spare`
+        : `nobody on this network is serving ${model} with capacity to spare`,
+    );
+  }
+  return best;
 }
 
 /**
@@ -332,9 +434,14 @@ export async function providerFor(endpoint: string, model: string): Promise<stri
 export async function chat(
   endpoint: string,
   signer: Signer,
-  input: { model: string; messages: Message[] },
+  input: { model: string; messages: Message[]; minBond?: bigint },
 ): Promise<Settled> {
-  const provider = await providerFor(endpoint, input.model);
+  const seller = await sellerFor(endpoint, input.model, { minBond: input.minBond });
+  const provider = seller.id;
+  // Every call below goes to the SELLER's node, not to the one the directory was
+  // read from. Inference is served by the node that owns the provider, so a
+  // request sent anywhere else is refused by a node that has never heard of it.
+  const serving = seller.endpoint;
   const timestamp = BigInt(Date.now()) * 1_000_000n;
 
   const auth = await signer.signRunAuthorization({
@@ -344,7 +451,7 @@ export async function chat(
     timestamp,
   });
 
-  const ran = await rpc(endpoint, INFERENCE, 'RunInferenceJob', {
+  const ran = await rpc(serving, INFERENCE, 'RunInferenceJob', {
     buyer: signer.accountId,
     provider,
     model: input.model,
@@ -366,7 +473,7 @@ export async function chat(
     prevHash: fromBase64(str(payment.prevHash)),
   });
 
-  const settled = await rpc(endpoint, INFERENCE, 'SettleInferenceJob', {
+  const settled = await rpc(serving, INFERENCE, 'SettleInferenceJob', {
     id: str(payment.jobId),
     fromPublicKey: toBase64(signed.fromPublicKey),
     to: str(payment.to),
@@ -386,7 +493,24 @@ export async function chat(
     model: str(job.model) || input.model,
     promptTokens: num(usage.promptTokens),
     completionTokens: num(usage.completionTokens),
+    receipt: decodeReceipt(job.receipt),
   };
+}
+
+/**
+ * Reads the receipt out of a settled job.
+ *
+ * It arrives as base64 over Connect's JSON encoding, and what comes back out has
+ * to be the EXACT bytes the node signed - a re-encode would invalidate the
+ * signature and the whole point is that the buyer holds those bytes.
+ */
+function decodeReceipt(raw: unknown): string {
+  if (typeof raw !== 'string' || raw === '') return '';
+  try {
+    return new TextDecoder().decode(fromBase64(raw));
+  } catch {
+    return '';
+  }
 }
 
 /**

@@ -75,16 +75,29 @@ type Receipt struct {
 	// report is clamped to the reservation and to what the text can honestly
 	// have cost. Both are recorded so the difference is visible rather than
 	// reconstructed.
-	Units uint64 `json:"units"`
+	//
+	// THE `,string` TAGS ARE LOAD-BEARING, on this field and the three below.
+	// These are 64-bit values, and JSON numbers are IEEE doubles: anything past
+	// 2^53 is rounded by every JavaScript parser there is. IssuedAt is unix
+	// NANOSECONDS - about 1.8e18 - so every receipt carries one, and a browser
+	// reading it as a number would compute a different signing digest and
+	// conclude the signature was invalid.
+	//
+	// That failure is the dangerous shape: it depends on whether a particular
+	// timestamp happens to round to itself, so it passes in testing on a round
+	// number and fails in production on an arbitrary one, reading as a key
+	// problem the whole time. Carried as strings, the bytes a browser verifies
+	// are the bytes the node signed.
+	Units uint64 `json:"units,string"`
 	// PricePerUnit and Total are the money. Total must equal Units *
 	// PricePerUnit, and a verifier checks it rather than trusting it.
-	PricePerUnit uint64 `json:"price_per_unit"`
-	Total        uint64 `json:"total"`
+	PricePerUnit uint64 `json:"price_per_unit,string"`
+	Total        uint64 `json:"total,string"`
 	// ExchangeDigest binds this receipt to one prompt and one completion, so it
 	// cannot be detached and shown for a different request.
 	ExchangeDigest []byte `json:"exchange_digest"`
 	// IssuedAt is unix nanoseconds at signing.
-	IssuedAt int64 `json:"issued_at"`
+	IssuedAt int64 `json:"issued_at,string"`
 
 	PublicKey ed25519.PublicKey `json:"public_key"`
 	Signature []byte            `json:"signature"`
