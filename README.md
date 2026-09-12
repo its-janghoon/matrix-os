@@ -147,6 +147,14 @@ bound to `consensus.chain_id`, addresses carry an EIP-55 checksum, and
 still runs no EVM: contract creation and calldata are refused rather than
 ignored, and `eth_call` says so instead of returning an empty result.
 
+A block commits to the ledger it was built on - the hash of every balance - so a
+node whose apply logic differs refuses to vote and says which two digests differ,
+instead of quietly reaching different numbers from the same blocks. It also
+carries a protocol version, so the next rule change is an activation height and a
+rolling upgrade rather than a coordinated restart. Moving an existing network
+onto these formats is [the relaunch runbook](docs/runbooks/evm-relaunch.md); the
+wrapped token, its pools and its holders are not touched by it.
+
 To contribute GPU capacity to a network that is already running, the
 [GPU provider runbook](docs/runbooks/gpu-provider.md) and its
 [overlay example](services/core/configs/gpu-provider.overlay.yaml.example) cover

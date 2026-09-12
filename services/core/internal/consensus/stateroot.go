@@ -141,3 +141,67 @@ func (e *Engine) verifyBlockStateRootLocked(b *Block) error {
 	}
 	return nil
 }
+
+// headDisagreementLocked reports, as a ready-to-print line, whether a peer's
+// announcement describes a different chain or a different ledger at a height
+// this node also has. It returns "" when there is nothing to say. Callers must
+// hold e.mu.
+//
+// It exists because height alone could not tell two chains apart: two nodes both
+// at height 900 looked identical in an announcement even when they had committed
+// different blocks or reached different balances. On an idle network the
+// announcement is the only signal that arrives at all, so this is often the
+// first chance anyone has to notice.
+//
+// Rate-limited to one line per distinct complaint per node, because the
+// announcement repeats on a timer and a disagreement does not resolve itself -
+// unbounded logging would bury the rest of the node's output.
+func (e *Engine) headDisagreementLocked(ann *HeadAnnounce) string {
+	if ann == nil || ann.NodeID == "" || ann.NodeID == e.selfID {
+		return ""
+	}
+	// Only comparable at the same height: a peer one block ahead legitimately has
+	// a different head and a different ledger.
+	if ann.Height != e.height {
+		return ""
+	}
+
+	var complaint string
+	switch {
+	case len(ann.HeadHash) > 0 && !bytes.Equal(ann.HeadHash, e.headHash):
+		complaint = fmt.Sprintf("consensus: peer %s is at height %d on a DIFFERENT chain "+
+			"(its head %s, ours %s); the two have committed different blocks\n",
+			ann.NodeID, ann.Height, shortHex(ann.HeadHash), shortHex(e.headHash))
+	case len(ann.StateRoot) > 0:
+		mine := e.stateRootLocked()
+		if mine != nil && !bytes.Equal(ann.StateRoot, mine) {
+			complaint = fmt.Sprintf("consensus: peer %s is at height %d on the same chain but a "+
+				"DIFFERENT ledger (its state %s, ours %s); the two applied the same blocks and "+
+				"reached different balances\n",
+				ann.NodeID, ann.Height, shortHex(ann.StateRoot), shortHex(mine))
+		}
+	}
+	if complaint == "" {
+		return ""
+	}
+	if e.headComplaints == nil {
+		e.headComplaints = make(map[string]string)
+	}
+	if e.headComplaints[ann.NodeID] == complaint {
+		return ""
+	}
+	e.headComplaints[ann.NodeID] = complaint
+	return complaint
+}
+
+// shortHex renders the leading bytes of a hash, which is enough to tell two
+// apart in a log line and short enough to read.
+func shortHex(b []byte) string {
+	if len(b) == 0 {
+		return "none"
+	}
+	if len(b) > 6 {
+		b = b[:6]
+	}
+	return hex.EncodeToString(b)
+}

@@ -349,6 +349,9 @@ type Engine struct {
 	// epoch it was taken at. See stateRootLocked.
 	stateRoot      []byte
 	stateRootEpoch uint64
+	// headComplaints remembers the last disagreement reported about each peer, so
+	// an announcement that repeats on a timer does not repeat the log line.
+	headComplaints map[string]string
 	// now is the wall clock the block-timestamp rules read, injectable so a test
 	// can drive a proposer and a validator whose clocks disagree.
 	now             func() time.Time
@@ -3099,7 +3102,12 @@ func (e *Engine) maybeAnnounceHead(ctx context.Context) {
 		return
 	}
 	e.lastHeadAnnounce = time.Now()
-	ann := HeadAnnounce{Height: e.height, NodeID: e.selfID}
+	ann := HeadAnnounce{
+		Height:    e.height,
+		NodeID:    e.selfID,
+		HeadHash:  append([]byte(nil), e.headHash...),
+		StateRoot: append([]byte(nil), e.stateRootLocked()...),
+	}
 	e.mu.Unlock()
 
 	if data, err := json.Marshal(&ann); err == nil {
@@ -3225,7 +3233,16 @@ func (e *Engine) handleHeadAnnounce(ctx context.Context, msg transport.Message) 
 		e.peerHeight = ann.Height
 	}
 	ahead := ann.Height > e.height
+	disagreement := e.headDisagreementLocked(&ann)
 	e.mu.Unlock()
+
+	if disagreement != "" {
+		// Logged, not acted on. An announcement is unsigned, so acting on one
+		// would let any peer stall a node by claiming a different head. This is
+		// the early warning; the state root inside a signed block is the
+		// enforcement.
+		fmt.Print(disagreement)
+	}
 
 	if ahead {
 		e.maybeRequestSync(ctx)

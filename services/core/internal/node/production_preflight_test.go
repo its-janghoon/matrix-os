@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -66,6 +67,44 @@ func TestValidateProductionConfigRejectsUnsafeLaunchValues(t *testing.T) {
 			_, err := ValidateProductionConfig(writeProductionConfig(t, tt.timeout, tt.pool))
 			if err == nil || !strings.Contains(err.Error(), tt.want) {
 				t.Fatalf("error = %v, want containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
+// TestGenesisMayAllocateToAWalletAndToTheEscrow covers the two allocations a
+// production network needs that the 64-hex-only rule made impossible to write.
+//
+// A chain whose users hold wallets could allocate to none of them, and a network
+// relaunching from a new genesis while wrapped tokens already exist had no way
+// to put the escrow back - leaving redeploying the token, which abandons every
+// holder and every pool, or leaving the mirror unbacked.
+func TestGenesisMayAllocateToAWalletAndToTheEscrow(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		id   string
+		ok   bool
+	}{
+		{"an ed25519 account", strings.Repeat("ab", 32), true},
+		{"a wallet address", "eth:0x00000000000000000000000000000000000000aa", true},
+		{"the bridge escrow", bridge.EscrowAccount, true},
+		{"an uppercase account", strings.Repeat("AB", 32), false},
+		{"a short account", strings.Repeat("ab", 20), false},
+		{"a malformed wallet address", "eth:0xnothex", false},
+		// Every other reserved namespace is a consensus OPERATION, not a place to
+		// put coins, and an allocation to one would be value sent into an
+		// operation. A genesis file must not be able to express that.
+		{"a bond account", "consensus/stake/bond/" + strings.Repeat("ab", 32), false},
+		{"the reward pool", "native/reward-pool", false},
+		{"a validator admission", "consensus/validator/add/" + strings.Repeat("ab", 32), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateProductionAccountID(tc.id)
+			if tc.ok && err != nil {
+				t.Fatalf("%q should be allowed: %v", tc.id, err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("%q should be refused", tc.id)
 			}
 		})
 	}

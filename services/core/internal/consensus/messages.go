@@ -425,6 +425,22 @@ type HeadAnnounce struct {
 	Height uint64 `json:"height"`
 	// NodeID identifies the announcing node (informational).
 	NodeID string `json:"node_id,omitempty"`
+	// HeadHash is the hash of the announcing node's committed head block, and
+	// StateRoot the digest of its ledger at that head.
+	//
+	// Height alone could not tell two chains apart. Two nodes both at height 900
+	// look identical in an announcement even when they committed different blocks
+	// or reached different balances, so the one signal that arrives on an idle
+	// network said nothing about whether the network agreed - only about how far
+	// each node had got.
+	//
+	// Both are OPTIONAL and advisory. A node that disagrees says so in its log; it
+	// does not act on a peer's word, because an announcement is unsigned and
+	// acting on one would let any peer stall a node by claiming a different head.
+	// What acts on disagreement is the state root inside a block, which is signed
+	// and which a validator checks before voting.
+	HeadHash  []byte `json:"head_hash,omitempty"`
+	StateRoot []byte `json:"state_root,omitempty"`
 }
 
 // BlockSyncRequest asks peers for the committed blocks starting at Height.
