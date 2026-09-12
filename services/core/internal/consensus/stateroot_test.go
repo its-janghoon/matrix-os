@@ -3,6 +3,7 @@ package consensus
 import (
 	"bytes"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -174,5 +175,39 @@ func TestTheStateRootIsSigned(t *testing.T) {
 	b.Version++
 	if err := b.VerifySignature(eng.self.PublicKey); err == nil {
 		t.Fatal("changing the protocol version must invalidate the block signature")
+	}
+}
+
+// TestADifferentGenesisIsCaughtAtTheFirstBlock is why there is no separate
+// genesis hash field. Two nodes seeded differently reach different roots
+// immediately, so the check that catches a rules disagreement at block N also
+// catches a config disagreement at block 0 - which is the earliest anything
+// could.
+//
+// It matters because nothing else compared genesis at all. ApplyGenesis looks
+// only at a local marker, so two nodes with different allocations would commit
+// together happily and hold permanently different balances.
+func TestADifferentGenesisIsCaughtAtTheFirstBlock(t *testing.T) {
+	seeded := blockTimeEngine(t, time.Now)
+	unseeded := blockTimeEngine(t, time.Now)
+
+	// One operator's genesis allocates something the other's does not.
+	if err := seeded.ledger.Credit("a-founder", 50_000_000); err != nil {
+		t.Fatalf("Credit: %v", err)
+	}
+
+	seeded.mu.Lock()
+	theirs := append([]byte(nil), seeded.stateRootLocked()...)
+	seeded.mu.Unlock()
+
+	// The node with the other genesis refuses the very first block, and says so.
+	unseeded.mu.Lock()
+	err := unseeded.verifyBlockStateRootLocked(&Block{Height: 0, StateRoot: theirs})
+	unseeded.mu.Unlock()
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("a block from a node with a different genesis = %v, want ErrInvalidMessage", err)
+	}
+	if !strings.Contains(err.Error(), "different rules") && !strings.Contains(err.Error(), "different balances") {
+		t.Fatalf("the refusal did not explain what to compare: %v", err)
 	}
 }

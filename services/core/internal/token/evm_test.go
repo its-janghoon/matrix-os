@@ -3,6 +3,7 @@ package token
 import (
 	"errors"
 	"math/big"
+	"strings"
 	"testing"
 
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
@@ -230,5 +231,57 @@ func TestNonEVMTransactionsAreUnaffected(t *testing.T) {
 	}
 	if err := tx.VerifyForChain(0, nil); err != nil {
 		t.Fatalf("an ed25519 transaction carries no chain id and must still verify: %v", err)
+	}
+}
+
+// TestAReservedAddressNeedsTheResolverToVerify pins a fail-closed edge, so
+// nobody "fixes" it by handing the plain path a resolver.
+//
+// Verify has no config and therefore no resolver, so an envelope naming a
+// reserved address derives an ordinary account and disagrees with the operation
+// string beside it. That refusal is correct: the paths that call Verify - the
+// pairwise settled ledger, an inference payment, a gossiped settlement - are
+// paying accounts, and a consensus operation arriving there is not something to
+// wave through. VerifyForChain, which every consensus path uses, is where a
+// resolver belongs.
+func TestAReservedAddressNeedsTheResolverToVerify(t *testing.T) {
+	reservedBond, err := ethsig.ParseAddress("0x0000000000000000000000000000000000000001")
+	if err != nil {
+		t.Fatalf("ParseAddress: %v", err)
+	}
+	raw, signer := walletSigned(t, func(tx *evmtx.Transaction) {
+		tx.To = &reservedBond
+		tx.Value = NativeToERC20(NativeUnit)
+	})
+
+	// A resolver that spells the operation out, standing in for the consensus one.
+	resolver := func(to ethsig.Address, sender string) (string, bool) {
+		if to == reservedBond {
+			return "consensus/stake/bond/" + strings.TrimPrefix(sender, EthAccountPrefix), true
+		}
+		return "", false
+	}
+
+	tx, err := NewTransactionFromEVM(raw, testChainID, resolver)
+	if err != nil {
+		t.Fatalf("NewTransactionFromEVM: %v", err)
+	}
+	if !strings.HasPrefix(tx.To, "consensus/stake/bond/") {
+		t.Fatalf("recipient = %q, want the resolved operation", tx.To)
+	}
+	if tx.SenderID() != EthAccountID(signer) {
+		t.Fatalf("sender = %q", tx.SenderID())
+	}
+	if err := tx.VerifyForChain(testChainID, resolver); err != nil {
+		t.Fatalf("VerifyForChain with the resolver: %v", err)
+	}
+
+	// Without it, the same transaction fails closed rather than being read as a
+	// payment to an address nobody controls.
+	if err := tx.VerifyForChain(testChainID, nil); err == nil {
+		t.Fatal("a reserved-address transaction verified without a resolver")
+	}
+	if err := tx.Verify(); err == nil {
+		t.Fatal("a reserved-address transaction verified through the plain path")
 	}
 }

@@ -55,6 +55,39 @@ type SupplyReport struct {
 	Decimals int `json:"decimals"`
 }
 
+// ChainInfo is what matrix_getChainInfo answers: what this chain is, where it
+// is, and what "confirmed" means on it.
+//
+// The last is the reason it exists. An exchange integrating a chain asks how many
+// confirmations to wait, and the honest answer here is one - a block commits
+// under a BFT quorum and is not revisited, so there is no reorg depth to wait
+// out. That answer is worth nothing said in a document and everything said by the
+// endpoint they are already polling.
+type ChainInfo struct {
+	// ChainID is the EIP-155 id, as a decimal string so a reader is not parsing
+	// hex out of a field that is not a quantity elsewhere.
+	ChainID uint64 `json:"chain_id"`
+	// Height is the number of committed blocks.
+	Height uint64 `json:"height"`
+	// HeadHash and StateRoot are the current head and the ledger under it.
+	HeadHash  string `json:"head_hash"`
+	StateRoot string `json:"state_root"`
+	// FinalityConfirmations is how many blocks a caller should wait before
+	// treating a transfer as settled. It is 1: a committed block is final.
+	FinalityConfirmations int `json:"finality_confirmations"`
+	// Reorgs says whether committed blocks can be replaced. They cannot, which is
+	// the property that makes the number above 1 rather than a guess.
+	Reorgs bool `json:"reorgs"`
+	// HasEVM says whether contracts run here. They do not, and an integrator who
+	// assumes otherwise writes code against a machine that is not present.
+	HasEVM bool `json:"has_evm"`
+	// NativeDecimals is the ledger's scale, and EVMDecimals what the JSON-RPC
+	// reports in. They differ, and a reader using the wrong one is off by a
+	// billion.
+	NativeDecimals int `json:"native_decimals"`
+	EVMDecimals    int `json:"evm_decimals"`
+}
+
 // SupplyBackend is the part of the chain the matrix_ methods need beyond the
 // Backend above. A Backend that does not implement it answers those methods with
 // an error rather than a wrong number.
@@ -83,6 +116,32 @@ func (h *Handler) callMatrix(method string, params []json.RawMessage) (any, *rpc
 			return nil, &rpcError{Code: codeInternal, Message: err.Error()}
 		}
 		return "0x" + hex.EncodeToString(root), nil
+
+	case "matrix_getChainInfo":
+		root, err := backend.StateRoot()
+		if err != nil {
+			return nil, &rpcError{Code: codeInternal, Message: err.Error()}
+		}
+		head := ""
+		if height := h.cfg.Backend.ChainHeight(); height > 0 {
+			if block, ok := h.cfg.Backend.BlockByHeight(height - 1); ok {
+				head = "0x" + hex.EncodeToString(block.Hash)
+			}
+		}
+		return ChainInfo{
+			ChainID:   h.cfg.ChainID,
+			Height:    h.cfg.Backend.ChainHeight(),
+			HeadHash:  head,
+			StateRoot: "0x" + hex.EncodeToString(root),
+			// One, and not a cautious larger number. A block commits under a BFT
+			// quorum and is never revisited, so waiting longer buys nothing and
+			// telling an integrator to wait longer would be inventing a risk.
+			FinalityConfirmations: 1,
+			Reorgs:                false,
+			HasEVM:                false,
+			NativeDecimals:        9,
+			EVMDecimals:           token.EVMDecimals,
+		}, nil
 
 	case "matrix_getSupply":
 		report, err := backend.Supply()

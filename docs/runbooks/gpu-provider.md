@@ -169,6 +169,20 @@ The node refuses to start the endpoint without `chain_id`, because an endpoint o
 a chain that accepts no wallet-signed transaction is a trap: the wallet connects,
 shows a balance, and every send fails.
 
+The same endpoint answers four questions Ethereum's JSON-RPC has no place for,
+under a `matrix_` namespace so nobody mistakes them for standard methods:
+
+| Method | Answers |
+| --- | --- |
+| `matrix_getChainInfo` | chain id, height, head, state root, and that one confirmation is final and no EVM runs here |
+| `matrix_getStateRoot` | the Merkle root over every balance, the same value a block carries |
+| `matrix_getAccountProof` | one account's balance and a path to that root |
+| `matrix_getSupply` | max, issued, reward pool, bridge escrow, circulating |
+
+`matrix_getAccountProof` is the one that matters beyond your own box: it is what
+lets anyone verify the bridge escrow actually backs the wrapped supply, without
+being handed the whole ledger.
+
 What a buyer sees is honest in one direction and incomplete in another. Balances
 and transfers are correct, and a receipt reports whether the transfer actually
 applied rather than only that it was ordered. But the wallet shows gas as free -

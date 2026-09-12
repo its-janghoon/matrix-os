@@ -147,9 +147,12 @@ bound to `consensus.chain_id`, addresses carry an EIP-55 checksum, and
 still runs no EVM: contract creation and calldata are refused rather than
 ignored, and `eth_call` says so instead of returning an empty result.
 
-A block commits to the ledger it was built on - the hash of every balance - so a
-node whose apply logic differs refuses to vote and says which two digests differ,
-instead of quietly reaching different numbers from the same blocks. It also
+A block commits to the ledger it was built on - a Merkle root over every balance -
+so a node whose apply logic differs refuses to vote and says which two roots
+differ, instead of quietly reaching different numbers from the same blocks. The
+same root makes one balance provable to someone holding nothing else, which is
+what lets anyone check that the bridge escrow actually backs the wrapped supply
+(`matrix_getAccountProof`). It also
 carries a protocol version, so the next rule change is an activation height and a
 rolling upgrade rather than a coordinated restart. Moving an existing network
 onto these formats is [the relaunch runbook](docs/runbooks/evm-relaunch.md); the

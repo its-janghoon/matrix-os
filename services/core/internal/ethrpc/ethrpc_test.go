@@ -601,3 +601,46 @@ func TestAnUnprovableAccountIsAnErrorNotNull(t *testing.T) {
 		t.Fatalf("an unprovable account answered %v, want an error", resp.Result)
 	}
 }
+
+// TestChainInfoAnswersWhatAnIntegratorAsks covers the questions an exchange puts
+// to a chain before it writes any code, in the endpoint they are already
+// polling rather than in a document nobody can verify.
+func TestChainInfoAnswersWhatAnIntegratorAsks(t *testing.T) {
+	chain := &supplyChain{fakeChain: newFakeChain(), root: bytes.Repeat([]byte{0xab}, 32)}
+	h := newTestHandler(t, chain)
+
+	resp := rpc(t, h, "matrix_getChainInfo")
+	if resp.Error != nil {
+		t.Fatalf("matrix_getChainInfo: %s", resp.Error.Message)
+	}
+	info, ok := resp.Result.(map[string]any)
+	if !ok {
+		t.Fatalf("result = %v", resp.Result)
+	}
+
+	if info["chain_id"] != float64(testChainID) {
+		t.Fatalf("chain_id = %v, want %d", info["chain_id"], testChainID)
+	}
+	// One confirmation, and not a cautious larger number: a block commits under a
+	// BFT quorum and is never revisited, so telling an integrator to wait longer
+	// would be inventing a risk.
+	if info["finality_confirmations"] != float64(1) {
+		t.Fatalf("finality_confirmations = %v, want 1", info["finality_confirmations"])
+	}
+	if info["reorgs"] != false {
+		t.Fatalf("reorgs = %v, want false", info["reorgs"])
+	}
+	// And it says plainly that contracts do not run here, because an integrator
+	// who assumes otherwise writes code against a machine that is not present.
+	if info["has_evm"] != false {
+		t.Fatalf("has_evm = %v, want false", info["has_evm"])
+	}
+	// The two scales are both reported, because a reader using the wrong one is
+	// off by a billion.
+	if info["native_decimals"] != float64(9) || info["evm_decimals"] != float64(18) {
+		t.Fatalf("decimals = %v / %v, want 9 / 18", info["native_decimals"], info["evm_decimals"])
+	}
+	if info["state_root"] != "0x"+hex.EncodeToString(chain.root) {
+		t.Fatalf("state_root = %v", info["state_root"])
+	}
+}
