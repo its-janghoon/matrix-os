@@ -83,3 +83,40 @@ func (e *Engine) PendingEVMTransaction(hashHex string) (*token.Transaction, bool
 	}
 	return nil, false
 }
+
+// TransferApplied reports whether a committed transfer actually moved credits,
+// and whether this node knows either way.
+//
+// Committed is not the same as paid. An unaffordable transfer is part of the
+// agreed ordered log and is deterministically skipped at apply time by every
+// node, so a receipt that reported every committed transaction as successful
+// would tell an exchange a deposit arrived when no credits moved. known is false
+// for a transaction this node has not applied - one still in the mempool, or one
+// committed before a restart, since this record is in memory.
+func (e *Engine) TransferApplied(tx *token.Transaction) (applied, known bool) {
+	if tx == nil {
+		return false, false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	applied, known = e.appliedTxs[mempoolKey(tx)]
+	return applied, known
+}
+
+// recordBlockHashLocked indexes a committed block by its hash, so a caller
+// holding a receipt can follow it back to the block. Callers must hold e.mu.
+func (e *Engine) recordBlockHashLocked(b *Block, height uint64) {
+	if b == nil {
+		return
+	}
+	e.blockIndex[hex.EncodeToString(b.Hash())] = height
+}
+
+// BlockHeightByHash resolves a committed block hash, given as lowercase hex
+// without the 0x prefix, to its height.
+func (e *Engine) BlockHeightByHash(hashHex string) (uint64, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	height, ok := e.blockIndex[hashHex]
+	return height, ok
+}

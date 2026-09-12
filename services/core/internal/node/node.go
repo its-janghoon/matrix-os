@@ -87,6 +87,23 @@ type Config struct {
 	// without a bridge. See bridge_watch.go for the fields and the authority
 	// model.
 	Bridge BridgeConfig `yaml:"bridge"`
+	// EthRPC serves the subset of Ethereum's JSON-RPC a wallet needs, so this
+	// chain can be added to MetaMask as a network. It is off unless an address
+	// is set, and refuses to start without consensus.chain_id.
+	EthRPC struct {
+		// Addr is the TCP listen address, e.g. "0.0.0.0:9095". Empty or "off"
+		// disables the endpoint.
+		//
+		// This is a PUBLIC endpoint by intent - a wallet has to reach it - so put
+		// TLS in front of it. It is read-mostly and holds no keys: the only write
+		// is eth_sendRawTransaction, which carries the sender's own signature and
+		// can spend nobody else's balance.
+		Addr string `yaml:"addr"`
+		// AllowedOrigins lists the browser origins allowed to call it. Empty
+		// means no browser may, which is the safe default and costs a wallet
+		// extension nothing: it proxies the request itself and sends no Origin.
+		AllowedOrigins []string `yaml:"allowed_origins"`
+	} `yaml:"eth_rpc"`
 	// Connect exposes the same market and inference services over plain HTTP
 	// (the Connect protocol's unary JSON form) so a browser can call them. Raw
 	// gRPC needs HTTP/2 trailers, which no browser can produce, so without this
@@ -667,6 +684,7 @@ type Node struct {
 	metrics               *metrics.Collector
 	adminServer           *admin.Server
 	marketServer          *marketapi.Server
+	ethRPCServer          *http.Server
 	inferenceHealthChecks []inferenceHealthCheck
 	inferenceSvc          *inference.Service
 	inferenceServer       *inferenceapi.Server
@@ -1514,6 +1532,11 @@ func (n *Node) Start() error {
 	// reservations it cannot serve.
 	n.startInferenceHealthChecks()
 
+	// The endpoint a wallet adds as a network.
+	if err := n.startEthRPC(); err != nil {
+		return err
+	}
+
 	// A job on the client-signed path holds a reservation while it waits for the
 	// buyer's signature. A buyer who never signs would otherwise hold a
 	// provider's capacity until this process restarts, which is a free way to
@@ -1768,6 +1791,11 @@ func (n *Node) Stop() error {
 		n.cancel()
 		<-n.bridgeWatchDone
 	}
+
+	// Stop the wallet-facing JSON-RPC listener before the subsystems it reads
+	// from are torn down, so an in-flight wallet poll cannot reach a half-closed
+	// engine.
+	n.stopEthRPC(n.ctx)
 
 	// Stop inference API server
 	if n.connectServer != nil {

@@ -450,6 +450,9 @@ type Engine struct {
 	// evmIndex maps an Ethereum transaction id to where it committed, so a
 	// wallet polling for a receipt can be answered. See evmindex.go.
 	evmIndex map[string]TxLocation
+	// blockIndex maps a committed block hash to its height, so a receipt can be
+	// followed back to the block that carries it.
+	blockIndex map[string]uint64
 	// pendingMembership gives each identity one stable slot per open-membership
 	// operation. Unlike mempoolKey, its key excludes nonce, timestamp and
 	// signature, so re-signing the same admission, exit, bond or withdrawal
@@ -696,6 +699,7 @@ func New(cfg Config) (*Engine, error) {
 		mempoolNonces:        make(map[string]struct{}),
 		nonceHigh:            make(map[string]uint64),
 		evmIndex:             make(map[string]TxLocation),
+		blockIndex:           make(map[string]uint64),
 		pendingMembership:    make(map[string]string),
 		bridgeLocker:         cfg.BridgeLocker,
 		burnAttestations:     make(map[string]map[string]struct{}),
@@ -861,6 +865,7 @@ func (e *Engine) Start(ctx context.Context) error {
 			return err
 		}
 		e.mu.Lock()
+		e.recordBlockHashLocked(b, h)
 		for i := range b.Txs {
 			e.committedTxs[mempoolKey(&b.Txs[i])] = struct{}{}
 			e.recordNonceHighLocked(&b.Txs[i])
@@ -3652,6 +3657,7 @@ func (e *Engine) advanceHeight(committed *Block) {
 	// skipped: it is in the agreed ordered log either way, so every node marks it
 	// the same. A sender whose transfer was skipped as unaffordable signs the NEXT
 	// nonce to retry - WaitForSettlement reports applied=false, so it can tell.
+	e.recordBlockHashLocked(committed, committed.Height)
 	for i := range committed.Txs {
 		if nk, checked := nonceKey(&committed.Txs[i]); checked {
 			e.committedNonces[nk] = struct{}{}
