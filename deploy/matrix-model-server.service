@@ -1,0 +1,44 @@
+# The model server a GPU provider runs, and the dependency that keeps it and the
+# node from drifting apart.
+#
+# The node does not start the model server and cannot restart it. It probes it,
+# and takes the provider off the market when it stops answering - which is the
+# right behaviour and is not a substitute for supervising the process. This unit
+# is that supervision.
+
+[Unit]
+Description=Matrix OS provider model server (vLLM)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=matrix
+Group=matrix
+
+# The API key lives here, root-owned and 0600, and is named by api_key_env in
+# the node's config. It is required even on loopback: the node refuses to start
+# with an empty key rather than advertising capacity it cannot reach.
+EnvironmentFile=/etc/matrix/model-server.env
+
+# Bound to loopback. The model server has no authentication worth exposing and no
+# rate limiting; the node in front of it is what authenticates, meters and
+# charges. On a public interface it is free inference for whoever finds the port.
+ExecStart=/usr/bin/env vllm serve ${MATRIX_MODEL} \
+  --host 127.0.0.1 \
+  --port 8000 \
+  --api-key ${MATRIX_VLLM_API_KEY} \
+  --served-model-name ${MATRIX_SERVED_MODEL_NAME} \
+  --max-model-len ${MATRIX_MAX_MODEL_LEN} \
+  --max-num-seqs ${MATRIX_MAX_NUM_SEQS} \
+  --gpu-memory-utilization 0.90
+
+Restart=always
+RestartSec=10s
+# Loading weights onto a GPU takes minutes, and a stop that kills mid-load leaves
+# the card in a state the next start has to clear.
+TimeoutStartSec=900
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

@@ -9,7 +9,7 @@
 #
 # or simply `make` to do both.
 
-.PHONY: all proto build test vet fmt
+.PHONY: all proto build test vet fmt devnet
 
 all: proto build
 
@@ -45,3 +45,21 @@ fmt:
 		echo "$$unformatted" | sed 's|^|  services/core/|'; \
 		exit 1; \
 	fi
+
+# Bring up a real three-validator network on this machine and check it works.
+#
+# Three validators is a PROTOCOL requirement - a quorum needs more than one node
+# to mean anything - and not an infrastructure one, so this needs no hosts, no
+# cloud account and no ports opened. It exercises leader rotation, quorum, the
+# state root, the reserve proof, and a wallet's whole round trip, and prints a
+# verdict rather than log lines for someone to read and interpret.
+#
+# What it does NOT cover is what genuinely needs separate machines: NAT,
+# firewalls, clock drift between regions, disks filling up. Those are deployment
+# questions and it does not pretend to answer them.
+devnet: proto
+	cd services/core && go run ./cmd/devnet
+
+# Same, but leaves the network running so a wallet can be pointed at it.
+devnet-keep: proto
+	cd services/core && go run ./cmd/devnet -keep

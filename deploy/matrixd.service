@@ -1,0 +1,76 @@
+# A systemd unit for a node, and for the model server a GPU provider runs behind
+# it.
+#
+# Install:
+#   1. Put the binary at /usr/local/bin/matrixd and the config at
+#      /etc/matrix/config.yaml (0600, owned by the matrix user).
+#   2. useradd --system --home /var/lib/matrix --shell /usr/sbin/nologin matrix
+#   3. install -d -o matrix -g matrix -m 0750 /var/lib/matrix
+#   4. systemctl enable --now matrixd
+
+[Unit]
+Description=Matrix OS node
+Documentation=https://github.com/savagemanage/matrix-os
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=matrix
+Group=matrix
+ExecStart=/usr/local/bin/matrixd -config /etc/matrix/config.yaml
+
+# Secrets come from a root-owned 0600 file, never from the unit and never from
+# the config: an attestor passphrase or a model-server API key in either would be
+# readable by anyone who can run `systemctl cat`.
+EnvironmentFile=-/etc/matrix/matrixd.env
+
+# Restart always, with a delay. A node that exits on a transient failure and is
+# not restarted is a validator silently absent from the set, which nobody
+# notices until a quorum is short.
+Restart=always
+RestartSec=5s
+
+# Give the node time to flush its store rather than corrupting it on a stop.
+KillSignal=SIGTERM
+TimeoutStopSec=60
+
+# The store is the node's identity - peer id and consensus key are generated on
+# first start and live here - so it is the one path that must survive a restart
+# and must not be world-readable.
+StateDirectory=matrix
+StateDirectoryMode=0750
+WorkingDirectory=/var/lib/matrix
+
+# Hardening. The node needs the network and its own state and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# A store on a busy node opens many files, and the default limit is not enough.
+LimitNOFILE=65535
+
+# A provider's node and its model server are one deployment. Requires+After means
+# a node never starts in front of a model server that is not running, and stops
+# with it - without which the two drift apart and the node advertises capacity
+# against a process that is gone. Drop this pair on a node that is not a provider.
+#Requires=matrix-model-server.service
+#After=matrix-model-server.service
+
+[Install]
+WantedBy=multi-user.target
