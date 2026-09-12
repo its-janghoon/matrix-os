@@ -220,6 +220,14 @@ type EarningsReader interface {
 	// tally begins at, so a caller can say what window the figures cover instead
 	// of implying they run from genesis.
 	Earnings(account string) (received, payments, payers, firstHeight, lastHeight, indexedFrom uint64, err error)
+	// Bonded returns what an account currently has staked, and the height from
+	// which it could withdraw it.
+	//
+	// Read here rather than taken from the announcement for the same reason the
+	// earnings are: a seller publishing its own bond is publishing a number, and
+	// the point of a bond is that it is capital somebody actually parted with.
+	// Every node holds the chain that says so.
+	Bonded(account string) (amount, withdrawableAt uint64, err error)
 }
 
 // BridgeSnapshot is the marketapi-facing shape of a bridge reconciliation

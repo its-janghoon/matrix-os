@@ -261,7 +261,7 @@ func TestWithdrawalIsGatedOnLeavingAndWaiting(t *testing.T) {
 	}
 
 	// While a validator: refused at any height.
-	if _, err := stake.Withdraw(id, vs, unbonding, 1_000_000); !errors.Is(err, ErrBondLocked) {
+	if _, err := stake.Withdraw(id, vs, unbonding, 0, 1_000_000); !errors.Is(err, ErrBondLocked) {
 		t.Fatalf("withdrawing while a validator = %v, want ErrBondLocked", err)
 	}
 
@@ -273,14 +273,14 @@ func TestWithdrawalIsGatedOnLeavingAndWaiting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("WithChanges: %v", err)
 	}
-	if _, err := stake.Withdraw(id, out, unbonding, 599); !errors.Is(err, ErrBondLocked) {
+	if _, err := stake.Withdraw(id, out, unbonding, 0, 599); !errors.Is(err, ErrBondLocked) {
 		t.Fatalf("withdrawing one block early = %v, want ErrBondLocked", err)
 	}
 	if bonded, _ := stake.Bonded(id); bonded != 1000 {
 		t.Fatalf("a refused withdrawal moved %d out of the bond", 1000-bonded)
 	}
 
-	returned, err := stake.Withdraw(id, out, unbonding, 600)
+	returned, err := stake.Withdraw(id, out, unbonding, 0, 600)
 	if err != nil {
 		t.Fatalf("Withdraw at the unlock height: %v", err)
 	}
@@ -311,7 +311,7 @@ func TestRejoiningRestartsTheUnbondingClock(t *testing.T) {
 	if err := stake.RecordLeftSet(id, 900); err != nil {
 		t.Fatalf("RecordLeftSet: %v", err)
 	}
-	at, allowed, err := stake.WithdrawableAt(id, nil, 100)
+	at, allowed, err := stake.WithdrawableAt(id, nil, 100, 0)
 	if err != nil || !allowed {
 		t.Fatalf("WithdrawableAt = (%d, %v, %v)", at, allowed, err)
 	}
@@ -320,8 +320,13 @@ func TestRejoiningRestartsTheUnbondingClock(t *testing.T) {
 	}
 }
 
-// An account that was never a validator has nothing to wait out.
-func TestANonValidatorCanWithdrawImmediately(t *testing.T) {
+// An account that was never a validator has no DEPARTURE to wait out, so with no
+// residency configured it withdraws immediately. That is what the unbonding
+// delay was built for: covering the window in which a departed validator can
+// still be slashed, which an account that never joined never enters.
+//
+// It is also why residency had to exist separately - see the test below.
+func TestANonValidatorWaitsOutNoDeparture(t *testing.T) {
 	stake, ledger := newStakeLedger(t)
 	acct, _ := token.GenerateAccount()
 	id := acct.AccountID()
@@ -331,12 +336,123 @@ func TestANonValidatorCanWithdrawImmediately(t *testing.T) {
 	if err := ledger.Transfer(id, BondAccount(id), 50); err != nil {
 		t.Fatalf("bond: %v", err)
 	}
-	returned, err := stake.Withdraw(id, nil, 1000, 0)
+	returned, err := stake.Withdraw(id, nil, 1000, 0, 0)
 	if err != nil {
 		t.Fatalf("Withdraw: %v", err)
 	}
 	if returned != 50 {
 		t.Fatalf("returned %d, want 50", returned)
+	}
+}
+
+// TestABondCannotBePostedAndPulledInOneBreath
+//
+// THE HOLE. The only clock on a withdrawal measured a departure from the
+// validator set, so an account that had never been a validator had no clock at
+// all and could withdraw the instant it bonded. Correct for what that delay was
+// built for, and useless the moment a bond means anything else.
+//
+// It matters because a bond is what makes a marketplace listing cost something.
+// Without residency a seller bonds to clear a buyer's floor, is listed, takes
+// the business, and pulls the money in the next block: the deposit was a
+// formality with no capital behind it for longer than it took to read.
+func TestABondCannotBePostedAndPulledInOneBreath(t *testing.T) {
+	stake, ledger := newStakeLedger(t)
+	acct, _ := token.GenerateAccount()
+	id := acct.AccountID()
+	if err := ledger.Credit(id, 50); err != nil {
+		t.Fatalf("credit: %v", err)
+	}
+	if err := ledger.Transfer(id, BondAccount(id), 50); err != nil {
+		t.Fatalf("bond: %v", err)
+	}
+	const bondedAt, residency = 100, 500
+	if err := stake.RecordBonded(id, bondedAt); err != nil {
+		t.Fatalf("RecordBonded: %v", err)
+	}
+
+	at, allowed, err := stake.WithdrawableAt(id, nil, 0, residency)
+	if err != nil || !allowed {
+		t.Fatalf("WithdrawableAt = (%d, %v, %v)", at, allowed, err)
+	}
+	if at != bondedAt+residency {
+		t.Fatalf("withdrawable at %d, want %d", at, bondedAt+residency)
+	}
+	if _, err := stake.Withdraw(id, nil, 0, residency, bondedAt+residency-1); !errors.Is(err, ErrBondLocked) {
+		t.Fatalf("a bond was pulled one block early: %v", err)
+	}
+	returned, err := stake.Withdraw(id, nil, 0, residency, bondedAt+residency)
+	if err != nil {
+		t.Fatalf("Withdraw at the residency height: %v", err)
+	}
+	if returned != 50 {
+		t.Fatalf("returned %d, want 50", returned)
+	}
+	// The clock is cleared with the bond, so a later bond starts a fresh one
+	// rather than inheriting an expiry from months ago.
+	if err := stake.ClearBonded(id); err != nil {
+		t.Fatalf("ClearBonded: %v", err)
+	}
+	if _, ok, _ := stake.BondedAt(id); ok {
+		t.Fatal("the bond clock survived the withdrawal")
+	}
+}
+
+// TestToppingUpABondDoesNotRestartItsClock. A seller could otherwise hold their
+// own withdrawal open forever by adding a base unit, and - worse the other way -
+// a buyer reading "bonded for 30 days" would be reading a number that a single
+// top-up had reset to zero without anything saying so.
+func TestToppingUpABondDoesNotRestartItsClock(t *testing.T) {
+	stake, _ := newStakeLedger(t)
+	acct, _ := token.GenerateAccount()
+	id := acct.AccountID()
+
+	if err := stake.RecordBonded(id, 100); err != nil {
+		t.Fatalf("RecordBonded: %v", err)
+	}
+	if err := stake.RecordBonded(id, 900); err != nil {
+		t.Fatalf("RecordBonded again: %v", err)
+	}
+	at, ok, err := stake.BondedAt(id)
+	if err != nil || !ok {
+		t.Fatalf("BondedAt = (%d, %v, %v)", at, ok, err)
+	}
+	if at != 100 {
+		t.Fatalf("bond clock = %d, want the original 100", at)
+	}
+}
+
+// TestWhicheverClockRunsLongerGoverns. A departed validator that re-bonded has
+// two reasons to keep its capital in place, and satisfying one early does not
+// excuse the other.
+func TestWhicheverClockRunsLongerGoverns(t *testing.T) {
+	stake, _ := newStakeLedger(t)
+	acct, _ := token.GenerateAccount()
+	id := acct.AccountID()
+
+	if err := stake.RecordBonded(id, 100); err != nil {
+		t.Fatalf("RecordBonded: %v", err)
+	}
+	if err := stake.RecordLeftSet(id, 900); err != nil {
+		t.Fatalf("RecordLeftSet: %v", err)
+	}
+
+	// Residency expires at 600, unbonding at 1000: the later one governs.
+	at, _, err := stake.WithdrawableAt(id, nil, 100, 500)
+	if err != nil {
+		t.Fatalf("WithdrawableAt: %v", err)
+	}
+	if at != 1000 {
+		t.Fatalf("withdrawable at %d, want 1000 - the shorter clock won", at)
+	}
+
+	// And the other way round: residency to 5100, unbonding to 1000.
+	at, _, err = stake.WithdrawableAt(id, nil, 100, 5000)
+	if err != nil {
+		t.Fatalf("WithdrawableAt: %v", err)
+	}
+	if at != 5100 {
+		t.Fatalf("withdrawable at %d, want 5100", at)
 	}
 }
 

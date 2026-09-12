@@ -57,6 +57,9 @@ const (
 	// leftSetKeyPrefix + <id> records the height at which an account stopped
 	// being a validator, which is when its unbonding clock starts.
 	leftSetKeyPrefix = "consensus/stake/left/"
+	// bondedAtKeyPrefix + <id> records the height an account's CURRENT bond was
+	// first posted, which is what the minimum residency below is measured from.
+	bondedAtKeyPrefix = "consensus/stake/bonded-at/"
 
 	// DefaultMinBond is the stake an account must have bonded before it may be
 	// admitted to the validator set, in native base units. It is deliberately
@@ -218,6 +221,83 @@ func (s *StakeLedger) BondedFor(ids []string) (map[string]uint64, error) {
 // leftKey is the kv key holding when an account left the validator set.
 func leftKey(id string) []byte { return []byte(leftSetKeyPrefix + id) }
 
+func bondedAtKey(id string) []byte { return []byte(bondedAtKeyPrefix + id) }
+
+// A bond that can be pulled the instant it is posted is not a stake in anything.
+//
+// WHY THIS EXISTS. An account that was never a validator could withdraw
+// immediately: the unbonding delay ran from the height it LEFT the validator
+// set, and an account that was never in it has no such height, so nothing
+// gated the withdrawal at all. That is right for what the delay was built for -
+// covering the window in which a departed validator could still be slashed -
+// and wrong the moment a bond means anything else.
+//
+// It matters because a bond is what makes a marketplace listing cost something.
+// Without residency, a seller bonds to clear a buyer's floor, is listed, takes
+// the business, and withdraws in the next block - the deposit was a formality
+// that never had capital behind it for longer than it took to read. With it, a
+// listing is capital committed for a period, which is the whole of what a bond
+// can honestly claim to be.
+//
+// It is deliberately NOT provider-specific. "Money posted here stays posted for
+// a while" is a property of a bond, and a rule that applied only to accounts
+// someone had labelled a provider would be a rule an attacker opts out of by
+// not carrying the label.
+
+// RecordBonded notes the height an account's bond was first posted. Recording it
+// again for an account that already has one is a no-op: topping up a bond must
+// not restart the clock, or a seller could hold a withdrawal open indefinitely
+// by adding a single base unit, and it must not shorten it either.
+func (s *StakeLedger) RecordBonded(id string, height uint64) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	existing, err := s.store.Get(bondedAtKey(id))
+	if err != nil {
+		return fmt.Errorf("consensus: read bond age of %s: %w", id, err)
+	}
+	if existing != nil {
+		return nil
+	}
+	buf := make([]byte, 8)
+	binary.BigEndian.PutUint64(buf, height)
+	if err := s.store.Put(bondedAtKey(id), buf); err != nil {
+		return fmt.Errorf("consensus: record bond age of %s: %w", id, err)
+	}
+	return nil
+}
+
+// ClearBonded forgets an account's bond age, which is what withdrawing means:
+// there is no bond, so no clock is running. A later bond starts a fresh one.
+func (s *StakeLedger) ClearBonded(id string) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	if err := s.store.Delete(bondedAtKey(id)); err != nil {
+		return fmt.Errorf("consensus: clear bond age of %s: %w", id, err)
+	}
+	return nil
+}
+
+// BondedAt returns the height an account's current bond was posted, and whether
+// one is recorded.
+func (s *StakeLedger) BondedAt(id string) (uint64, bool, error) {
+	if s == nil || s.store == nil {
+		return 0, false, nil
+	}
+	body, err := s.store.Get(bondedAtKey(id))
+	if err != nil {
+		return 0, false, fmt.Errorf("consensus: read bond age of %s: %w", id, err)
+	}
+	if body == nil {
+		return 0, false, nil
+	}
+	if len(body) != 8 {
+		return 0, false, fmt.Errorf("consensus: corrupt bond age for %s: %d bytes", id, len(body))
+	}
+	return binary.BigEndian.Uint64(body), true, nil
+}
+
 // RecordLeftSet notes that an account stopped being a validator at height,
 // starting its unbonding clock. Recording it again for the same account
 // overwrites the earlier height, which is correct: an account that rejoined and
@@ -272,19 +352,39 @@ func (s *StakeLedger) LeftSetAt(id string) (uint64, bool, error) {
 //
 // A validator may not withdraw at any height: it has to leave the set first,
 // and the delay runs from the height it left.
-func (s *StakeLedger) WithdrawableAt(id string, vs *ValidatorSet, unbonding uint64) (uint64, bool, error) {
+func (s *StakeLedger) WithdrawableAt(id string, vs *ValidatorSet, unbonding, residency uint64) (uint64, bool, error) {
 	if vs != nil && vs.Contains(id) {
 		return 0, false, nil
 	}
+
+	// The minimum a bond stays posted, whoever posted it. Before this, an account
+	// that had never been a validator could withdraw the instant it bonded,
+	// because the only clock was the one measuring a departure from the validator
+	// set - and it had never made one.
+	var earliest uint64
+	if residency > 0 {
+		at, bonded, err := s.BondedAt(id)
+		if err != nil {
+			return 0, false, err
+		}
+		if bonded {
+			earliest = at + residency
+		}
+	}
+
 	left, ok, err := s.LeftSetAt(id)
 	if err != nil {
 		return 0, false, err
 	}
-	if !ok {
-		// Never a validator on this chain, so there is nothing to wait out.
-		return 0, true, nil
+	if ok {
+		// A departed validator waits out its unbonding delay as well. Whichever
+		// clock runs longer is the one that governs: both exist to keep capital
+		// in place, and satisfying one early does not excuse the other.
+		if after := left + unbonding; after > earliest {
+			earliest = after
+		}
 	}
-	return left + unbonding, true, nil
+	return earliest, true, nil
 }
 
 // Slash moves an account's whole bond to the reserved reward pool.
@@ -328,8 +428,8 @@ func (s *StakeLedger) Slash(id string) (uint64, error) {
 const rewardPoolAccount = "native/reward-pool"
 
 // Withdraw returns an account's whole bond to it, having checked that it may.
-func (s *StakeLedger) Withdraw(id string, vs *ValidatorSet, unbonding, height uint64) (uint64, error) {
-	at, allowed, err := s.WithdrawableAt(id, vs, unbonding)
+func (s *StakeLedger) Withdraw(id string, vs *ValidatorSet, unbonding, residency, height uint64) (uint64, error) {
+	at, allowed, err := s.WithdrawableAt(id, vs, unbonding, residency)
 	if err != nil {
 		return 0, err
 	}

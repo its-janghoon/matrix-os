@@ -52,6 +52,10 @@ type providerRow struct {
 	SettledFirstHeight uint64 `json:"settled_first_height,omitempty"`
 	SettledLastHeight  uint64 `json:"settled_last_height,omitempty"`
 	SettledIndexedFrom uint64 `json:"settled_indexed_from,omitempty"`
+	// What the seller has STAKED, read from this node's chain. Not a promise of
+	// good service - nothing here can be - but capital a listing costs.
+	Bonded             uint64 `json:"bonded,omitempty"`
+	BondWithdrawableAt uint64 `json:"bond_withdrawable_at,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -81,6 +85,9 @@ func providerToRow(p *marketv1.Provider) providerRow {
 		SettledFirstHeight: p.GetSettledFirstHeight(),
 		SettledLastHeight:  p.GetSettledLastHeight(),
 		SettledIndexedFrom: p.GetSettledIndexedFrom(),
+
+		Bonded:             p.GetBonded(),
+		BondWithdrawableAt: p.GetBondWithdrawableAt(),
 	}
 }
 
@@ -303,7 +310,7 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 		return nil
 	}
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tPAID\tPAYERS\tSEEN FOR\tHEARD\tNODE")
+	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tBONDED\tPAID\tPAYERS\tSEEN FOR\tHEARD\tNODE")
 	for _, r := range rows {
 		endpoint := r.Endpoint
 		if endpoint == "" {
@@ -311,9 +318,9 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 			// discoverable for compute units and cannot take an inference request.
 			endpoint = "(no address; compute only)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%s\t%d\t%s\n",
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%s\n",
 			endpoint, strings.Join(r.Models, ","), r.PricePerUnit, r.Available,
-			r.SettledPayments, r.SettledPayers,
+			r.Bonded, r.SettledPayments, r.SettledPayers,
 			seenFor(r.FirstSeen, now), r.AnnouncementsHeard,
 			shortID(r.NodeID))
 	}
@@ -329,6 +336,11 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 	fmt.Fprintln(w, "every payment the account received - a seller can pay itself. PAYERS is the")
 	fmt.Fprintln(w, "harder one to inflate: it costs a funded account each. SEEN FOR and HEARD")
 	fmt.Fprintln(w, "are what this node observed, not uptime the seller reported.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "BONDED is capital the seller has staked on this chain. It does not make them")
+	fmt.Fprintln(w, "honest and cannot be slashed for bad service - no protocol can judge whether a")
+	fmt.Fprintln(w, "completion was really the model advertised. What it does is make a LISTING cost")
+	fmt.Fprintln(w, "money, which is what stops one attacker filling this table with fake sellers.")
 	return nil
 }
 

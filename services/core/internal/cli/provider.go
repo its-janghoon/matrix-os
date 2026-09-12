@@ -173,7 +173,10 @@ func newProviderListCommand(opts *globalOptions) *cobra.Command {
 // connect to. So a buyer's actual question, "where do I send this prompt", had no
 // command that answered it and was answered by asking a person.
 func newProviderDirectoryCmd(opts *globalOptions) *cobra.Command {
-	var model string
+	var (
+		model   string
+		minBond uint64
+	)
 	cmd := &cobra.Command{
 		Use:   "directory",
 		Short: "List providers announced on the network, with the address to reach them",
@@ -187,9 +190,19 @@ because a number a seller publishes about its own reliability costs nothing to
 inflate. A long history means this node watched that seller keep announcing, which
 is evidence of presence and not a promise of service.
 
+BONDED is capital the seller has staked, also read from the chain. It does not
+make anyone honest and cannot be slashed for bad service: no protocol can judge
+whether a completion was really the model advertised, a buyer-complaint slash
+would be a weapon competitors point at each other, and validators voting on
+service quality is not something consensus can do. What a bond does is make a
+LISTING cost money, which is what stops one attacker from filling this table with
+cheap fake sellers - and that sybil is what turns every other fraud from a scam
+into an industry. Use --min-bond to refuse sellers who have staked nothing.
+
 The endpoint is signed by the announcing node, so a relaying peer cannot redirect
-traffic to a host of its choosing. What it cannot tell you is whether the seller
-is any good - for that, the chain records every job it was actually paid for.`,
+traffic to a host of its choosing. What none of this tells you is whether the
+answers are any good. Nothing on a chain can. Judge that yourself, on a small
+job, before sending a large one.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cc, err := dial(opts)
@@ -214,12 +227,17 @@ is any good - for that, the chain records every job it was actually paid for.`,
 				if model != "" && !servesModel(p, model) {
 					continue
 				}
+				if p.GetBonded() < minBond {
+					continue
+				}
 				listed = append(listed, p)
 			}
 			return printDirectory(cmd.OutOrStdout(), opts.JSON, listed, time.Now().UTC())
 		},
 	}
 	cmd.Flags().StringVar(&model, "model", "", "only sellers advertising this model")
+	cmd.Flags().Uint64Var(&minBond, "min-bond", 0,
+		"only sellers with at least this much staked, in native base units")
 	return cmd
 }
 

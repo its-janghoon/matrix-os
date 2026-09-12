@@ -36,6 +36,7 @@ import (
 	"github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"gopkg.in/yaml.v3"
 
+	"github.com/ecirlabs/matrix-core/internal/consensus"
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/evmtx"
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -81,6 +82,10 @@ func main() {
 	}
 }
 
+// theBuyer is the genesis-funded wallet, reachable from the later checks that
+// need to move money to somebody.
+var theBuyer *wallet
+
 func run(keep bool, timeout time.Duration) error {
 	dir, err := os.MkdirTemp("", "matrix-devnet-")
 	if err != nil {
@@ -119,6 +124,7 @@ func run(keep bool, timeout time.Duration) error {
 		nodes[i] = n
 	}
 	buyer := newWallet()
+	theBuyer = buyer
 	// One payout wallet per node, so each announces a distinct seller account and
 	// a payment to one cannot be mistaken for a payment to another.
 	sellers := make([]*wallet, len(nodes))
@@ -177,6 +183,9 @@ func run(keep bool, timeout time.Duration) error {
 		return err
 	}
 	if err := checkSettledHistory(matrixCLI, nodes, buyer, sellers[0].address, timeout); err != nil {
+		return err
+	}
+	if err := checkBondIsCapitalAtRisk(matrixCLI, nodes, sellers[0], timeout); err != nil {
 		return err
 	}
 	if !keep {
@@ -333,6 +342,11 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Addre
 			// rotate leaders under load, which looks like a consensus fault and is not.
 			setPath(cfg, []string{"consensus", "round_timeout"}, "2s")
 			setPath(cfg, []string{"consensus", "epoch_length"}, 10)
+			// A bond stays posted. Without this a seller could bond to clear a
+			// buyer's floor, take the business, and pull the money in the next
+			// block, which is a deposit that was never capital at risk. Long
+			// enough here that the check below can watch a withdrawal be refused.
+			setPath(cfg, []string{"consensus", "stake", "bond_residency"}, 100000)
 			setPath(cfg, []string{"genesis", "allocations"}, allocations)
 			setPath(cfg, []string{"genesis", "reward_pool"}, token.NativeMaxSupply-allocated)
 		}); err != nil {
@@ -1187,4 +1201,123 @@ func payFromWallet(n *devNode, w *wallet, to ethsig.Address, amount uint64, time
 		time.Sleep(100 * time.Millisecond)
 	}
 	return fmt.Errorf("no receipt for the payment to the seller within %s", timeout)
+}
+
+// checkBondIsCapitalAtRisk proves a listing costs something, and that the cost
+// is not a formality.
+//
+// A bond is the only defence against the fraud that amplifies every other one.
+// A seller can overcharge, substitute a cheaper model, or answer with rubbish,
+// and no protocol can prove any of it - a chain cannot judge whether a
+// completion was really the model advertised. What a chain CAN do is make each
+// listing cost capital, which is the difference between one attacker running a
+// scam and one attacker running an industry of ten thousand fake sellers.
+//
+// It only works if the capital stays put. An account that was never a validator
+// could withdraw the instant it bonded, so a bond could be posted to clear a
+// buyer's floor and pulled in the next block.
+//
+// Both halves are asserted here on the path a real GPU owner takes: the seller
+// bonds from its own WALLET, with an ordinary EIP-155 transaction to the
+// reserved bond address, and a DIFFERENT node reads the stake off its own chain
+// and reports how long it is committed for.
+func checkBondIsCapitalAtRisk(matrixCLI string, nodes []*devNode, seller *wallet, timeout time.Duration) error {
+	step("making a listing cost capital, from the seller's own wallet")
+
+	account := token.EthAccountID(seller.address)
+	before, err := settledFor(matrixCLI, nodes[1], account)
+	if err != nil {
+		return err
+	}
+	if asUint(before["bonded"]) != 0 {
+		return fmt.Errorf("the seller is already bonded before bonding: %v", before)
+	}
+
+	// The seller needs coins to stake. Genesis funded the buyer, so pay the
+	// seller first - which is also how a real one gets its first MATRIX.
+	const stake = 300_000_000_000_000
+	if err := payFromWallet(nodes[0], theBuyer, seller.address, stake*2, timeout); err != nil {
+		return fmt.Errorf("funding the seller: %w", err)
+	}
+
+	// Bond it. An ordinary wallet transaction to a fixed address, with the
+	// account to bond taken from the SIGNATURE rather than from the payload -
+	// which is why a caller cannot bond on somebody else's behalf.
+	bondTo := consensus.ReservedBondAddress
+	if err := payFromWallet(nodes[0], seller, bondTo, stake, timeout); err != nil {
+		return fmt.Errorf("bonding from the wallet: %w", err)
+	}
+
+	deadline := time.Now().Add(timeout)
+	var after map[string]any
+	for time.Now().Before(deadline) {
+		after, err = settledFor(matrixCLI, nodes[1], account)
+		if err != nil {
+			return err
+		}
+		if asUint(after["bonded"]) > 0 {
+			break
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	bonded := asUint(after["bonded"])
+	if bonded == 0 {
+		return fmt.Errorf("node 1 sees no bond for the seller, so a buyer could not either: %v", after)
+	}
+	ok("node 1 reads the seller's stake of %d off its own chain, not from a claim", bonded)
+
+	// And it is committed, not parked. The devnet configures a residency far
+	// beyond the handful of blocks it will ever commit.
+	heightHex, err := nodes[1].rpcString("eth_blockNumber")
+	if err != nil {
+		return err
+	}
+	current, err := parseHex(heightHex)
+	if err != nil {
+		return err
+	}
+	withdrawableAt := asUint(after["bond_withdrawable_at"])
+	if withdrawableAt <= current {
+		return fmt.Errorf("the bond is withdrawable at height %d with the chain at %d, so it could "+
+			"be pulled now - the deposit is a formality", withdrawableAt, current)
+	}
+	ok("and it is locked until height %d, with the chain at %d", withdrawableAt, current)
+
+	// A buyer refusing unbonded sellers gets this one and not the others, which
+	// is the whole point of the number being on the listing.
+	rows, err := listProvidersFiltered(matrixCLI, nodes[1], bonded)
+	if err != nil {
+		return err
+	}
+	if len(rows) != 1 || asString(rows[0]["id"]) != account {
+		return fmt.Errorf("--min-bond %d returned %d rows, want only the bonded seller", bonded, len(rows))
+	}
+	ok("a buyer filtering on --min-bond %d sees this seller and not the unbonded ones", bonded)
+	return nil
+}
+
+// listProvidersFiltered reads the directory as a buyer refusing cheap listings.
+func listProvidersFiltered(matrixCLI string, n *devNode, minBond uint64) ([]map[string]any, error) {
+	out, err := runCLI(matrixCLI, n, "provider", "directory", "--min-bond", strconv.FormatUint(minBond, 10))
+	if err != nil {
+		return nil, err
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(out, &rows); err != nil {
+		return nil, fmt.Errorf("provider directory output is not json: %v\n%s", err, out)
+	}
+	return rows, nil
+}
+
+// runCLI runs one matrix command against a node and returns its JSON output.
+func runCLI(matrixCLI string, n *devNode, args ...string) ([]byte, error) {
+	full := append([]string{"--addr", n.market, "--api-key", n.apiKey, "--json"}, args...)
+	cmd := exec.Command(matrixCLI, full...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, fmt.Errorf("%v on node %d: %v\n%s", args, n.index, err, stderr.String())
+	}
+	return out, nil
 }

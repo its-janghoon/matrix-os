@@ -357,6 +357,19 @@ type StakeConfig struct {
 	// The node's consensus account has to hold the coins first. Its id is
 	// printed at startup; fund it with `matrix fund` or a transfer.
 	Bond uint64 `yaml:"bond"`
+	// BondResidency is the minimum number of blocks a bond stays posted before it
+	// may be withdrawn, counted from the height it was posted.
+	//
+	// It is what makes a bond a stake rather than a formality, and it is why a
+	// marketplace listing can cost anything at all: without it an account that
+	// was never a validator could withdraw the instant it bonded, so a seller
+	// could bond to clear a buyer's floor, take the business, and pull the money
+	// in the next block.
+	//
+	// Consensus-critical. It decides whether a withdrawal is valid in a block, so
+	// every node must carry the same value or they will disagree about whether a
+	// block is legal. Zero keeps the old behaviour.
+	BondResidency uint64 `yaml:"bond_residency"`
 }
 
 // effectiveMinBond and effectiveUnbonding resolve what the engine will actually
@@ -1279,6 +1292,7 @@ func (n *Node) Start() error {
 		MinBond:                       minBond,
 		ZeroMinBond:                   zeroMinBond,
 		UnbondingPeriod:               n.config.Consensus.Stake.UnbondingPeriod,
+		BondResidency:                 n.config.Consensus.Stake.BondResidency,
 		TargetBond:                    n.config.Consensus.Stake.Bond,
 		FeeBasisPoints:                n.config.Consensus.FeeBasisPoints,
 		MaintainerAccount:             n.config.Consensus.MaintainerAccount,

@@ -702,4 +702,11 @@ func (s *Service) attachEarnings(p *marketv1.Provider) {
 	p.SettledFirstHeight = first
 	p.SettledLastHeight = last
 	p.SettledIndexedFrom = from
+
+	bonded, withdrawableAt, err := s.earnings.Bonded(p.GetId())
+	if err != nil {
+		return
+	}
+	p.Bonded = bonded
+	p.BondWithdrawableAt = withdrawableAt
 }

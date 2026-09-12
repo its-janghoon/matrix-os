@@ -358,6 +358,23 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 		// the buyer is never charged more than it agreed to and was checked for.
 		billableUnits = mjob.Units
 	}
+	// And cap at what the work can honestly have cost, which the reservation does
+	// not bound at all.
+	//
+	// A reservation is a budget, deliberately generous: a request with no
+	// max_tokens reserves room for a long answer that may never arrive. Clamping
+	// only to it left a provider free to bill the whole budget whatever it did -
+	// answer "hello" to "hi", report a thousand tokens, and every check passes
+	// because the report is under the reservation and the reservation was
+	// affordability-checked. Nothing was comparing the bill to the answer.
+	//
+	// This node holds both the prompt it sent and the completion it got, so it
+	// can. Not the true token count - it does not know the provider's tokeniser -
+	// but an upper bound, which is all that is needed to stop a bill two orders
+	// of magnitude past the work.
+	if ceiling := MaxUnitsFor(job.Request, resp.Completion); billableUnits > ceiling {
+		billableUnits = ceiling
+	}
 	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
 	if err != nil {
 		s.failJob(jobID)

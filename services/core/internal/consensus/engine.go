@@ -189,6 +189,19 @@ type Config struct {
 	// ZeroMinBond removes the minimum-bond requirement, which is only
 	// appropriate on a network that is not using stake for security.
 	ZeroMinBond bool
+	// BondResidency is the minimum number of blocks a bond stays posted before it
+	// may be withdrawn, counted from the height it was posted.
+	//
+	// It is what makes a bond a stake rather than a formality. Without it an
+	// account that was never a validator could withdraw the instant it bonded -
+	// the only clock was the one measuring a departure from the validator set,
+	// and it had never made one - so a seller could bond to clear a buyer's
+	// floor, take the business, and pull the money in the next block.
+	//
+	// Consensus-critical: it decides whether a withdrawal is VALID in a block, so
+	// every node must be configured with the same value or they will disagree
+	// about whether a block is legal. Zero keeps the old behaviour.
+	BondResidency uint64
 	// UnbondingPeriod is how many blocks after leaving the validator set an
 	// account must wait before withdrawing its bond. Zero means
 	// DefaultUnbondingPeriod.
@@ -378,6 +391,8 @@ type Engine struct {
 	// minBond gates admission; unbondingPeriod gates withdrawal.
 	minBond         uint64
 	unbondingPeriod uint64
+	// bondResidency is the minimum a bond stays posted, whoever posted it.
+	bondResidency uint64
 	// feeBasisPoints is the protocol fee rate; see Config.FeeBasisPoints.
 	feeBasisPoints uint32
 	// maintainerAccount / maintainerShareBPS are the standing cut of the fee
@@ -708,6 +723,7 @@ func New(cfg Config) (*Engine, error) {
 		stakeNeverWeighted:   true,
 		minBond:              stakeMinBond(cfg),
 		unbondingPeriod:      orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
+		bondResidency:        cfg.BondResidency,
 		targetBond:           cfg.TargetBond,
 		feeBasisPoints:       cfg.FeeBasisPoints,
 		maintainerShareBPS:   cfg.MaintainerFeeShareBasisPoints,
@@ -2221,7 +2237,7 @@ func (e *Engine) verifyStakeTxLocked(tx *token.Transaction, height uint64) error
 		if e.stake == nil {
 			return fmt.Errorf("%w: this network does not use bonded stake", ErrInvalidMessage)
 		}
-		at, allowed, err := e.stake.WithdrawableAt(sender, e.vset(), e.unbondingPeriod)
+		at, allowed, err := e.stake.WithdrawableAt(sender, e.vset(), e.unbondingPeriod, e.bondResidency)
 		if err != nil {
 			return err
 		}
@@ -3473,6 +3489,9 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	// lock across a batch of kv reads would stall every other writer for a
 	// derived number nobody is waiting on.
 	var revenue []payment
+	// Accounts whose bond APPLIED in this block, so the residency clock starts
+	// from the height the coins moved.
+	var bonded []string
 	// emitted is what the pool actually paid out this block, for the log line.
 	var emitted uint64
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
@@ -3589,6 +3608,12 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				// its own coins into its own bond has not been paid by anyone.
 				if paysFee(tx.To) {
 					revenue = append(revenue, payment{payer: sender, payee: tx.To, amount: net})
+				} else if req, err := ParseStakeRecipient(tx.To); err == nil && req.Op == StakeOpBond {
+					// Start the residency clock, now that the coins have actually
+					// moved. Started at commit instead, a bond the sender could not
+					// afford would begin ageing without ever staking anything, and
+					// the seller could post a real one later and withdraw it at once.
+					bonded = append(bonded, req.Account)
 				}
 			}
 			if fee > 0 {
@@ -3633,6 +3658,11 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	}); err != nil {
 		return err
 	}
+	for _, id := range bonded {
+		if err := e.stake.RecordBonded(id, b.Height); err != nil {
+			fmt.Printf("consensus: could not record the bond clock for %s: %v\n", id, err)
+		}
+	}
 	// Tally what this block paid out, now that the transfers are durable.
 	//
 	// A failure here is logged and not returned: the block is committed and
@@ -3656,7 +3686,7 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 			applied[key] = false
 			continue
 		}
-		returned, err := e.stake.Withdraw(id, e.vset(), e.unbondingPeriod, b.Height)
+		returned, err := e.stake.Withdraw(id, e.vset(), e.unbondingPeriod, e.bondResidency, b.Height)
 		if err != nil {
 			// Unreachable for a block that passed verification. Record it as not
 			// applied rather than failing the commit: the block is already in the
@@ -3667,6 +3697,12 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 			continue
 		}
 		if returned > 0 {
+			// The bond is gone, so the residency clock is too. A later bond starts
+			// a fresh one; leaving this behind would let an account bond, withdraw,
+			// and bond again with a clock that expired months ago.
+			if err := e.stake.ClearBonded(id); err != nil {
+				fmt.Printf("consensus: could not clear the bond clock for %s: %v\n", id, err)
+			}
 			fmt.Printf("consensus: returned bond of %d to %s at height %d\n", returned, id, b.Height)
 		}
 	}

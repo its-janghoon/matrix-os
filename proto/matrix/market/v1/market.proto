@@ -125,6 +125,25 @@ message Provider {
     // into this counts from the upgrade, not from genesis, and a display that
     // does not say so is claiming more than it knows.
     uint64 settled_indexed_from = 23;
+
+    // What this provider's payout account has STAKED, read from the answering
+    // node's chain rather than from the announcement - a seller publishing its
+    // own bond is publishing a number, and the point of a bond is capital
+    // somebody actually parted with.
+    //
+    // A bond does not make a seller honest and nothing here should be presented
+    // as if it did. It cannot be slashed for bad service, because no protocol
+    // can adjudicate whether a completion was really the advertised model: a
+    // buyer-complaint slash would be a weapon competitors point at each other,
+    // and validators voting on service quality is not something consensus can
+    // do. What a bond does is make a LISTING cost capital, which is what stops
+    // one attacker from filling the directory with cheap fake sellers - and the
+    // sybil is what turns every other fraud from a scam into an industry.
+    uint64 bonded = 24;
+    // The height from which that bond may be withdrawn. As much of the bond as
+    // the amount: capital that can be pulled in the next block is committed to
+    // nothing.
+    uint64 bond_withdrawable_at = 25;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.
