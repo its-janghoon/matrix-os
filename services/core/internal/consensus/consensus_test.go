@@ -194,6 +194,16 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 //     function is midway through changing the balances this is about to add to.
 //     `committing` is the flag that serialises commits, it is set and cleared
 //     under e.mu, and it spans exactly that window.
+//   - No proposal in flight, which is subtler and cost a stuck node to find. A
+//     block carries the state root AS OF ITS PARENT, fixed when the proposer
+//     built it. A credit landing after that and before some other node verifies
+//     it makes the block permanently unverifiable for that node - not a
+//     disagreement it can vote its way out of, because block sync re-verifies
+//     too. The rest of the cluster commits on a quorum it already had and walks
+//     away, and the late node is stuck at that height forever. A proposer keeps
+//     its own proposal in `proposals`, which advanceHeight clears per height, so
+//     all four maps empty means no block for this height exists anywhere to be
+//     invalidated. An empty mempool means none is about to.
 //
 // The credit is also FILED against the height it landed before, so a node that
 // joins later and replays the chain applies it in the same place rather than at
@@ -215,7 +225,8 @@ func mintAll(t *testing.T, nodes []*testNode, account string, amount uint64) {
 		}
 		height, still := nodes[0].engine.height, true
 		for _, nd := range nodes {
-			if nd.engine.committing || nd.engine.height != height {
+			e := nd.engine
+			if e.committing || e.height != height || len(e.proposals) > 0 || len(e.mempool) > 0 {
 				still = false
 				break
 			}
