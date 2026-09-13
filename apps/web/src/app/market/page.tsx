@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FiRefreshCw, FiSearch } from 'react-icons/fi';
 
@@ -11,7 +12,7 @@ import { browserSigner } from '@/lib/wallet/browserSigner';
 import type { Signer } from '@/lib/wallet/signer';
 import { loadWallet } from '@/lib/wallet/wallet';
 
-import { HonestNotes, StakePanel } from './panels';
+import { StakePanel } from './panels';
 import { ModelTable, SellerTable } from './tables';
 import { Card, FIELD, Segmented, Select, Stat, Toggle } from './ui';
 
@@ -134,7 +135,7 @@ export default function MarketPage() {
             <div>
               <h1 className='text-[28px] font-semibold tracking-tight text-white'>Compute marketplace</h1>
               <p className='mt-1.5 max-w-2xl text-sm text-grayscale-400'>
-                Every seller the network has announced, ranked by what the chain can prove about them.
+                Every seller this node has heard, ranked by what the chain can prove about them.
               </p>
             </div>
             <NodeChip endpoint={endpoint} setEndpoint={setEndpoint} loading={loading} failed={problem !== ''} onRefresh={refresh} />
@@ -261,10 +262,6 @@ export default function MarketPage() {
             </>
           ) : (
             <>
-              <p className='mt-3 text-xs text-grayscale-500'>
-                What this node has heard anyone offer, by model. Counts only sellers with an address, because one
-                without it cannot take a prompt - a count including them is a number you cannot act on.
-              </p>
               <div className='mt-3'>
                 <ModelTable
                   rows={models}
@@ -277,8 +274,26 @@ export default function MarketPage() {
             </>
           )}
 
-          <div className='mt-3 space-y-3'>
-            <HonestNotes />
+          {/*
+            One line where seven paragraphs used to be.
+
+            The caveats are still true and still matter, but an essay under the
+            table was read by nobody, which made it decoration rather than
+            honesty. The sentence that makes a column trustworthy now sits on
+            that column's own heading, where the question is actually asked, and
+            the full version is a click away for the reader who wants it.
+          */}
+          <p className='mt-4 text-xs text-grayscale-500'>
+            Every figure here is read from the chain, never reported by the seller.{' '}
+            <Link
+              href='/docs/compute-marketplace#reading-the-directory'
+              className='text-primary-300 underline-offset-4 hover:underline'
+            >
+              How to read them
+            </Link>
+          </p>
+
+          <div className='mt-8'>
             <StakePanel endpoint={endpoint} signer={signer} onChanged={refresh} setSigner={setSigner} />
           </div>
         </div>

@@ -295,7 +295,12 @@ export function ModelTable({ rows, onPick }: { rows: ModelRow[]; onPick: (model:
             <th className='w-[32%] pb-3 pl-6 pr-6 pt-5 text-left text-[11px] font-medium uppercase tracking-[0.08em] text-grayscale-500'>
               Model
             </th>
-            <ColumnLabel align='right'>Sellers</ColumnLabel>
+            <ColumnLabel
+              align='right'
+              explain='Counts only sellers with an address, because one without it cannot take a prompt - a count including them is a number you cannot act on.'
+            >
+              Sellers
+            </ColumnLabel>
             <ColumnLabel align='right' explain={PRICE_EXPLAIN}>
               Price / 1M units
             </ColumnLabel>
