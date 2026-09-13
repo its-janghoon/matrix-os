@@ -76,6 +76,15 @@ export interface Seller {
   bonded: bigint;
   settledPayments: bigint;
   settledPayers: bigint;
+  /**
+   * Base units this account has been paid, totalled over the settled transfers
+   * the answering node's chain holds.
+   *
+   * A count of payments says a seller has been used; an amount says how much
+   * anyone was willing to spend on it, which is the harder of the two to
+   * manufacture and the one a headline figure should carry.
+   */
+  settledReceived: bigint;
   origin: 'local' | 'remote';
   /**
    * Whether the node being ASKED verified a maintainer signature saying it
@@ -405,6 +414,7 @@ export async function listSellers(endpoint: string, model?: string): Promise<Sel
       bonded: big(p.bonded),
       settledPayments: big(p.settledPayments),
       settledPayers: big(p.settledPayers),
+      settledReceived: big(p.settledReceived),
       origin: remote ? 'remote' : 'local',
       operatorAttested: p.operatorAttested === true,
       operatorName: str(p.operatorName),

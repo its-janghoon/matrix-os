@@ -1,16 +1,19 @@
 'use client';
 
-import Link from 'next/link';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { FiRefreshCw, FiSearch } from 'react-icons/fi';
 
 import Navigation from '@/components/Navigation';
+import { compactMatrix, formatMatrix, parseMatrix, SYMBOL } from '@/lib/wallet/format';
 import { DEFAULT_ENDPOINT, listSellers, reportProblem, type Seller } from '@/lib/wallet/node';
-import { searchSellers, sellersByModel, type ModelRow, type SortKey } from '@/lib/wallet/search';
-import { bond, bondedFor, withdrawBond } from '@/lib/wallet/stake';
+import { searchSellers, sellersByModel, type SortKey } from '@/lib/wallet/search';
 import { browserSigner } from '@/lib/wallet/browserSigner';
-import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
 import { loadWallet } from '@/lib/wallet/wallet';
+
+import { HonestNotes, StakePanel } from './panels';
+import { ModelTable, SellerTable } from './tables';
+import { Card, FIELD, Segmented, Select, Stat, Toggle } from './ui';
 
 /**
  * Who is selling on this network, and what the chain says about them.
@@ -28,15 +31,15 @@ import { loadWallet } from '@/lib/wallet/wallet';
  * exactly the numbers a seller can type anything into.
  *
  * And none of it says the answers are any good. Nothing on a chain can.
+ *
+ * ON THE LAYOUT. The first version led with an editable node address and a wall
+ * of fourteen-digit integers, which is what a tool looks like when it is written
+ * for the person who wrote it. Which node is answering is a setting, so it sits
+ * in the corner where settings sit; the amounts are denominated in MATRIX,
+ * because the reader is deciding how much to spend and cannot do that in base
+ * units; and the caveats moved onto the columns they qualify, where they get
+ * read instead of scrolled past.
  */
-
-const CARD = 'rounded-xl border border-gray-800 bg-gray-900/50 p-6';
-const FIELD =
-  'w-full rounded-lg border border-gray-700 bg-black/60 px-3 py-2 font-mono text-sm text-gray-100 ' +
-  'outline-none focus:border-gray-500';
-const BUTTON =
-  'rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black disabled:cursor-not-allowed disabled:opacity-40';
-
 export default function MarketPage() {
   const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
   const [sellers, setSellers] = useState<Seller[]>([]);
@@ -96,533 +99,256 @@ export default function MarketPage() {
     };
   }, []);
 
+  // The floor is typed in MATRIX like every other amount here. An unparseable
+  // entry applies NO floor rather than a guessed one: silently filtering on a
+  // number the reader did not mean is worse than not filtering at all.
+  const minBondUnits = minBond.trim() === '' ? undefined : (parseMatrix(minBond) ?? undefined);
+
   const shown = searchSellers(sellers, {
     text,
-    minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
+    minBond: minBondUnits,
     reachableOnly,
     attestedOnly,
     sort,
   });
 
+  const models = useMemo(() => sellersByModel(sellers), [sellers]);
+  const totals = useMemo(() => {
+    let staked = 0n;
+    let settled = 0n;
+    let vouched = 0;
+    for (const s of sellers) {
+      staked += s.bonded;
+      settled += s.settledReceived;
+      if (s.operatorAttested) vouched += 1;
+    }
+    return { staked, settled, vouched };
+  }, [sellers]);
+
   return (
     <>
       <Navigation />
-      <main className='min-h-screen bg-black px-4 pb-16 pt-24'>
-        <div className='mx-auto max-w-6xl space-y-6'>
-          <header>
-            <h1 className='text-2xl font-semibold text-gray-100'>Who is selling</h1>
-            <p className='mt-2 text-sm text-gray-400'>
-              Read from one node&apos;s directory. That node heard these announcements and holds the chain the stake and
-              settled history are read from, so a different node may have heard others.
-            </p>
+      <main className='min-h-screen bg-background bg-section-glow px-4 pb-20 pt-24'>
+        <div className='mx-auto max-w-6xl'>
+          <header className='flex flex-wrap items-end justify-between gap-4'>
+            <div>
+              <h1 className='text-[28px] font-semibold tracking-tight text-white'>Compute marketplace</h1>
+              <p className='mt-1.5 max-w-2xl text-sm text-grayscale-400'>
+                Every seller the network has announced, ranked by what the chain can prove about them.
+              </p>
+            </div>
+            <NodeChip endpoint={endpoint} setEndpoint={setEndpoint} loading={loading} failed={problem !== ''} onRefresh={refresh} />
           </header>
 
-          <section className={CARD}>
-            <label className='mb-2 block text-xs uppercase tracking-wide text-gray-500'>Node</label>
-            <div className='flex flex-wrap gap-2'>
-              <input
-                className={`${FIELD} flex-1`}
-                value={endpoint}
-                onChange={(e) => setEndpoint(e.target.value)}
-                spellCheck={false}
-              />
-              {/*
-                Deliberately NOT disabled while loading. A read that hangs would
-                otherwise take the only control that recovers from it away, and
-                the reader is left looking at "Reading..." with nothing to press.
-                A second read superseding a first is handled by the guard in the
-                effect, so pressing it again is safe.
-              */}
-              <button className={BUTTON} onClick={refresh}>
-                {loading ? 'Reading...' : 'Refresh'}
-              </button>
-            </div>
-          </section>
-
           {problem !== '' ? (
-            <p className='rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300'>{problem}</p>
+            <p className='mt-6 rounded-xl border border-semantic-error/30 bg-semantic-error/[0.07] px-4 py-3 text-sm text-red-300'>
+              {problem}
+            </p>
           ) : null}
 
-          <Filters
-            view={view}
-            setView={setView}
-            text={text}
-            setText={setText}
-            minBond={minBond}
-            setMinBond={setMinBond}
-            reachableOnly={reachableOnly}
-            setReachableOnly={setReachableOnly}
-            attestedOnly={attestedOnly}
-            setAttestedOnly={setAttestedOnly}
-            sort={sort}
-            setSort={setSort}
-            total={sellers.length}
-            showing={shown.length}
-          />
+          <div className='mt-7 grid grid-cols-2 gap-3 lg:grid-cols-4'>
+            <Stat
+              label='Sellers'
+              value={sellers.length.toString()}
+              sub={totals.vouched > 0 ? `${totals.vouched} vouched for` : 'none vouched for yet'}
+            />
+            <Stat label='Models' value={models.length.toString()} sub='offered by a reachable seller' />
+            <Stat
+              label={`Staked (${SYMBOL})`}
+              value={compactMatrix(totals.staked)}
+              exact={`${formatMatrix(totals.staked)} ${SYMBOL}`}
+              sub='capital locked behind listings'
+            />
+            <Stat
+              label={`Settled (${SYMBOL})`}
+              value={compactMatrix(totals.settled)}
+              exact={`${formatMatrix(totals.settled)} ${SYMBOL}`}
+              sub='paid to sellers on this chain'
+              tone='brand'
+            />
+          </div>
 
-          {view === 'models' ? (
-            <ModelTable rows={sellersByModel(sellers)} onPick={(m) => { setText(m); setView('sellers'); }} />
+          <div className='mt-7 flex flex-wrap items-center justify-between gap-3'>
+            <Segmented
+              value={view}
+              onChange={setView}
+              options={[
+                { value: 'sellers', label: 'Sellers' },
+                { value: 'models', label: 'Models' },
+              ]}
+            />
+            <span className='font-mono text-xs text-grayscale-500'>
+              {view === 'sellers'
+                ? `${shown.length} of ${sellers.length} shown`
+                : `${models.length} ${models.length === 1 ? 'model' : 'models'}`}
+            </span>
+          </div>
+
+          {view === 'sellers' ? (
+            <>
+              <Card className='mt-3 px-4 py-3.5'>
+                <div className='flex flex-wrap items-center gap-3'>
+                  <div className='relative min-w-[240px] flex-1'>
+                    <FiSearch className='pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-grayscale-600' />
+                    <input
+                      className={`${FIELD} pl-10`}
+                      placeholder='Search by model, operator, address or account'
+                      value={text}
+                      onChange={(e) => setText(e.target.value)}
+                      spellCheck={false}
+                    />
+                  </div>
+                  <Select
+                    label='Sort sellers'
+                    value={sort}
+                    onChange={setSort}
+                    options={[
+                      { value: 'price', label: 'Cheapest first' },
+                      { value: 'staked', label: 'Most staked' },
+                      { value: 'paid', label: 'Most payments' },
+                      { value: 'payers', label: 'Most payers' },
+                    ]}
+                  />
+                </div>
+
+                <div className='mt-3 flex flex-wrap items-center gap-2'>
+                  {/*
+                    On by default: a seller with no address cannot take a prompt,
+                    so showing one in a table whose last column offers to use it
+                    offers something that does not exist.
+                  */}
+                  <Toggle
+                    on={reachableOnly}
+                    onChange={setReachableOnly}
+                    explain='A seller that publishes no address cannot take a prompt.'
+                  >
+                    Can take a prompt
+                  </Toggle>
+                  {/*
+                    Off by default. Defaulting a marketplace to its own operator's
+                    sellers would make every other listing furniture, and the badge
+                    is an identity claim rather than a quality one.
+                  */}
+                  <Toggle
+                    on={attestedOnly}
+                    onChange={setAttestedOnly}
+                    explain='Only sellers this node verified a maintainer signature for. An identity claim, not a rating.'
+                  >
+                    Vouched for by the network
+                  </Toggle>
+                  <label className='ml-auto flex items-center gap-2 text-xs text-grayscale-500'>
+                    Min stake
+                    <span className='relative'>
+                      <input
+                        className='w-36 rounded-full border border-white/[0.08] bg-black/40 py-1.5 pl-3 pr-14 font-mono text-xs tabular-nums text-white outline-none transition-colors focus:border-primary-400/50'
+                        placeholder='0'
+                        value={minBond}
+                        onChange={(e) => setMinBond(e.target.value)}
+                        spellCheck={false}
+                        inputMode='decimal'
+                      />
+                      <span className='pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[10px] font-medium text-grayscale-600'>
+                        {SYMBOL}
+                      </span>
+                    </span>
+                  </label>
+                </div>
+              </Card>
+
+              <div className='mt-3'>
+                <SellerTable sellers={shown} loading={loading} endpoint={endpoint} searched={text.trim() !== ''} />
+              </div>
+            </>
           ) : (
-            <SellerTable sellers={shown} loading={loading} endpoint={endpoint} searched={text.trim() !== ''} />
+            <>
+              <p className='mt-3 text-xs text-grayscale-500'>
+                What this node has heard anyone offer, by model. Counts only sellers with an address, because one
+                without it cannot take a prompt - a count including them is a number you cannot act on.
+              </p>
+              <div className='mt-3'>
+                <ModelTable
+                  rows={models}
+                  onPick={(m) => {
+                    setText(m);
+                    setView('sellers');
+                  }}
+                />
+              </div>
+            </>
           )}
-          <WhatTheseNumbersMean />
-          <StakePanel endpoint={endpoint} signer={signer} onChanged={refresh} setSigner={setSigner} />
+
+          <div className='mt-3 space-y-3'>
+            <HonestNotes />
+            <StakePanel endpoint={endpoint} signer={signer} onChanged={refresh} setSigner={setSigner} />
+          </div>
         </div>
       </main>
     </>
   );
 }
 
-function SellerTable({
-  sellers,
+/**
+ * Which node is answering, and a way to change it.
+ *
+ * It used to be the first thing on the page, in a card of its own, which put a
+ * setting where the content belongs. It still has to be VISIBLE rather than
+ * buried, because everything below is one node's view and a reader who forgets
+ * that draws conclusions about the network from one peer's hearing - so it
+ * states the address and whether the last read worked, and opens for editing
+ * when asked.
+ */
+function NodeChip({
+  endpoint,
+  setEndpoint,
   loading,
-  endpoint,
-  searched,
+  failed,
+  onRefresh,
 }: {
-  sellers: Seller[];
+  endpoint: string;
+  setEndpoint: (v: string) => void;
   loading: boolean;
-  endpoint: string;
-  searched: boolean;
+  failed: boolean;
+  onRefresh: () => void;
 }) {
-  if (loading && sellers.length === 0) {
-    return <p className='text-sm text-gray-400'>Reading the directory...</p>;
-  }
-  if (sellers.length === 0) {
-    return (
-      <div className={CARD}>
-        <p className='text-sm text-gray-400'>
-          {searched
-            ? 'Nothing here matches. A directory only holds what THIS node has heard, so a seller you know of may simply not have reached it.'
-            : 'This node has heard nothing. Either nobody is selling, or it has no peers to hear them from.'}
-        </p>
-      </div>
-    );
-  }
-
-  // Already ordered by the query; re-sorting here would silently override the
-  // column the reader chose.
-  const sorted = sellers;
+  const [open, setOpen] = useState(false);
+  const dot = failed ? 'bg-semantic-error' : loading ? 'bg-semantic-processing' : 'bg-semantic-success';
 
   return (
-    <div className={`${CARD} overflow-x-auto`}>
-      <table className='w-full min-w-[720px] text-left font-mono text-xs'>
-        <thead>
-          <tr className='text-gray-500'>
-            <th className='pb-2 pr-4 font-normal uppercase tracking-wide'>Reached at</th>
-            <th className='pb-2 pr-4 font-normal uppercase tracking-wide'>Models</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Price/unit</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Staked</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Paid</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Payers</th>
-            <th className='pb-2 font-normal uppercase tracking-wide'> </th>
-          </tr>
-        </thead>
-        <tbody className='text-gray-200'>
-          {sorted.map((s) => (
-            <tr key={`${s.nodeId}:${s.id}`} className='border-t border-gray-800'>
-              <td className='py-2 pr-4'>
-                {s.endpoint === '' ? (
-                  <span className='text-gray-600'>no address; compute only</span>
-                ) : (
-                  <span className='flex items-center gap-2'>
-                    {s.endpoint}
-                    {s.operatorAttested ? (
-                      // Titled with what was actually checked. A badge whose
-                      // meaning a reader has to guess becomes "this one is
-                      // good", which is the one thing it does not say.
-                      <span
-                        className='rounded border border-sky-500/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-sky-300'
-                        title={`${s.operatorName} - the maintainer this chain names signed that it operates this node. An identity claim, not a rating.`}
-                      >
-                        {s.operatorName || 'attested'}
-                      </span>
-                    ) : null}
-                  </span>
-                )}
-              </td>
-              <td className='py-2 pr-4 text-gray-400'>{s.models.join(', ') || '-'}</td>
-              <td className='py-2 pr-4 text-right'>{s.pricePerUnit.toString()}</td>
-              <td className={`py-2 pr-4 text-right ${s.bonded === 0n ? 'text-amber-500/80' : ''}`}>
-                {s.bonded.toString()}
-              </td>
-              <td className='py-2 pr-4 text-right'>{s.settledPayments.toString()}</td>
-              <td className='py-2 pr-4 text-right'>{s.settledPayers.toString()}</td>
-              <td className='py-2 text-right'>
-                {s.endpoint === '' || s.models.length === 0 ? (
-                  <span className='text-gray-700'>-</span>
-                ) : (
-                  // The choice travels as an IDENTITY, and deliberately not as an
-                  // address: a link carrying its own endpoint would let whoever
-                  // sent it route the recipient's prompt at a host of their
-                  // choosing while the page named the seller they thought they
-                  // picked. The chat page reads the address back from the
-                  // directory itself.
-                  <Link
-                    className='text-gray-300 underline underline-offset-2 hover:text-white'
-                    href={{
-                      pathname: '/chat',
-                      query: {
-                        node: s.nodeId,
-                        provider: s.id,
-                        model: s.models[0],
-                        endpoint,
-                      },
-                    }}
-                  >
-                    Buy here
-                  </Link>
-                )}
-              </td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function WhatTheseNumbersMean() {
-  return (
-    <section className={`${CARD} space-y-3 text-sm text-gray-400`}>
-      <h2 className='font-semibold text-gray-200'>What these numbers are, and are not</h2>
-      <p>
-        <strong className='text-gray-300'>Staked</strong> is capital the seller has posted on this chain, and it cannot
-        be pulled on demand - the chain holds a bond for a minimum number of blocks after it is posted. It does not make
-        anyone honest and cannot be taken away for bad service: no protocol can judge whether a completion was really the
-        model advertised. What it does is make a listing cost money, which is what stops one attacker from filling this
-        table with cheap fake sellers.
-      </p>
-      <p>
-        <strong className='text-gray-300'>Paid</strong> and <strong className='text-gray-300'>Payers</strong> are settled
-        transfers on the chain this node holds, not claims by the seller. A settlement is an ordinary transfer, so they
-        count every payment the account received - a seller can pay itself. Payers is the harder one to inflate: it costs
-        a funded account each.
-      </p>
-      <p>
-        <strong className='text-gray-300'>The badge</strong> means one checkable thing: the account this chain names as
-        its maintainer signed a statement that it operates that node. It is an identity claim, not a rating - it does
-        not say those sellers answer better, and a reader who does not trust that account should ignore it. It cannot be
-        forged: the signature is checked against consensus state, which only the current maintainer&apos;s own signature
-        can rotate, and it expires so a badge cannot outlive the arrangement it describes.
-      </p>
-      <p>
-        It exists because a new network is mostly strangers with no settled history to tell them apart, and somebody has
-        to go first. The honest way for the people running one to do that is to run sellers themselves and say so.
-      </p>
-      <p>
-        There is no uptime column because an announcement carries no uptime. A number a seller publishes about its own
-        reliability costs nothing to inflate, so the protocol does not carry one and this page will not invent one.
-      </p>
-      <p className='text-gray-500'>
-        None of this says the answers are any good. Judge that yourself, on a small job, before sending a large one.
-      </p>
-    </section>
-  );
-}
-
-function StakePanel({
-  endpoint,
-  signer,
-  setSigner,
-  onChanged,
-}: {
-  endpoint: string;
-  signer: Signer | null;
-  setSigner: (s: Signer | null) => void;
-  onChanged: () => void;
-}) {
-  const [amount, setAmount] = useState('');
-  const [staked, setStaked] = useState<bigint | null>(null);
-  const [busy, setBusy] = useState('');
-  const [status, setStatus] = useState('');
-  const [problem, setProblem] = useState('');
-
-  useEffect(() => {
-    let live = true;
-    // Resolved rather than branched, so nothing sets state synchronously here
-    // and a stale read cannot overwrite a newer one.
-    const read = signer ? bondedFor(endpoint, signer.accountId) : Promise.resolve(null);
-    read
-      .then((v) => {
-        if (live) setStaked(v);
-      })
-      .catch(() => {
-        if (live) setStaked(null);
-      });
-    return () => {
-      live = false;
-    };
-  }, [endpoint, signer, status]);
-
-  const run = async (what: 'bond' | 'withdraw') => {
-    if (!signer) return;
-    setBusy(what);
-    setProblem('');
-    setStatus('');
-    try {
-      if (what === 'bond') {
-        const value = BigInt(amount.trim() === '' ? '0' : amount.trim());
-        await bond(endpoint, signer, value);
-        setStatus(`Staked ${value} base units.`);
-        setAmount('');
-      } else {
-        await withdrawBond(endpoint, signer);
-        setStatus('The whole bond was returned.');
-      }
-      onChanged();
-    } catch (err) {
-      setProblem(reportProblem(err));
-    } finally {
-      setBusy('');
-    }
-  };
-
-  return (
-    <section className={`${CARD} space-y-4`}>
-      <div>
-        <h2 className='font-semibold text-gray-200'>Selling here?</h2>
-        <p className='mt-2 text-sm text-gray-400'>
-          Staking is what makes your listing cost something, which is the only thing separating you from an attacker who
-          made ten thousand of them. It is an ordinary signed transfer to a reserved recipient, so the wallet you already
-          have can do it - no key leaves this page.
-        </p>
-      </div>
-
-      {signer === null ? (
-        <div className='space-y-2'>
-          <p className='text-sm text-gray-400'>Connect a wallet to stake.</p>
-          <button
-            className={BUTTON}
-            onClick={async () => {
-              setProblem('');
-              try {
-                if (!metamaskAvailable()) {
-                  setProblem('No wallet extension is installed on this page.');
-                  return;
-                }
-                setSigner(await connectMetamask());
-              } catch (err) {
-                setProblem(reportProblem(err));
-              }
-            }}
-          >
-            Connect MetaMask
-          </button>
-        </div>
-      ) : (
-        <div className='space-y-3'>
-          <p className='font-mono text-xs text-gray-500'>
-            {signer.accountId}
-            {staked !== null ? ` - ${staked.toString()} base units staked` : ''}
-          </p>
-          <div className='flex flex-wrap gap-2'>
-            <input
-              className={`${FIELD} flex-1`}
-              placeholder='amount in base units'
-              value={amount}
-              onChange={(e) => setAmount(e.target.value.replace(/[^0-9]/g, ''))}
-              spellCheck={false}
-            />
-            <button className={BUTTON} disabled={busy !== '' || amount === ''} onClick={() => void run('bond')}>
-              {busy === 'bond' ? 'Signing...' : 'Stake'}
-            </button>
-            <button
-              className='rounded-lg border border-gray-700 px-4 py-2 text-sm font-semibold text-gray-200 disabled:opacity-40'
-              disabled={busy !== '' || staked === null || staked === 0n}
-              onClick={() => void run('withdraw')}
-            >
-              {busy === 'withdraw' ? 'Signing...' : 'Withdraw all'}
-            </button>
-          </div>
-          <p className='text-xs text-gray-500'>
-            A withdrawal takes the whole bond - the amount is not yours to choose - and the chain refuses it until the
-            bond has been posted for its minimum number of blocks. That is the point of it: a stake that can be pulled in
-            the next block was never capital at risk.
-          </p>
-        </div>
-      )}
-
-      {status !== '' ? <p className='text-sm text-emerald-400/80'>{status}</p> : null}
-      {problem !== '' ? <p className='text-sm text-red-300'>{problem}</p> : null}
-    </section>
-  );
-}
-
-/**
- * The controls, and a count of what they left.
- *
- * The count is not decoration. A filter that quietly removes everything looks
- * identical to a network where nobody is selling, and a reader who cannot tell
- * those apart goes looking for a problem that is on their own screen.
- */
-function Filters({
-  view,
-  setView,
-  text,
-  setText,
-  minBond,
-  setMinBond,
-  reachableOnly,
-  setReachableOnly,
-  attestedOnly,
-  setAttestedOnly,
-  sort,
-  setSort,
-  total,
-  showing,
-}: {
-  view: 'sellers' | 'models';
-  setView: (v: 'sellers' | 'models') => void;
-  text: string;
-  setText: (v: string) => void;
-  minBond: string;
-  setMinBond: (v: string) => void;
-  reachableOnly: boolean;
-  setReachableOnly: (v: boolean) => void;
-  attestedOnly: boolean;
-  setAttestedOnly: (v: boolean) => void;
-  sort: SortKey;
-  setSort: (v: SortKey) => void;
-  total: number;
-  showing: number;
-}) {
-  const tab = (active: boolean) =>
-    `rounded-lg px-3 py-1.5 text-sm ${active ? 'bg-white text-black' : 'border border-gray-700 text-gray-300'}`;
-
-  return (
-    <section className={`${CARD} space-y-4`}>
-      <div className='flex flex-wrap items-center gap-2'>
-        <button className={tab(view === 'sellers')} onClick={() => setView('sellers')}>
-          Sellers
+    <div className='flex flex-col items-end gap-2'>
+      <div className='flex items-center gap-2'>
+        <button
+          type='button'
+          onClick={() => setOpen((v) => !v)}
+          className='inline-flex items-center gap-2 rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs text-grayscale-300 transition-colors hover:border-white/20 hover:text-white'
+          title='Everything on this page is one node&apos;s view. Click to read from a different one.'
+        >
+          <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
+          <span className='font-mono'>{endpoint.replace(/^https?:\/\//, '')}</span>
         </button>
-        <button className={tab(view === 'models')} onClick={() => setView('models')}>
-          Models
+        {/*
+          Deliberately NOT disabled while loading. A read that hangs would
+          otherwise take the only control that recovers from it away, and the
+          reader is left watching a spinner with nothing to press. A second read
+          superseding a first is handled by the guard in the effect.
+        */}
+        <button
+          type='button'
+          onClick={onRefresh}
+          aria-label='Refresh the directory'
+          className='inline-flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.08] bg-white/[0.03] text-grayscale-400 transition-colors hover:border-white/20 hover:text-white'
+        >
+          <FiRefreshCw className={`h-3.5 w-3.5 ${loading ? 'animate-spin' : ''}`} />
         </button>
-        <span className='ml-auto font-mono text-xs text-gray-500'>
-          {view === 'sellers' ? `${showing} of ${total} shown` : `${total} listings`}
-        </span>
       </div>
-
-      {view === 'sellers' ? (
-        <>
-          <input
-            className={FIELD}
-            placeholder='search by model, address, node or payout account'
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            spellCheck={false}
-          />
-          <div className='flex flex-wrap items-center gap-3 text-xs text-gray-400'>
-            <label className='flex items-center gap-2'>
-              <span className='uppercase tracking-wide text-gray-500'>Sort</span>
-              <select
-                className='rounded border border-gray-700 bg-black/60 px-2 py-1 text-gray-200 outline-none'
-                value={sort}
-                onChange={(e) => setSort(e.target.value as SortKey)}
-              >
-                <option value='price'>cheapest first</option>
-                <option value='staked'>most staked</option>
-                <option value='paid'>most payments</option>
-                <option value='payers'>most payers</option>
-              </select>
-            </label>
-            <label className='flex items-center gap-2'>
-              <span className='uppercase tracking-wide text-gray-500'>Min stake</span>
-              <input
-                className='w-40 rounded border border-gray-700 bg-black/60 px-2 py-1 font-mono text-gray-200 outline-none'
-                placeholder='0'
-                value={minBond}
-                onChange={(e) => setMinBond(e.target.value.replace(/[^0-9]/g, ''))}
-                spellCheck={false}
-              />
-            </label>
-            <label className='flex items-center gap-2'>
-              <input
-                type='checkbox'
-                checked={reachableOnly}
-                onChange={(e) => setReachableOnly(e.target.checked)}
-              />
-              {/*
-                On by default: a seller with no address cannot take a prompt, so
-                showing one in a table whose last column says "Buy here" offers
-                something that does not exist.
-              */}
-              Only sellers that can take a prompt
-            </label>
-            <label className='flex items-center gap-2'>
-              {/*
-                Off by default. Defaulting a marketplace to its own operator's
-                sellers would make every other listing furniture, and the badge
-                is an identity claim rather than a quality one.
-              */}
-              <input type='checkbox' checked={attestedOnly} onChange={(e) => setAttestedOnly(e.target.checked)} />
-              Only sellers the network vouches for
-            </label>
-          </div>
-        </>
-      ) : (
-        <p className='text-xs text-gray-500'>
-          What this node has heard anyone offer, by model. Counts only sellers with an address, because one without it
-          cannot take a prompt - a count including them is a number you cannot act on.
-        </p>
-      )}
-    </section>
-  );
-}
-
-/**
- * The models view: the question a buyer usually arrives with.
- *
- * Most people know the model they want and not the box that will serve it, so
- * this answers "who has it and what does it cost" before anything about sellers.
- * Picking one drops into the seller list already searched for it.
- */
-function ModelTable({ rows, onPick }: { rows: ModelRow[]; onPick: (model: string) => void }) {
-  if (rows.length === 0) {
-    return (
-      <div className={CARD}>
-        <p className='text-sm text-gray-400'>
-          Nobody reachable is advertising a model. A provider that names none cannot be routed to, which is how every
-          buyer finds a seller.
-        </p>
-      </div>
-    );
-  }
-  return (
-    <div className={`${CARD} overflow-x-auto`}>
-      <table className='w-full min-w-[640px] text-left font-mono text-xs'>
-        <thead>
-          <tr className='text-gray-500'>
-            <th className='pb-2 pr-4 font-normal uppercase tracking-wide'>Model</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Sellers</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Price/unit</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Largest stake</th>
-            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Payments</th>
-            <th className='pb-2 text-right font-normal uppercase tracking-wide'>Vouched</th>
-          </tr>
-        </thead>
-        <tbody className='text-gray-200'>
-          {rows.map((r) => (
-            <tr key={r.model} className='border-t border-gray-800'>
-              <td className='py-2 pr-4'>
-                <button className='underline underline-offset-2 hover:text-white' onClick={() => onPick(r.model)}>
-                  {r.model}
-                </button>
-              </td>
-              <td className='py-2 pr-4 text-right'>{r.sellers}</td>
-              <td className='py-2 pr-4 text-right'>
-                {r.cheapest.toString()}
-                {r.cheapest === r.dearest ? '' : ` - ${r.dearest.toString()}`}
-              </td>
-              <td className={`py-2 pr-4 text-right ${r.topStake === 0n ? 'text-amber-500/80' : ''}`}>
-                {r.topStake.toString()}
-              </td>
-              <td className='py-2 pr-4 text-right'>{r.settledPayments.toString()}</td>
-              <td className={`py-2 text-right ${r.attested > 0 ? 'text-sky-300' : 'text-gray-600'}`}>{r.attested}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
+      {open ? (
+        <input
+          className={`${FIELD} w-[320px] font-mono text-xs`}
+          value={endpoint}
+          onChange={(e) => setEndpoint(e.target.value)}
+          spellCheck={false}
+          aria-label='Node address'
+        />
+      ) : null}
     </div>
   );
 }
