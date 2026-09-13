@@ -133,6 +133,14 @@ type ProviderAnnouncement struct {
 	ValidUntil        time.Time         `json:"valid_until"`
 	Available         uint64            `json:"available"`
 	PeerID            string            `json:"peer_id"`
+	// Attestation, when present, is the maintainer's signed statement that this
+	// node is one it operates. It is a credential the seller PRESENTS and the
+	// reader checks against the maintainer its own chain names - nothing here is
+	// believed because the announcement said it.
+	//
+	// Inside the signature like everything else, so a relaying peer can neither
+	// attach one nor strip one without invalidating the announcement.
+	Attestation *OperatorAttestation `json:"attestation,omitempty"`
 	// Models are the model identifiers the announcing provider serves, so a
 	// remote provider can be routed to by model exactly like a local one. They
 	// are signed with the rest of the announcement: an unsigned model list would
@@ -163,6 +171,16 @@ func (a *ProviderAnnouncement) signingBytes() []byte {
 	buf = appendUint64(buf, uint64(a.ValidUntil.UTC().UnixNano()))
 	buf = appendUint64(buf, a.Available)
 	buf = appendLenPrefixed(buf, []byte(a.PeerID))
+	// The attestation's own signature is what is covered, not its fields: it is
+	// already a signed structure, and re-serialising its contents here would be a
+	// second layout to keep byte-identical forever. Covering the signature binds
+	// the announcement to exactly one attestation, which is what matters - a peer
+	// cannot swap one for another, attach one, or remove it.
+	if a.Attestation != nil {
+		buf = appendLenPrefixed(buf, a.Attestation.Signature)
+	} else {
+		buf = appendLenPrefixed(buf, nil)
+	}
 	// The count is signed alongside the entries so no two distinct lists share a
 	// payload (an empty list and a single empty model would otherwise collide).
 	buf = appendUint64(buf, uint64(len(a.Models)))

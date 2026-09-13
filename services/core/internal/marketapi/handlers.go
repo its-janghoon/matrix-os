@@ -281,6 +281,7 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 			}
 			entry := remoteProviderToProto(rp)
 			s.attachEarnings(entry)
+			s.attachAttestation(entry, rp)
 			out = append(out, entry)
 		}
 	}
@@ -709,4 +710,32 @@ func (s *Service) attachEarnings(p *marketv1.Provider) {
 	}
 	p.Bonded = bonded
 	p.BondWithdrawableAt = withdrawableAt
+}
+
+// attachAttestation decides whether this node will vouch for a seller, and says
+// who vouched.
+//
+// The verdict is computed HERE, per listing, against the maintainer this node's
+// chain names right now. Not stored with the announcement, and not taken from
+// it: an attestation arrives as bytes a seller chose to send, and the only thing
+// that makes it mean anything is a signature check against consensus state. A
+// cached verdict would also survive a maintainer rotation it should not.
+//
+// A failed check leaves the seller unbadged and is not an error. An attestation
+// that expired, or was signed by a key the chain has rotated away from, is an
+// ordinary thing to see - the listing simply does not vouch for it, exactly as
+// if none had been presented.
+func (s *Service) attachAttestation(p *marketv1.Provider, rp marketexchange.RemoteProvider) {
+	if s.earnings == nil || p == nil || rp.Attestation == nil {
+		return
+	}
+	maintainer := s.earnings.Maintainer()
+	if maintainer == "" {
+		return
+	}
+	if err := rp.Attestation.VerifyFor(rp.NodeID, rp.ID, maintainer, time.Now().UTC()); err != nil {
+		return
+	}
+	p.OperatorAttested = true
+	p.OperatorName = rp.Attestation.Operator
 }

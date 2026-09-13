@@ -144,6 +144,28 @@ message Provider {
     // the amount: capital that can be pulled in the next block is committed to
     // nothing.
     uint64 bond_withdrawable_at = 25;
+
+    // Whether the maintainer THIS node's chain names has signed a statement that
+    // it operates this seller, checked here rather than believed from the
+    // announcement.
+    //
+    // It is an IDENTITY claim and nothing more: not a rating, not an
+    // endorsement, not a claim these sellers answer better. A reader who does
+    // not trust the maintainer account learns nothing from it, which is the
+    // correct outcome and the reason it is safe to carry at all.
+    //
+    // It exists because a new network's directory is mostly strangers with no
+    // settled history to tell them apart, and somebody has to go first. The
+    // honest way for the people running a network to do that is to run sellers
+    // themselves and say so, in a form nobody else can forge: the signature is
+    // checked against the maintainer in consensus state, which only the current
+    // maintainer's own signature can rotate.
+    bool operator_attested = 26;
+    // The human name the attestation carries, so a listing can say WHO rather
+    // than only that somebody vouched. Inside the signature, so a seller cannot
+    // relabel another operator's attestation as its own brand. Empty unless
+    // operator_attested is true.
+    string operator_name = 27;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.

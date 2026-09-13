@@ -130,7 +130,13 @@ func run(keep bool, timeout time.Duration) error {
 	// gets funded: `matrix fund` moves value out of the reward pool, which is not
 	// consensus-ordered and would leave three validators with three different
 	// pools, so the node refuses it on a real network and is right to.
-	receiptBuyer, err := createDevWallet(matrixCLI, dir)
+	receiptBuyer, err := createDevWallet(matrixCLI, dir, "buyer-wallet.json")
+	if err != nil {
+		return err
+	}
+	// The account this network names as its maintainer: the only key whose
+	// signature makes a seller show as vouched-for.
+	maintainerWallet, err := createDevWallet(matrixCLI, dir, "maintainer-wallet.json")
 	if err != nil {
 		return err
 	}
@@ -144,7 +150,35 @@ func run(keep bool, timeout time.Duration) error {
 	for i := range sellers {
 		sellerAddrs[i] = sellers[i].address
 	}
-	if err := writeConfigs(nodes, buyer.address, sellerAddrs, receiptBuyer.accountID); err != nil {
+	// Sign the attestations before anything starts.
+	//
+	// Not by restarting a node later, which is how this was written first and
+	// which the protocol correctly refuses: a restarted provider announces from
+	// quote version 1, and a listener holding version 3 drops it as a rollback.
+	// That rule is right - it is what stops a seller replaying an old, cheaper
+	// quote - and it means "change a running seller's terms and look again" is
+	// not a thing a test gets to do.
+	attestations := map[int]string{}
+	// Node 0 is first-party capacity: the maintainer signs for it.
+	if path, err := issueAttestation(matrixCLI, nodes[0], sellerAddrs[0], maintainerWallet); err != nil {
+		return err
+	} else {
+		attestations[0] = path
+	}
+	// Node 2 presents one signed by somebody who is not the maintainer. It is a
+	// perfectly well-formed document, so a pass on node 0 later cannot be the
+	// check simply never running.
+	impostor, err := createDevWallet(matrixCLI, dir, "impostor-wallet.json")
+	if err != nil {
+		return err
+	}
+	if path, err := issueAttestation(matrixCLI, nodes[2], sellerAddrs[2], impostor); err != nil {
+		return err
+	} else {
+		attestations[2] = path
+	}
+
+	if err := writeConfigs(nodes, buyer.address, sellerAddrs, receiptBuyer.accountID, maintainerWallet.accountID, attestations); err != nil {
 		return err
 	}
 	ok("three configs written, chain id %d", devnetChainID)
@@ -200,6 +234,9 @@ func run(keep bool, timeout time.Duration) error {
 	if err := checkSignedReceipt(matrixCLI, nodes[0], dir, receiptBuyer); err != nil {
 		return err
 	}
+	if err := checkAttestation(matrixCLI, nodes, sellers[0].address, sellers[2].address); err != nil {
+		return err
+	}
 	if !keep {
 		if err := checkGenesisSnapshot(matrixd, nodes); err != nil {
 			return err
@@ -237,6 +274,9 @@ type devNode struct {
 	apiKey string
 	cmd    *exec.Cmd
 	log    *os.File
+	// matrixd is the binary this node runs, kept so a check can restart it with
+	// changed config rather than tearing the whole network down.
+	matrixd string
 }
 
 // initNode writes a baseline config and reads back the identity it generated.
@@ -295,7 +335,7 @@ func initNode(matrixd, root string, i int) (*devNode, error) {
 }
 
 // writeConfigs patches every node's config into one network.
-func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Address, receiptBuyer string) error {
+func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Address, receiptBuyer, maintainer string, attestations map[int]string) error {
 	validators := make([]string, 0, len(nodes))
 	for _, n := range nodes {
 		validators = append(validators, n.consensusID)
@@ -365,7 +405,26 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Addre
 			// what lets the buyer's wallet pay this seller directly below, so the
 			// settled-history check has a real payment to find rather than one the
 			// test wrote into a ledger by hand.
-			setPath(cfg, []string{"inference", "echo_provider"}, token.EthAccountID(sellers[n.index]))
+			if att, ok := attestations[n.index]; ok {
+				// A node presenting an attestation declares a real backend: the
+				// demo provider has nowhere to carry one, and declaring both
+				// would register the same id twice, which the node refuses.
+				setPath(cfg, []string{"inference", "echo_provider"}, "")
+				setPath(cfg, []string{"inference", "backends"}, []map[string]any{{
+					"id":             token.EthAccountID(sellers[n.index]),
+					"kind":           "echo",
+					"models":         []string{"echo"},
+					"capacity":       1000000,
+					"price_per_unit": 5,
+					"attestation":    att,
+				}})
+			} else {
+				setPath(cfg, []string{"inference", "echo_provider"}, token.EthAccountID(sellers[n.index]))
+			}
+			// One maintainer, named in every node's config so the whole network
+			// agrees who may vouch - which is the point: an attestation is checked
+			// against consensus state, not against the node that presents it.
+			setPath(cfg, []string{"consensus", "maintainer_account"}, maintainer)
 
 			setPath(cfg, []string{"consensus", "chain_id"}, devnetChainID)
 			setPath(cfg, []string{"consensus", "validators"}, validators)
@@ -428,6 +487,7 @@ func (n *devNode) start(matrixd string, keep bool) error {
 		return err
 	}
 	n.log = log
+	n.matrixd = matrixd
 	n.cmd = exec.Command(matrixd, "-config", n.configPath)
 	n.cmd.Stdout = log
 	n.cmd.Stderr = log
@@ -1476,8 +1536,8 @@ func devWalletEnv() []string {
 }
 
 // createDevWallet makes a wallet with the real CLI and reads back its account id.
-func createDevWallet(matrixCLI, dir string) (devWallet, error) {
-	path := filepath.Join(dir, "buyer-wallet.json")
+func createDevWallet(matrixCLI, dir, name string) (devWallet, error) {
+	path := filepath.Join(dir, name)
 	env := devWalletEnv()
 
 	create := exec.Command(matrixCLI, "wallet", "create", "--wallet", path)
@@ -1502,4 +1562,65 @@ func createDevWallet(matrixCLI, dir string) (devWallet, error) {
 		return devWallet{}, fmt.Errorf("wallet show reported no account id: %s", shown)
 	}
 	return devWallet{path: path, accountID: got.AccountID}, nil
+}
+
+// checkAttestation proves the one badge this marketplace has, and that nobody
+// else can forge it.
+//
+// A new network's directory is mostly strangers: no settled history to tell them
+// apart, and a stake proves capital rather than competence. So the people running
+// one run sellers themselves and say so - and the whole question is whether "say
+// so" means anything. It does only if a reader checks the signature against the
+// maintainer their OWN chain names, and if nobody else's signature will do.
+//
+// Both halves are asserted on a running network, from node 1, which signed
+// nothing and simply reads its own chain: node 0's seller carries the
+// maintainer's signature and is vouched for, node 2's carries a stranger's - a
+// perfectly well-formed document - and is not.
+func checkAttestation(matrixCLI string, nodes []*devNode, firstParty, impostorSeller ethsig.Address) error {
+	step("vouching for this network's own seller, in a way nobody else can forge")
+
+	// Both halves read the SAME key. A negative assertion on a misspelled key
+	// passes for the wrong reason and proves nothing, so the two are spelled
+	// once: a typo now fails the positive half loudly instead of quietly
+	// excusing the impostor.
+	const attestedKey, operatorKey = "operator_attested", "operator_name"
+
+	ours, err := settledFor(matrixCLI, nodes[1], token.EthAccountID(firstParty))
+	if err != nil {
+		return err
+	}
+	if ours[attestedKey] != true {
+		return fmt.Errorf("node 1 does not vouch for the maintainer's own seller: %v\n%s", ours, nodes[0].tail(10))
+	}
+	if name := asString(ours[operatorKey]); name != "Matrix OS" {
+		return fmt.Errorf("the badge names %q, want the signed operator name", name)
+	}
+	ok("node 1 verified the maintainer's signature against its own chain and named the operator")
+
+	theirs, err := settledFor(matrixCLI, nodes[1], token.EthAccountID(impostorSeller))
+	if err != nil {
+		return err
+	}
+	if theirs[attestedKey] == true {
+		return fmt.Errorf("a stranger's signature vouched for a seller: %v", theirs)
+	}
+	ok("an attestation signed by anyone but the maintainer leaves its seller unbadged")
+	return nil
+}
+
+// issueAttestation signs one with the real CLI, the way a maintainer would.
+func issueAttestation(matrixCLI string, n *devNode, seller ethsig.Address, signer devWallet) (string, error) {
+	path := filepath.Join(n.dir, "attestation.json")
+	cmd := exec.Command(matrixCLI, "attest", "issue",
+		"--node", n.consensusID,
+		"--provider", token.EthAccountID(seller),
+		"--operator", "Matrix OS",
+		"--wallet", signer.path,
+		"--out", path)
+	cmd.Env = devWalletEnv()
+	if body, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("attest issue for node %d: %v\n%s", n.index, err, body)
+	}
+	return path, nil
 }

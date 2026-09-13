@@ -15,6 +15,8 @@ function seller(over: Partial<Seller> = {}): Seller {
     settledPayments: 0n,
     settledPayers: 0n,
     origin: 'remote',
+    operatorAttested: false,
+    operatorName: '',
     ...over,
   };
 }
@@ -138,5 +140,39 @@ describe('grouping a directory by model', () => {
 
   it('is empty when nobody advertises a model', () => {
     expect(sellersByModel([seller({ models: [] })])).toEqual([]);
+  });
+});
+
+describe('the one badge this marketplace has', () => {
+  /**
+   * Off by default, and that is the design rather than an oversight. Defaulting
+   * a marketplace to its own operator's sellers would make every other listing
+   * furniture, and the badge is an identity claim - "the maintainer this chain
+   * names says it runs this" - not a quality one.
+   */
+  it('does not hide unattested sellers unless asked', () => {
+    const sellers = [
+      seller({ id: 'first-party', operatorAttested: true, operatorName: 'Matrix OS', pricePerUnit: 9n }),
+      seller({ id: 'a-stranger', operatorAttested: false, pricePerUnit: 4n }),
+    ];
+    // Unfiltered, the cheapest still wins: a badge does not buy rank.
+    expect(searchSellers(sellers).map((s) => s.id)).toEqual(['a-stranger', 'first-party']);
+    expect(searchSellers(sellers, { attestedOnly: true }).map((s) => s.id)).toEqual(['first-party']);
+  });
+
+  it('finds a seller by the operator name somebody told you to look for', () => {
+    const sellers = [
+      seller({ id: 'ours', operatorAttested: true, operatorName: 'Matrix OS' }),
+      seller({ id: 'theirs', operatorAttested: false, operatorName: '' }),
+    ];
+    expect(searchSellers(sellers, { text: 'matrix os' }).map((s) => s.id)).toEqual(['ours']);
+  });
+
+  it('counts attested sellers per model, so a reader can see there is a safe start', () => {
+    const rows = sellersByModel([
+      seller({ id: 'a', models: ['m'], operatorAttested: true }),
+      seller({ id: 'b', models: ['m'], operatorAttested: false }),
+    ]);
+    expect(rows[0]).toMatchObject({ sellers: 2, attested: 1 });
   });
 });

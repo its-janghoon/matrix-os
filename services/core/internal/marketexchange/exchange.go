@@ -55,10 +55,16 @@ type RemoteProvider struct {
 	NodeID string
 	// Endpoint is the base URL the announcing node serves buyers on. Empty means
 	// it sells compute units and has no HTTP address to give.
-	Endpoint   string
-	PublicKey  ed25519.PublicKey
-	PeerID     string
-	ReceivedAt time.Time
+	Endpoint string
+	// Attestation is the maintainer's signed statement about this seller, as it
+	// arrived. Carried UNVERIFIED on purpose: verifying it needs the maintainer
+	// the reader's own chain names, which the exchange does not hold, and a
+	// registry that stored a verdict would be storing a decision taken against a
+	// maintainer that may since have rotated. The listing path checks it.
+	Attestation *OperatorAttestation
+	PublicKey   ed25519.PublicKey
+	PeerID      string
+	ReceivedAt  time.Time
 	// FirstSeen is when this node first heard from that announcer, and
 	// Announcements counts how many it has accepted since. Both are observed,
 	// never announced.
@@ -88,11 +94,12 @@ type RemoteProvider struct {
 // the transport closes on ctx cancellation, so cancelling the node context stops
 // the Exchange cleanly with no separate stop signal required.
 type Exchange struct {
-	transport   Transport
-	settled     *token.SettledLedger
-	localMarket *market.Market
-	peerID      string
-	endpoint    string
+	transport    Transport
+	settled      *token.SettledLedger
+	localMarket  *market.Market
+	peerID       string
+	endpoint     string
+	attestations map[string]*OperatorAttestation
 
 	// providerTTL bounds how long a remote provider stays discoverable after its
 	// last announcement.
@@ -134,6 +141,10 @@ type Config struct {
 	// Empty means this node announces no address: it is selling compute units,
 	// or its operator has not published one yet.
 	Endpoint string
+	// Attestations are the maintainer-signed statements this node presents, by
+	// provider id. A node running first-party capacity carries them; every other
+	// node has none, which is the ordinary case.
+	Attestations map[string]*OperatorAttestation
 	// ProviderTTL overrides DefaultProviderTTL when non-zero.
 	ProviderTTL time.Duration
 	// Now overrides the wall clock when non-nil (used by tests).
@@ -164,14 +175,15 @@ func New(cfg Config) (*Exchange, error) {
 		nowFn = time.Now
 	}
 	return &Exchange{
-		transport:   cfg.Transport,
-		settled:     cfg.Settled,
-		localMarket: cfg.Market,
-		peerID:      cfg.PeerID,
-		endpoint:    cfg.Endpoint,
-		providerTTL: ttl,
-		now:         nowFn,
-		providers:   make(map[string]RemoteProvider),
+		transport:    cfg.Transport,
+		settled:      cfg.Settled,
+		localMarket:  cfg.Market,
+		peerID:       cfg.PeerID,
+		endpoint:     cfg.Endpoint,
+		attestations: cfg.Attestations,
+		providerTTL:  ttl,
+		now:          nowFn,
+		providers:    make(map[string]RemoteProvider),
 	}, nil
 }
 
@@ -289,6 +301,7 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 		},
 		NodeID:        ann.NodeID,
 		Endpoint:      ann.Endpoint,
+		Attestation:   ann.Attestation,
 		PublicKey:     ann.PublicKey,
 		PeerID:        ann.PeerID,
 		ReceivedAt:    now,
@@ -410,6 +423,7 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, node *token.Account, p 
 	ann := ProviderAnnouncement{
 		NodeID:            node.AccountID(),
 		Endpoint:          e.endpoint,
+		Attestation:       e.attestationFor(p.ID),
 		ProviderID:        p.ID,
 		PublicKey:         node.PublicKey,
 		Capacity:          p.Capacity,
@@ -598,4 +612,13 @@ func (e *Exchange) isUnavailableAt(rp RemoteProvider, now time.Time) bool {
 	receiptStale := now.Sub(rp.ReceivedAt) > e.providerTTL
 	quoteExpired := rp.ValidUntil.IsZero() || !rp.ValidUntil.After(now)
 	return receiptStale || quoteExpired
+}
+
+// attestationFor returns the maintainer's statement about one of this node's
+// providers, if it holds one.
+func (e *Exchange) attestationFor(providerID string) *OperatorAttestation {
+	if e.attestations == nil {
+		return nil
+	}
+	return e.attestations[providerID]
 }

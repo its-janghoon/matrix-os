@@ -56,6 +56,13 @@ type providerRow struct {
 	// good service - nothing here can be - but capital a listing costs.
 	Bonded             uint64 `json:"bonded,omitempty"`
 	BondWithdrawableAt uint64 `json:"bond_withdrawable_at,omitempty"`
+	// Whether the node being ASKED verified a maintainer signature saying it
+	// operates this seller, and the operator that signature names.
+	//
+	// An identity claim and nothing more: not a rating, and worth nothing to a
+	// reader who does not trust that maintainer account.
+	OperatorAttested bool   `json:"operator_attested,omitempty"`
+	OperatorName     string `json:"operator_name,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -88,6 +95,9 @@ func providerToRow(p *marketv1.Provider) providerRow {
 
 		Bonded:             p.GetBonded(),
 		BondWithdrawableAt: p.GetBondWithdrawableAt(),
+
+		OperatorAttested: p.GetOperatorAttested(),
+		OperatorName:     p.GetOperatorName(),
 	}
 }
 
@@ -310,7 +320,7 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 		return nil
 	}
 	tw := newTabWriter(w)
-	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tBONDED\tPAID\tPAYERS\tSEEN FOR\tHEARD\tNODE")
+	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tBONDED\tPAID\tPAYERS\tVOUCHED BY\tSEEN FOR\tHEARD")
 	for _, r := range rows {
 		endpoint := r.Endpoint
 		if endpoint == "" {
@@ -318,11 +328,17 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 			// discoverable for compute units and cannot take an inference request.
 			endpoint = "(no address; compute only)"
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%d\t%s\n",
+		vouched := "-"
+		if r.OperatorAttested {
+			vouched = r.OperatorName
+			if vouched == "" {
+				vouched = "attested"
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\n",
 			endpoint, strings.Join(r.Models, ","), r.PricePerUnit, r.Available,
-			r.Bonded, r.SettledPayments, r.SettledPayers,
-			seenFor(r.FirstSeen, now), r.AnnouncementsHeard,
-			shortID(r.NodeID))
+			r.Bonded, r.SettledPayments, r.SettledPayers, vouched,
+			seenFor(r.FirstSeen, now), r.AnnouncementsHeard)
 	}
 	if err := tw.Flush(); err != nil {
 		return err
@@ -341,6 +357,11 @@ func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now ti
 	fmt.Fprintln(w, "honest and cannot be slashed for bad service - no protocol can judge whether a")
 	fmt.Fprintln(w, "completion was really the model advertised. What it does is make a LISTING cost")
 	fmt.Fprintln(w, "money, which is what stops one attacker filling this table with fake sellers.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "VOUCHED BY means the maintainer this chain names signed that it operates that")
+	fmt.Fprintln(w, "node - checked here against consensus state, not taken from the announcement.")
+	fmt.Fprintln(w, "It is an identity claim, not a rating: it does not say those sellers answer")
+	fmt.Fprintln(w, "better, and it is worth nothing to you if you do not trust that account.")
 	return nil
 }
 
