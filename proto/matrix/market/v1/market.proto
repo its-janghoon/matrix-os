@@ -395,6 +395,22 @@ message GetBalanceResponse {
     string account = 1;
     // Current balance in credits.
     uint64 balance = 2;
+    // The nonce this account should use for its next signed transaction, which
+    // is what eth_getTransactionCount reports the successor of.
+    //
+    // It is served here because a client cannot compute it. The obvious way -
+    // counting the account's transactions in ListTransactions - is wrong for
+    // any account that has used a RESERVED recipient: bonds, stake withdrawals
+    // and bridge locks are protocol state rather than user payments, so that
+    // list deliberately omits them and the count stops advancing. A bridge lock
+    // derives its lock id from this nonce, so two locks of the same amount to
+    // the same recipient then collided, the second overwrote the first's
+    // record, and the native it escrowed became unmintable.
+    //
+    // Zero is ambiguous only in the harmless direction: a brand-new account and
+    // an old node that does not set this field both read as 0, which is the
+    // same answer counting would have given.
+    uint64 next_nonce = 3;
 }
 
 // GetTransactionRequest reads one committed transfer from the consensus

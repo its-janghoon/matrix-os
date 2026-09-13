@@ -395,7 +395,11 @@ func (s *Service) GetBalance(ctx context.Context, req *marketv1.GetBalanceReques
 	if err != nil {
 		return nil, mapMarketError(err)
 	}
-	return &marketv1.GetBalanceResponse{Account: req.GetAccount(), Balance: bal}, nil
+	resp := &marketv1.GetBalanceResponse{Account: req.GetAccount(), Balance: bal}
+	if s.transferSettler != nil {
+		resp.NextNonce = s.transferSettler.NextNonce(req.GetAccount())
+	}
+	return resp, nil
 }
 
 // GetTransaction reads a single committed transfer by its stable index. When a

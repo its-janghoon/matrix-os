@@ -334,6 +334,19 @@ func (f *fakeConsensusSettler) History(start uint64, limit int) ([]marketapi.Tra
 	return append([]marketapi.TransferView(nil), out...), total, nil
 }
 
+// NextNonce counts EVERY transfer this fake has settled, including ones to
+// reserved recipients that History hides - which is the distinction that
+// matters, and the one the counting client used to get wrong.
+func (f *fakeConsensusSettler) NextNonce(sender string) uint64 {
+	var n uint64
+	for _, t := range f.history {
+		if t.From == sender {
+			n++
+		}
+	}
+	return n
+}
+
 func (f *fakeConsensusSettler) TransferAt(index uint64) (*marketapi.TransferView, error) {
 	if index >= uint64(len(f.history)) {
 		return nil, marketapi.ErrTransferNotFound
