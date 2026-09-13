@@ -183,48 +183,85 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 // together. That is not theory - it is what the weighted-cluster test hit, as
 // two distinct state digests at height 0, before a single block existed.
 //
-// So the credit is given a fixed place in the log instead. Every node applies it
-// immediately before the block at `target`, and `target` is chosen while no node
-// can move, as a height none of them has reached:
+// So this waits for a moment when the cluster is standing still - every node at
+// the same height with no commit in flight - and credits them all inside it.
+// Both conditions are needed and neither is enough alone:
 //
-//   - a node already standing at `target` is between blocks, so it is credited
-//     here and now, before it applies that block;
-//   - a node still below it applies the credit in its commit path, on the way
-//     past - see the OnCommit wired in newCluster.
+//   - Equal heights, because a node that has applied one more block than another
+//     would be taking the credit at a different point in the same log.
+//   - No commit in flight, because e.mu does NOT cover the apply step:
+//     commitAndApply deliberately runs outside it, and a node inside that
+//     function is midway through changing the balances this is about to add to.
+//     `committing` is the flag that serialises commits, it is set and cleared
+//     under e.mu, and it spans exactly that window.
 //
-// Both routes go through the same exactly-once applier, so the node that crosses
-// `target` while this function is running is credited once, not twice.
+// The credit is also FILED against the height it landed before, so a node that
+// joins later and replays the chain applies it in the same place rather than at
+// genesis - see joinNode. Both routes run through one exactly-once applier, so a
+// node reached by both is credited once.
 func mintAll(t *testing.T, nodes []*testNode, account string, amount uint64) {
 	t.Helper()
 	if len(nodes) == 0 {
 		return
 	}
+	bus := nodes[0].bus
 
-	// Every engine's lock, held across the choice and the filing. e.height is
-	// guarded by e.mu and advanceHeight takes it, so no node can cross the target
-	// between being measured and being credited - which is the one gap that would
-	// leave a node uncredited on both routes.
+	// A still moment is the ordinary state between two blocks, not a rare one,
+	// so this normally succeeds on the first attempt.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		for _, nd := range nodes {
+			nd.engine.mu.Lock()
+		}
+		height, still := nodes[0].engine.height, true
+		for _, nd := range nodes {
+			if nd.engine.committing || nd.engine.height != height {
+				still = false
+				break
+			}
+		}
+		if still {
+			bus.fileSeed(height, account, amount)
+			var err error
+			for _, nd := range nodes {
+				if e := nd.seeds.beforeBlock(height); e != nil && err == nil {
+					err = e
+				}
+			}
+			for _, nd := range nodes {
+				nd.engine.mu.Unlock()
+			}
+			if err != nil {
+				t.Fatalf("credit: %v", err)
+			}
+			return
+		}
+		for _, nd := range nodes {
+			nd.engine.mu.Unlock()
+		}
+		if !time.Now().Before(deadline) {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// The cluster never stood still - a test that deliberately impairs the
+	// network, or one whose nodes are permanently at different heights. Filing
+	// the credit one height ahead of the furthest node still gives it a single
+	// position in the log: no node has committed that block yet, so every one of
+	// them applies the credit on the way past, in its own commit path. The money
+	// is not there until that block commits, which is the price of never finding
+	// a still moment to use.
 	for _, nd := range nodes {
 		nd.engine.mu.Lock()
 	}
-	var target uint64
+	var ahead uint64
 	for _, nd := range nodes {
-		if nd.engine.height > target {
-			target = nd.engine.height
+		if nd.engine.height > ahead {
+			ahead = nd.engine.height
 		}
 	}
-	nodes[0].bus.fileSeed(target, account, amount)
-	for _, nd := range nodes {
-		if nd.engine.height != target {
-			continue
-		}
-		if err := nd.seeds.beforeBlock(target); err != nil {
-			for _, other := range nodes {
-				other.engine.mu.Unlock()
-			}
-			t.Fatalf("credit: %v", err)
-		}
-	}
+	bus.fileSeed(ahead+1, account, amount)
 	for _, nd := range nodes {
 		nd.engine.mu.Unlock()
 	}
