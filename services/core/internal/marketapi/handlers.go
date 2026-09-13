@@ -269,7 +269,15 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 	}
 	out := make([]*marketv1.Provider, 0, len(locals))
 	for _, p := range locals {
-		out = append(out, localProviderToProto(p))
+		entry := localProviderToProto(p)
+		// The stake and settled history are read off this node's own chain by
+		// payout account, so they say the same thing about a local provider as
+		// about a remote one. Left off, an operator opening their own directory
+		// saw their own listing reporting no stake and no payments, which is
+		// both wrong and the most discouraging possible thing to show them.
+		s.attachEarnings(entry)
+		s.attachLocalAttestation(entry)
+		out = append(out, entry)
 	}
 
 	if req.GetIncludeRemote() && s.exchange != nil {
@@ -738,4 +746,29 @@ func (s *Service) attachAttestation(p *marketv1.Provider, rp marketexchange.Remo
 	}
 	p.OperatorAttested = true
 	p.OperatorName = rp.Attestation.Operator
+}
+
+// attachLocalAttestation does the same for a provider this node runs itself.
+//
+// Holding the signed file is not what earns the badge: it is verified against
+// the maintainer this node's own chain names, on the same code path and with the
+// same refusals as a stranger's. A node whose attestation has expired, or was
+// signed by somebody the chain no longer names, does not get to badge itself.
+func (s *Service) attachLocalAttestation(p *marketv1.Provider) {
+	if s.earnings == nil || s.exchange == nil || p == nil || p.GetId() == "" {
+		return
+	}
+	att, selfNodeID := s.exchange.SelfAttestation(p.GetId())
+	if att == nil || selfNodeID == "" {
+		return
+	}
+	maintainer := s.earnings.Maintainer()
+	if maintainer == "" {
+		return
+	}
+	if err := att.VerifyFor(selfNodeID, p.GetId(), maintainer, time.Now().UTC()); err != nil {
+		return
+	}
+	p.OperatorAttested = true
+	p.OperatorName = att.Operator
 }

@@ -101,6 +101,17 @@ type Exchange struct {
 	endpoint     string
 	attestations map[string]*OperatorAttestation
 
+	// selfNodeID is the account this node signs its own announcements with,
+	// learned the first time it signs one. Gossip delivers a message back to its
+	// own sender, so without this a node discovers ITSELF and its own provider
+	// appears twice in its directory: once as the local provider it is actually
+	// running, and again as a stranger it believes it heard about.
+	//
+	// It is matched on the node id rather than the peer id because a node id is
+	// bound to the key that signed the announcement, so nobody else can claim it
+	// and make this node discard their listing.
+	selfNodeID string
+
 	// providerTTL bounds how long a remote provider stays discoverable after its
 	// last announcement.
 	providerTTL time.Duration
@@ -267,6 +278,13 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 	key := offerKey(ann.NodeID, ann.ProviderID)
 
 	e.mu.Lock()
+	if e.selfNodeID != "" && ann.NodeID == e.selfNodeID {
+		// Our own announcement, back from the topic we published it to. The
+		// provider it describes is already in the local market, and recording it
+		// here would list it a second time as something discovered.
+		e.mu.Unlock()
+		return
+	}
 	firstSeen := now
 	var heard uint64
 	if existing, ok := e.providers[key]; ok {
@@ -442,6 +460,9 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, node *token.Account, p 
 	if err := ann.Sign(node.PrivateKey); err != nil {
 		return err
 	}
+	e.mu.Lock()
+	e.selfNodeID = ann.NodeID
+	e.mu.Unlock()
 	if err := ann.VerifyAt(now); err != nil {
 		return fmt.Errorf("marketexchange: invalid provider announcement: %w", err)
 	}
@@ -453,6 +474,23 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, node *token.Account, p 
 		return fmt.Errorf("marketexchange: publish announcement: %w", err)
 	}
 	return nil
+}
+
+// SelfAttestation returns the attestation this node presents for one of its own
+// providers, and the node id it announces under.
+//
+// It hands back the raw document rather than a verdict: a node holding a signed
+// file is not entitled to badge itself, and the caller is expected to verify it
+// against the maintainer its own chain names, exactly as it would a stranger's.
+// The node id is returned because that verification is bound to it.
+//
+// An empty node id means this node has not signed an announcement yet, so there
+// is nothing to verify against.
+func (e *Exchange) SelfAttestation(providerID string) (*OperatorAttestation, string) {
+	e.mu.RLock()
+	self := e.selfNodeID
+	e.mu.RUnlock()
+	return e.attestationFor(providerID), self
 }
 
 // SubmitRemoteJob discovers one complete remote-provider snapshot, signs every
