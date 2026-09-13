@@ -648,6 +648,95 @@ func generateAPIKey() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// apiKeysFromConfig builds the credential set a node accepts, from its config
+// and environment.
+//
+// Extracted so that RELOADING and STARTING cannot drift. A reload that assembled
+// keys slightly differently from startup - forgetting the environment key, or
+// naming unnamed entries differently - would hand an operator a node whose
+// accepted credentials silently changed on a signal they expected to be a no-op.
+func apiKeysFromConfig(cfg *Config) ([]*admin.APIKey, error) {
+	if !cfg.Security.EnableACLs {
+		return nil, nil
+	}
+	var keys []*admin.APIKey
+	for i, k := range cfg.Security.APIKeys {
+		if k.Key == "" {
+			return nil, fmt.Errorf("security.api_keys[%d] has no key", i)
+		}
+		name := k.Name
+		if name == "" {
+			name = fmt.Sprintf("config-key-%d", i)
+		}
+		keys = append(keys, &admin.APIKey{
+			Key:     k.Key,
+			Role:    roleFromConfig(k.Role),
+			Name:    name,
+			Account: k.Account,
+		})
+	}
+	// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
+	// of files entirely.
+	if envKey := os.Getenv("MATRIX_ADMIN_API_KEY"); envKey != "" {
+		keys = append(keys, &admin.APIKey{
+			Key:  envKey,
+			Role: admin.RoleAdmin,
+			Name: "env-admin",
+		})
+	}
+	return keys, nil
+}
+
+// ReloadAPIKeys re-reads the node's config file and swaps in the credentials it
+// names, without a restart.
+//
+// WHY THIS EXISTS. Issuing a buyer an API key meant editing the config and
+// restarting the node. On a validator that is not a small thing: the restart is
+// disruptive to a network that is counting on it, so keys got batched, and a
+// developer waiting on one waited for a maintenance window.
+//
+// WHAT IT DELIBERATELY IS NOT. There is no self-serve signup here and no RPC
+// that mints credentials. Who may hold a key, what it may spend and what it
+// costs are product decisions, and a node should not invent them. This removes
+// the restart and nothing else: the operator still decides, in the same file,
+// reviewed the same way.
+//
+// A BAD FILE MUST NOT DISARM THE NODE. The new set is parsed and validated in
+// full before anything is swapped, and on any error the running credentials are
+// left exactly as they were. The alternative - clearing first, then failing to
+// load - locks the operator out of the node they were trying to administer, at
+// the moment they are already holding a broken config.
+func (n *Node) ReloadAPIKeys() error {
+	if n.adminServer == nil {
+		return fmt.Errorf("node is not started")
+	}
+	if n.configPath == "" {
+		return fmt.Errorf("node was not loaded from a config file, so there is nothing to re-read")
+	}
+	cfg, err := LoadConfig(n.configPath)
+	if err != nil {
+		return fmt.Errorf("re-read config: %w", err)
+	}
+	if cfg.Security.EnableACLs != n.config.Security.EnableACLs {
+		// Turning authentication on or off changes which servers require a
+		// credential at all, and those were wired at start. Refusing is honest;
+		// reporting success while half the surfaces kept the old rule is not.
+		return fmt.Errorf("security.enable_acls changed, which needs a restart rather than a reload")
+	}
+	keys, err := apiKeysFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("the new config is not usable, so the running keys were kept: %w", err)
+	}
+	if cfg.Security.EnableACLs && len(keys) == 0 {
+		return fmt.Errorf("the new config names no API keys, which would refuse every RPC; the running keys were kept")
+	}
+	if err := n.adminServer.GetAuthenticator().ReplaceKeys(keys); err != nil {
+		return fmt.Errorf("the new keys were rejected, so the running keys were kept: %w", err)
+	}
+	n.config.Security.APIKeys = cfg.Security.APIKeys
+	return nil
+}
+
 // roleFromConfig maps a configured role name to an admin role, defaulting to
 // admin for an unset value: a single-operator node that bothered to write a key
 // means it to work.
@@ -723,9 +812,12 @@ func metadataFromHTTPHeader(h http.Header) metadata.MD {
 
 // Node represents a Matrix node instance
 type Node struct {
-	ctx                   context.Context
-	cancel                context.CancelFunc
-	config                *Config
+	ctx    context.Context
+	cancel context.CancelFunc
+	config *Config
+	// configPath is the file this node was loaded from, kept so a reload reads
+	// the same file rather than a path passed in again from somewhere else.
+	configPath            string
 	p2pHost               *p2p.Host
 	transport             *transport.Transport
 	eventBus              *transport.EventBus
@@ -925,8 +1017,13 @@ func Initialize(configPath string) error {
 }
 
 // New creates a new Node instance
-func New(ctx context.Context, configPath string) (*Node, error) {
-	// Load configuration
+// LoadConfig reads and defaults a node config file.
+//
+// Split out of New so that a RELOAD reads a config exactly the way a start
+// does. Two copies of "read, parse, apply defaults" drift, and a config that
+// means one thing at boot and another on a signal is the worst kind of bug to
+// be holding during an incident.
+func LoadConfig(configPath string) (*Config, error) {
 	config := &Config{}
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -956,16 +1053,25 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
 	}
+	return config, nil
+}
+
+func New(ctx context.Context, configPath string) (*Node, error) {
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 
 	return &Node{
-		ctx:      nodeCtx,
-		cancel:   cancel,
-		config:   config,
-		agents:   make(map[string]*agent.Agent),
-		souls:    make(map[string]*soul.Soul),
-		matrices: make(map[string]*matrix.Matrix),
+		ctx:        nodeCtx,
+		cancel:     cancel,
+		config:     config,
+		configPath: configPath,
+		agents:     make(map[string]*agent.Agent),
+		souls:      make(map[string]*soul.Soul),
+		matrices:   make(map[string]*matrix.Matrix),
 	}, nil
 }
 
@@ -1345,40 +1451,17 @@ func (n *Node) Start() error {
 	n.startBootstrapDialer()
 
 	// Initialize admin server with authentication if enabled
-	var apiKeys []*admin.APIKey
-	if n.config.Security.EnableACLs {
-		for i, k := range n.config.Security.APIKeys {
-			if k.Key == "" {
-				return fmt.Errorf("security.api_keys[%d] has no key", i)
-			}
-			name := k.Name
-			if name == "" {
-				name = fmt.Sprintf("config-key-%d", i)
-			}
-			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:     k.Key,
-				Role:    roleFromConfig(k.Role),
-				Name:    name,
-				Account: k.Account,
-			})
-		}
-		// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
-		// of files entirely.
-		if envKey := os.Getenv("MATRIX_ADMIN_API_KEY"); envKey != "" {
-			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:  envKey,
-				Role: admin.RoleAdmin,
-				Name: "env-admin",
-			})
-		}
-		if len(apiKeys) == 0 {
-			// Worth shouting about: with ACLs on and no valid key, every RPC on
-			// every surface answers "authentication required" and the node cannot
-			// be driven at all - including by its own CLI.
-			fmt.Printf("Warning: security.enable_acls is true but no API keys are configured, " +
-				"so every RPC will refuse. Add one under security.api_keys, set " +
-				"MATRIX_ADMIN_API_KEY, or run `matrixd -init` to generate a config with a key.\n")
-		}
+	apiKeys, err := apiKeysFromConfig(n.config)
+	if err != nil {
+		return err
+	}
+	if n.config.Security.EnableACLs && len(apiKeys) == 0 {
+		// Worth shouting about: with ACLs on and no valid key, every RPC on
+		// every surface answers "authentication required" and the node cannot
+		// be driven at all - including by its own CLI.
+		fmt.Printf("Warning: security.enable_acls is true but no API keys are configured, " +
+			"so every RPC will refuse. Add one under security.api_keys, set " +
+			"MATRIX_ADMIN_API_KEY, or run `matrixd -init` to generate a config with a key.\n")
 	}
 
 	adminServer, err := admin.NewServer(admin.Config{

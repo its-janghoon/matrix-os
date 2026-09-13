@@ -25,8 +25,11 @@ const STAKE_EXPLAIN =
   'Capital posted on this chain by the seller, which the chain locks for a minimum number of blocks. It does not make anyone honest and cannot be taken for bad service - what it does is make a listing cost money, so one attacker cannot fill this table with fake sellers.';
 const SETTLED_EXPLAIN =
   'Settled transfers on the chain the answering node holds, not claims by the seller. A settlement is an ordinary transfer, so this counts every payment the account received - including from itself. Payers is the harder one to inflate: it costs a funded account each.';
+// A unit is defined by the protocol and documented in the consumer runbook; the
+// page had been quoting a price in a denomination it never named, which is not
+// a price a buyer can compare against anything.
 const PRICE_EXPLAIN =
-  'Quoted per million units, because the per-unit price is a few billionths of a MATRIX and leading zeros defeat comparison. The conversion is exact.';
+  'One unit is one token - prompt and completion summed - as reported by the model server that did the work. Quoted per million units, because the per-unit price is a few billionths of a MATRIX and leading zeros defeat comparison. The conversion is exact.';
 
 export function SellerTable({
   sellers,

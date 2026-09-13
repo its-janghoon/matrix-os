@@ -169,6 +169,25 @@ inference:
       models:
         - "<the-served-model-name>"
 
+      # OPTIONAL, and only for capacity the NETWORK'S OWN MAINTAINER runs.
+      #
+      # A path to a file signed by `matrix attest issue`, saying that the
+      # account this chain names as its maintainer operates this node. Readers
+      # verify it against the maintainer THEIR own chain names, so it cannot be
+      # forged and it is worthless signed by anybody else. It names this node
+      # and this provider id, so it cannot be lifted onto another listing, and
+      # it expires - re-signing is a scheduled chore on purpose.
+      #
+      # It is an IDENTITY claim and not a rating: it says who is answerable, not
+      # that this seller answers better. A third-party provider leaves it out;
+      # an attestation that fails any check simply leaves the seller unbadged,
+      # which is the same place an absent one leaves it.
+      #
+      # scripts/first-party-provider.sh does this whole file, in the one order
+      # that works: the attestation names the node id, the node id lives in the
+      # store, and the store only exists once the config points at it.
+      # attestation: "/etc/matrix/attestation.json"
+
       # A CONCURRENCY budget in token units, not a monthly quota. Each job
       # reserves its estimate up front and the reservation returns on completion
       # or expiry. Derive it from what the GPU actually runs at once
