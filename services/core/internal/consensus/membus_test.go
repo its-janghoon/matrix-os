@@ -90,6 +90,20 @@ func newSeedApplier(bus *memBus, ledger *market.Ledger) *seedApplier {
 	return &seedApplier{bus: bus, ledger: ledger, applied: map[int]bool{}}
 }
 
+// appliedAt reports whether every credit filed against `height` has been applied
+// to this node's ledger.
+func (s *seedApplier) appliedAt(height uint64) bool {
+	seeds := s.bus.filedSeeds()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i, seed := range seeds {
+		if seed.height == height && !s.applied[i] {
+			return false
+		}
+	}
+	return true
+}
+
 // beforeBlock applies every credit filed against a height at or below `height`,
 // which is what a node whose NEXT block is `height` owes.
 //
