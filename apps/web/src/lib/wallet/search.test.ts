@@ -14,6 +14,7 @@ function seller(over: Partial<Seller> = {}): Seller {
     bonded: 0n,
     settledPayments: 0n,
     settledPayers: 0n,
+    settledReceived: 0n,
     origin: 'remote',
     operatorAttested: false,
     operatorName: '',
