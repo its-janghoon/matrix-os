@@ -5,6 +5,7 @@ import { useCallback, useEffect, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
 import { DEFAULT_ENDPOINT, listSellers, reportProblem, type Seller } from '@/lib/wallet/node';
+import { searchSellers, sellersByModel, type ModelRow, type SortKey } from '@/lib/wallet/search';
 import { bond, bondedFor, withdrawBond } from '@/lib/wallet/stake';
 import { browserSigner } from '@/lib/wallet/browserSigner';
 import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
@@ -43,6 +44,12 @@ export default function MarketPage() {
   const [problem, setProblem] = useState('');
   const [signer, setSigner] = useState<Signer | null>(null);
   const [reloads, setReloads] = useState(0);
+
+  const [view, setView] = useState<'sellers' | 'models'>('sellers');
+  const [text, setText] = useState('');
+  const [minBond, setMinBond] = useState('');
+  const [reachableOnly, setReachableOnly] = useState(true);
+  const [sort, setSort] = useState<SortKey>('price');
 
   // The `live` guard is not ceremony. Changing the node re-runs this, and
   // without it a slow answer from the PREVIOUS node can land after a fast one
@@ -88,11 +95,18 @@ export default function MarketPage() {
     };
   }, []);
 
+  const shown = searchSellers(sellers, {
+    text,
+    minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
+    reachableOnly,
+    sort,
+  });
+
   return (
     <>
       <Navigation />
       <main className='min-h-screen bg-black px-4 pb-16 pt-24'>
-        <div className='mx-auto max-w-5xl space-y-6'>
+        <div className='mx-auto max-w-6xl space-y-6'>
           <header>
             <h1 className='text-2xl font-semibold text-gray-100'>Who is selling</h1>
             <p className='mt-2 text-sm text-gray-400'>
@@ -127,7 +141,26 @@ export default function MarketPage() {
             <p className='rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300'>{problem}</p>
           ) : null}
 
-          <SellerTable sellers={sellers} loading={loading} endpoint={endpoint} />
+          <Filters
+            view={view}
+            setView={setView}
+            text={text}
+            setText={setText}
+            minBond={minBond}
+            setMinBond={setMinBond}
+            reachableOnly={reachableOnly}
+            setReachableOnly={setReachableOnly}
+            sort={sort}
+            setSort={setSort}
+            total={sellers.length}
+            showing={shown.length}
+          />
+
+          {view === 'models' ? (
+            <ModelTable rows={sellersByModel(sellers)} onPick={(m) => { setText(m); setView('sellers'); }} />
+          ) : (
+            <SellerTable sellers={shown} loading={loading} endpoint={endpoint} searched={text.trim() !== ''} />
+          )}
           <WhatTheseNumbersMean />
           <StakePanel endpoint={endpoint} signer={signer} onChanged={refresh} setSigner={setSigner} />
         </div>
@@ -140,10 +173,12 @@ function SellerTable({
   sellers,
   loading,
   endpoint,
+  searched,
 }: {
   sellers: Seller[];
   loading: boolean;
   endpoint: string;
+  searched: boolean;
 }) {
   if (loading && sellers.length === 0) {
     return <p className='text-sm text-gray-400'>Reading the directory...</p>;
@@ -152,15 +187,17 @@ function SellerTable({
     return (
       <div className={CARD}>
         <p className='text-sm text-gray-400'>
-          This node has heard nothing. Either nobody is selling, or it has no peers to hear them from.
+          {searched
+            ? 'Nothing here matches. A directory only holds what THIS node has heard, so a seller you know of may simply not have reached it.'
+            : 'This node has heard nothing. Either nobody is selling, or it has no peers to hear them from.'}
         </p>
       </div>
     );
   }
 
-  const sorted = [...sellers].sort((a, b) =>
-    a.pricePerUnit === b.pricePerUnit ? a.id.localeCompare(b.id) : a.pricePerUnit < b.pricePerUnit ? -1 : 1,
-  );
+  // Already ordered by the query; re-sorting here would silently override the
+  // column the reader chose.
+  const sorted = sellers;
 
   return (
     <div className={`${CARD} overflow-x-auto`}>
@@ -380,5 +417,169 @@ function StakePanel({
       {status !== '' ? <p className='text-sm text-emerald-400/80'>{status}</p> : null}
       {problem !== '' ? <p className='text-sm text-red-300'>{problem}</p> : null}
     </section>
+  );
+}
+
+/**
+ * The controls, and a count of what they left.
+ *
+ * The count is not decoration. A filter that quietly removes everything looks
+ * identical to a network where nobody is selling, and a reader who cannot tell
+ * those apart goes looking for a problem that is on their own screen.
+ */
+function Filters({
+  view,
+  setView,
+  text,
+  setText,
+  minBond,
+  setMinBond,
+  reachableOnly,
+  setReachableOnly,
+  sort,
+  setSort,
+  total,
+  showing,
+}: {
+  view: 'sellers' | 'models';
+  setView: (v: 'sellers' | 'models') => void;
+  text: string;
+  setText: (v: string) => void;
+  minBond: string;
+  setMinBond: (v: string) => void;
+  reachableOnly: boolean;
+  setReachableOnly: (v: boolean) => void;
+  sort: SortKey;
+  setSort: (v: SortKey) => void;
+  total: number;
+  showing: number;
+}) {
+  const tab = (active: boolean) =>
+    `rounded-lg px-3 py-1.5 text-sm ${active ? 'bg-white text-black' : 'border border-gray-700 text-gray-300'}`;
+
+  return (
+    <section className={`${CARD} space-y-4`}>
+      <div className='flex flex-wrap items-center gap-2'>
+        <button className={tab(view === 'sellers')} onClick={() => setView('sellers')}>
+          Sellers
+        </button>
+        <button className={tab(view === 'models')} onClick={() => setView('models')}>
+          Models
+        </button>
+        <span className='ml-auto font-mono text-xs text-gray-500'>
+          {view === 'sellers' ? `${showing} of ${total} shown` : `${total} listings`}
+        </span>
+      </div>
+
+      {view === 'sellers' ? (
+        <>
+          <input
+            className={FIELD}
+            placeholder='search by model, address, node or payout account'
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            spellCheck={false}
+          />
+          <div className='flex flex-wrap items-center gap-3 text-xs text-gray-400'>
+            <label className='flex items-center gap-2'>
+              <span className='uppercase tracking-wide text-gray-500'>Sort</span>
+              <select
+                className='rounded border border-gray-700 bg-black/60 px-2 py-1 text-gray-200 outline-none'
+                value={sort}
+                onChange={(e) => setSort(e.target.value as SortKey)}
+              >
+                <option value='price'>cheapest first</option>
+                <option value='staked'>most staked</option>
+                <option value='paid'>most payments</option>
+                <option value='payers'>most payers</option>
+              </select>
+            </label>
+            <label className='flex items-center gap-2'>
+              <span className='uppercase tracking-wide text-gray-500'>Min stake</span>
+              <input
+                className='w-40 rounded border border-gray-700 bg-black/60 px-2 py-1 font-mono text-gray-200 outline-none'
+                placeholder='0'
+                value={minBond}
+                onChange={(e) => setMinBond(e.target.value.replace(/[^0-9]/g, ''))}
+                spellCheck={false}
+              />
+            </label>
+            <label className='flex items-center gap-2'>
+              <input
+                type='checkbox'
+                checked={reachableOnly}
+                onChange={(e) => setReachableOnly(e.target.checked)}
+              />
+              {/*
+                On by default: a seller with no address cannot take a prompt, so
+                showing one in a table whose last column says "Buy here" offers
+                something that does not exist.
+              */}
+              Only sellers that can take a prompt
+            </label>
+          </div>
+        </>
+      ) : (
+        <p className='text-xs text-gray-500'>
+          What this node has heard anyone offer, by model. Counts only sellers with an address, because one without it
+          cannot take a prompt - a count including them is a number you cannot act on.
+        </p>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The models view: the question a buyer usually arrives with.
+ *
+ * Most people know the model they want and not the box that will serve it, so
+ * this answers "who has it and what does it cost" before anything about sellers.
+ * Picking one drops into the seller list already searched for it.
+ */
+function ModelTable({ rows, onPick }: { rows: ModelRow[]; onPick: (model: string) => void }) {
+  if (rows.length === 0) {
+    return (
+      <div className={CARD}>
+        <p className='text-sm text-gray-400'>
+          Nobody reachable is advertising a model. A provider that names none cannot be routed to, which is how every
+          buyer finds a seller.
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className={`${CARD} overflow-x-auto`}>
+      <table className='w-full min-w-[640px] text-left font-mono text-xs'>
+        <thead>
+          <tr className='text-gray-500'>
+            <th className='pb-2 pr-4 font-normal uppercase tracking-wide'>Model</th>
+            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Sellers</th>
+            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Price/unit</th>
+            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Largest stake</th>
+            <th className='pb-2 text-right font-normal uppercase tracking-wide'>Payments</th>
+          </tr>
+        </thead>
+        <tbody className='text-gray-200'>
+          {rows.map((r) => (
+            <tr key={r.model} className='border-t border-gray-800'>
+              <td className='py-2 pr-4'>
+                <button className='underline underline-offset-2 hover:text-white' onClick={() => onPick(r.model)}>
+                  {r.model}
+                </button>
+              </td>
+              <td className='py-2 pr-4 text-right'>{r.sellers}</td>
+              <td className='py-2 pr-4 text-right'>
+                {r.cheapest.toString()}
+                {r.cheapest === r.dearest ? '' : ` - ${r.dearest.toString()}`}
+              </td>
+              <td className={`py-2 pr-4 text-right ${r.topStake === 0n ? 'text-amber-500/80' : ''}`}>
+                {r.topStake.toString()}
+              </td>
+              <td className='py-2 text-right'>{r.settledPayments.toString()}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
