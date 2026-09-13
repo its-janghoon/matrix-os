@@ -54,6 +54,18 @@ export interface ModelOffer {
  * things here a seller cannot simply type: an announcement carries no
  * self-reported uptime or rating, deliberately.
  */
+/**
+ * Which seller a buyer picked, as an identity rather than an address.
+ *
+ * Both halves are needed: one node announces every backend it runs, and two
+ * nodes may settle into the same payout account, so neither id alone names one
+ * offer.
+ */
+export interface SellerChoice {
+  nodeId: string;
+  providerId: string;
+}
+
 export interface Seller {
   id: string;
   nodeId: string;
@@ -84,6 +96,8 @@ export interface Settled {
    * holds the bytes. Empty when the seller's node has no signing key.
    */
   receipt: string;
+  /** Who served it, so a UI can name the seller rather than just the account. */
+  seller: Seller;
 }
 
 export interface NativeTransaction {
@@ -402,12 +416,38 @@ export async function listSellers(endpoint: string, model?: string): Promise<Sel
 export async function sellerFor(
   endpoint: string,
   model: string,
-  opts: { minBond?: bigint } = {},
+  opts: { minBond?: bigint; chosen?: SellerChoice } = {},
 ): Promise<Seller> {
   const minBond = opts.minBond ?? 0n;
-  const candidates = (await listSellers(endpoint, model)).filter(
-    (s) => s.available > 0n && s.endpoint !== '' && s.bonded >= minBond,
-  );
+  const offered = await listSellers(endpoint, model);
+
+  // A CHOSEN seller is resolved from the live directory, never taken on the
+  // caller's word.
+  //
+  // The choice travels as an IDENTITY - which node, which payout account - and
+  // the address to send a prompt to is read back from the directory here. It has
+  // to be: a choice that carried its own endpoint would mean a link someone was
+  // handed could route their prompt at a host of the sender's choosing, with the
+  // page showing the seller they thought they picked. The identity is safe to
+  // carry because it is only a lookup key; the endpoint is not, because it is
+  // where the request goes.
+  if (opts.chosen) {
+    const { nodeId, providerId } = opts.chosen;
+    const match = offered.find((s) => s.nodeId === nodeId && s.id === providerId);
+    if (!match) {
+      throw new NodeError(
+        'not_found',
+        `the seller you picked is not offering ${model} here any more. It may have stopped announcing, ` +
+          'run out of capacity, or never been heard by this node.',
+      );
+    }
+    if (match.endpoint === '') {
+      throw new NodeError('not_found', 'the seller you picked publishes no address, so it cannot take a prompt');
+    }
+    return match;
+  }
+
+  const candidates = offered.filter((s) => s.available > 0n && s.endpoint !== '' && s.bonded >= minBond);
 
   let best: Seller | null = null;
   for (const s of candidates) {
@@ -453,9 +493,9 @@ export async function sellerFor(
 export async function chat(
   endpoint: string,
   signer: Signer,
-  input: { model: string; messages: Message[]; minBond?: bigint },
+  input: { model: string; messages: Message[]; minBond?: bigint; chosen?: SellerChoice },
 ): Promise<Settled> {
-  const seller = await sellerFor(endpoint, input.model, { minBond: input.minBond });
+  const seller = await sellerFor(endpoint, input.model, { minBond: input.minBond, chosen: input.chosen });
   const provider = seller.id;
   // Every call below goes to the SELLER's node, not to the one the directory was
   // read from. Inference is served by the node that owns the provider, so a
@@ -513,6 +553,7 @@ export async function chat(
     promptTokens: num(usage.promptTokens),
     completionTokens: num(usage.completionTokens),
     receipt: decodeReceipt(job.receipt),
+    seller,
   };
 }
 
