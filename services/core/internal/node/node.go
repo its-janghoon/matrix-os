@@ -524,6 +524,15 @@ type InferenceBackendConfig struct {
 	// model and the completion length actually advertised, not generously: the
 	// timeout is also what stops a wedged runner from holding a reservation.
 	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// Attestation is a path to a maintainer-signed statement that this network
+	// operates this seller, published in the announcements for it.
+	//
+	// Only the people running a network have the key that makes one verify, so an
+	// ordinary provider leaves this empty and is listed unbadged - which is the
+	// normal case, not a deficiency. A file that does not parse, or one signed by
+	// a key the chain does not name as maintainer, leaves the seller unbadged
+	// too: readers check it themselves and simply do not vouch.
+	Attestation string `yaml:"attestation"`
 	// HealthCheck turns the readiness probe on or off for this backend. Unset
 	// means ON: a provider that did not think about it gets the protection
 	// rather than the silent failure it replaced.
@@ -1101,12 +1110,17 @@ func (n *Node) Start() error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
 	}
+	attestations, err := loadAttestations(n.config.Inference.Backends)
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
+	}
 	exchange, err := marketexchange.New(marketexchange.Config{
-		Transport: n.transport,
-		Settled:   settled,
-		Market:    n.market,
-		PeerID:    n.p2pHost.GetPeerID().String(),
-		Endpoint:  endpoint,
+		Transport:    n.transport,
+		Settled:      settled,
+		Market:       n.market,
+		PeerID:       n.p2pHost.GetPeerID().String(),
+		Endpoint:     endpoint,
+		Attestations: attestations,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)

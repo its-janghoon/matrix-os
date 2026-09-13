@@ -27,12 +27,26 @@ export interface SellerQuery {
   reachableOnly?: boolean;
   /** Hide sellers with no capacity left to reserve. */
   withCapacityOnly?: boolean;
+  /**
+   * Only sellers the answering node verified a maintainer signature for.
+   *
+   * Off by default, and it matters that it is: defaulting a marketplace to its
+   * own operator's sellers would make every other listing furniture, and the
+   * badge is an identity claim rather than a quality one. A reader who wants to
+   * start with capacity the network stands behind can ask for it.
+   */
+  attestedOnly?: boolean;
   sort?: SortKey;
 }
 
 function matchesText(seller: Seller, needle: string): boolean {
   if (needle === '') return true;
-  const hay = [seller.id, seller.nodeId, seller.endpoint, ...seller.models].join(' ').toLowerCase();
+  // The operator name is searchable: a reader told "use the ones our team runs"
+  // looks for that name, and it is a signed field rather than a label a seller
+  // chose for itself.
+  const hay = [seller.id, seller.nodeId, seller.endpoint, seller.operatorName, ...seller.models]
+    .join(' ')
+    .toLowerCase();
   // Every term must match, so adding a word narrows rather than widens - which
   // is what a reader typing a second word means by it.
   return needle
@@ -76,6 +90,7 @@ export function searchSellers(sellers: Seller[], query: SellerQuery = {}): Selle
     if (s.bonded < minBond) return false;
     if (query.reachableOnly && s.endpoint === '') return false;
     if (query.withCapacityOnly && s.available === 0n) return false;
+    if (query.attestedOnly && !s.operatorAttested) return false;
     return true;
   });
 
@@ -96,6 +111,8 @@ export interface ModelRow {
   /** The largest stake behind any seller of it, and the total settled payments. */
   topStake: bigint;
   settledPayments: bigint;
+  /** How many of its sellers the answering node verified an attestation for. */
+  attested: number;
 }
 
 /**
@@ -124,6 +141,7 @@ export function sellersByModel(sellers: Seller[]): ModelRow[] {
           dearest: s.pricePerUnit,
           topStake: s.bonded,
           settledPayments: s.settledPayments,
+          attested: s.operatorAttested ? 1 : 0,
         });
         continue;
       }
@@ -132,6 +150,7 @@ export function sellersByModel(sellers: Seller[]): ModelRow[] {
       if (s.pricePerUnit > row.dearest) row.dearest = s.pricePerUnit;
       if (s.bonded > row.topStake) row.topStake = s.bonded;
       row.settledPayments += s.settledPayments;
+      if (s.operatorAttested) row.attested += 1;
     }
   }
   return [...rows.values()].sort((a, b) => a.model.localeCompare(b.model));

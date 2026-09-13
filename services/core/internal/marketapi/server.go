@@ -228,6 +228,15 @@ type EarningsReader interface {
 	// the point of a bond is that it is capital somebody actually parted with.
 	// Every node holds the chain that says so.
 	Bonded(account string) (amount, withdrawableAt uint64, err error)
+	// Maintainer returns the account this node's chain currently names as the
+	// network's maintainer, or "" when it names none.
+	//
+	// It is the anchor an operator attestation is checked against, and it has to
+	// come from consensus rather than from config for the same reason the
+	// balances do: it is rotatable by a committed transaction, and a listing that
+	// trusted a startup value would keep vouching for a key the chain has moved
+	// on from.
+	Maintainer() string
 }
 
 // BridgeSnapshot is the marketapi-facing shape of a bridge reconciliation

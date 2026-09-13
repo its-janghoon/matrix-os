@@ -77,6 +77,21 @@ export interface Seller {
   settledPayments: bigint;
   settledPayers: bigint;
   origin: 'local' | 'remote';
+  /**
+   * Whether the node being ASKED verified a maintainer signature saying it
+   * operates this seller.
+   *
+   * Computed by that node against the maintainer its own chain names, never
+   * taken from the announcement - a seller can put any bytes in one, and the
+   * only thing that makes them mean anything is a signature check against
+   * consensus state.
+   *
+   * It is an identity claim and nothing more. A reader who does not trust that
+   * maintainer account learns nothing from it, which is the correct outcome.
+   */
+  operatorAttested: boolean;
+  /** Who the attestation names. Empty unless operatorAttested. */
+  operatorName: string;
 }
 
 /** What a completed exchange cost, so a UI can show the bill it just paid. */
@@ -391,6 +406,8 @@ export async function listSellers(endpoint: string, model?: string): Promise<Sel
       settledPayments: big(p.settledPayments),
       settledPayers: big(p.settledPayers),
       origin: remote ? 'remote' : 'local',
+      operatorAttested: p.operatorAttested === true,
+      operatorName: str(p.operatorName),
     });
   }
   return sellers;

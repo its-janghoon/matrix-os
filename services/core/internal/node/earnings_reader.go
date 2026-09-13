@@ -44,3 +44,16 @@ func (e engineEarnings) Bonded(account string) (amount, withdrawableAt uint64, e
 	}
 	return amount, at, nil
 }
+
+// Maintainer returns the account the chain currently names as maintainer.
+//
+// From consensus state, not from config: the account is rotatable by a committed
+// transaction, so a listing reading a startup value would go on vouching for a
+// key the chain has moved on from - which is precisely the case where a stale
+// badge does harm.
+func (e engineEarnings) Maintainer() string {
+	if e.engine == nil {
+		return ""
+	}
+	return e.engine.MaintainerAccountInForce()
+}

@@ -49,6 +49,7 @@ export default function MarketPage() {
   const [text, setText] = useState('');
   const [minBond, setMinBond] = useState('');
   const [reachableOnly, setReachableOnly] = useState(true);
+  const [attestedOnly, setAttestedOnly] = useState(false);
   const [sort, setSort] = useState<SortKey>('price');
 
   // The `live` guard is not ceremony. Changing the node re-runs this, and
@@ -99,6 +100,7 @@ export default function MarketPage() {
     text,
     minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
     reachableOnly,
+    attestedOnly,
     sort,
   });
 
@@ -150,6 +152,8 @@ export default function MarketPage() {
             setMinBond={setMinBond}
             reachableOnly={reachableOnly}
             setReachableOnly={setReachableOnly}
+            attestedOnly={attestedOnly}
+            setAttestedOnly={setAttestedOnly}
             sort={sort}
             setSort={setSort}
             total={sellers.length}
@@ -220,7 +224,20 @@ function SellerTable({
                 {s.endpoint === '' ? (
                   <span className='text-gray-600'>no address; compute only</span>
                 ) : (
-                  s.endpoint
+                  <span className='flex items-center gap-2'>
+                    {s.endpoint}
+                    {s.operatorAttested ? (
+                      // Titled with what was actually checked. A badge whose
+                      // meaning a reader has to guess becomes "this one is
+                      // good", which is the one thing it does not say.
+                      <span
+                        className='rounded border border-sky-500/40 px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-sky-300'
+                        title={`${s.operatorName} - the maintainer this chain names signed that it operates this node. An identity claim, not a rating.`}
+                      >
+                        {s.operatorName || 'attested'}
+                      </span>
+                    ) : null}
+                  </span>
                 )}
               </td>
               <td className='py-2 pr-4 text-gray-400'>{s.models.join(', ') || '-'}</td>
@@ -280,6 +297,17 @@ function WhatTheseNumbersMean() {
         transfers on the chain this node holds, not claims by the seller. A settlement is an ordinary transfer, so they
         count every payment the account received - a seller can pay itself. Payers is the harder one to inflate: it costs
         a funded account each.
+      </p>
+      <p>
+        <strong className='text-gray-300'>The badge</strong> means one checkable thing: the account this chain names as
+        its maintainer signed a statement that it operates that node. It is an identity claim, not a rating - it does
+        not say those sellers answer better, and a reader who does not trust that account should ignore it. It cannot be
+        forged: the signature is checked against consensus state, which only the current maintainer&apos;s own signature
+        can rotate, and it expires so a badge cannot outlive the arrangement it describes.
+      </p>
+      <p>
+        It exists because a new network is mostly strangers with no settled history to tell them apart, and somebody has
+        to go first. The honest way for the people running one to do that is to run sellers themselves and say so.
       </p>
       <p>
         There is no uptime column because an announcement carries no uptime. A number a seller publishes about its own
@@ -436,6 +464,8 @@ function Filters({
   setMinBond,
   reachableOnly,
   setReachableOnly,
+  attestedOnly,
+  setAttestedOnly,
   sort,
   setSort,
   total,
@@ -449,6 +479,8 @@ function Filters({
   setMinBond: (v: string) => void;
   reachableOnly: boolean;
   setReachableOnly: (v: boolean) => void;
+  attestedOnly: boolean;
+  setAttestedOnly: (v: boolean) => void;
   sort: SortKey;
   setSort: (v: SortKey) => void;
   total: number;
@@ -517,6 +549,15 @@ function Filters({
               */}
               Only sellers that can take a prompt
             </label>
+            <label className='flex items-center gap-2'>
+              {/*
+                Off by default. Defaulting a marketplace to its own operator's
+                sellers would make every other listing furniture, and the badge
+                is an identity claim rather than a quality one.
+              */}
+              <input type='checkbox' checked={attestedOnly} onChange={(e) => setAttestedOnly(e.target.checked)} />
+              Only sellers the network vouches for
+            </label>
           </div>
         </>
       ) : (
@@ -556,7 +597,8 @@ function ModelTable({ rows, onPick }: { rows: ModelRow[]; onPick: (model: string
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Sellers</th>
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Price/unit</th>
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Largest stake</th>
-            <th className='pb-2 text-right font-normal uppercase tracking-wide'>Payments</th>
+            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Payments</th>
+            <th className='pb-2 text-right font-normal uppercase tracking-wide'>Vouched</th>
           </tr>
         </thead>
         <tbody className='text-gray-200'>
@@ -575,7 +617,8 @@ function ModelTable({ rows, onPick }: { rows: ModelRow[]; onPick: (model: string
               <td className={`py-2 pr-4 text-right ${r.topStake === 0n ? 'text-amber-500/80' : ''}`}>
                 {r.topStake.toString()}
               </td>
-              <td className='py-2 text-right'>{r.settledPayments.toString()}</td>
+              <td className='py-2 pr-4 text-right'>{r.settledPayments.toString()}</td>
+              <td className={`py-2 text-right ${r.attested > 0 ? 'text-sky-300' : 'text-gray-600'}`}>{r.attested}</td>
             </tr>
           ))}
         </tbody>
