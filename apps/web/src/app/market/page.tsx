@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useCallback, useEffect, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
@@ -126,7 +127,7 @@ export default function MarketPage() {
             <p className='rounded-lg border border-red-500/30 bg-red-500/5 p-4 text-sm text-red-300'>{problem}</p>
           ) : null}
 
-          <SellerTable sellers={sellers} loading={loading} />
+          <SellerTable sellers={sellers} loading={loading} endpoint={endpoint} />
           <WhatTheseNumbersMean />
           <StakePanel endpoint={endpoint} signer={signer} onChanged={refresh} setSigner={setSigner} />
         </div>
@@ -135,7 +136,15 @@ export default function MarketPage() {
   );
 }
 
-function SellerTable({ sellers, loading }: { sellers: Seller[]; loading: boolean }) {
+function SellerTable({
+  sellers,
+  loading,
+  endpoint,
+}: {
+  sellers: Seller[];
+  loading: boolean;
+  endpoint: string;
+}) {
   if (loading && sellers.length === 0) {
     return <p className='text-sm text-gray-400'>Reading the directory...</p>;
   }
@@ -163,7 +172,8 @@ function SellerTable({ sellers, loading }: { sellers: Seller[]; loading: boolean
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Price/unit</th>
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Staked</th>
             <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Paid</th>
-            <th className='pb-2 text-right font-normal uppercase tracking-wide'>Payers</th>
+            <th className='pb-2 pr-4 text-right font-normal uppercase tracking-wide'>Payers</th>
+            <th className='pb-2 font-normal uppercase tracking-wide'> </th>
           </tr>
         </thead>
         <tbody className='text-gray-200'>
@@ -182,7 +192,33 @@ function SellerTable({ sellers, loading }: { sellers: Seller[]; loading: boolean
                 {s.bonded.toString()}
               </td>
               <td className='py-2 pr-4 text-right'>{s.settledPayments.toString()}</td>
-              <td className='py-2 text-right'>{s.settledPayers.toString()}</td>
+              <td className='py-2 pr-4 text-right'>{s.settledPayers.toString()}</td>
+              <td className='py-2 text-right'>
+                {s.endpoint === '' || s.models.length === 0 ? (
+                  <span className='text-gray-700'>-</span>
+                ) : (
+                  // The choice travels as an IDENTITY, and deliberately not as an
+                  // address: a link carrying its own endpoint would let whoever
+                  // sent it route the recipient's prompt at a host of their
+                  // choosing while the page named the seller they thought they
+                  // picked. The chat page reads the address back from the
+                  // directory itself.
+                  <Link
+                    className='text-gray-300 underline underline-offset-2 hover:text-white'
+                    href={{
+                      pathname: '/chat',
+                      query: {
+                        node: s.nodeId,
+                        provider: s.id,
+                        model: s.models[0],
+                        endpoint,
+                      },
+                    }}
+                  >
+                    Buy here
+                  </Link>
+                )}
+              </td>
             </tr>
           ))}
         </tbody>

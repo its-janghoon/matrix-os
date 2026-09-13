@@ -163,3 +163,105 @@ describe('what the directory reports', () => {
     expect(seller.settledPayers).toBe(7n);
   });
 });
+
+describe('buying from a seller the reader picked', () => {
+  /**
+   * THE REASON A CHOICE CARRIES NO ADDRESS. It travels as an identity - which
+   * node, which payout account - and the address is read back from the live
+   * directory here.
+   *
+   * A choice that carried its own endpoint would mean a link someone was handed
+   * could route their prompt at a host of the sender's choosing, while the page
+   * named the seller they believed they had picked. The identity is safe to
+   * carry because it is only a lookup key. The endpoint is not, because it is
+   * where the request goes.
+   */
+  it('reads the picked seller"s address from the directory, not from the choice', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        response({
+          providers: [
+            provider({ id: 'wanted', nodeId: 'node-wanted', endpoint: 'http://real-seller:9093' }),
+            provider({ id: 'other', nodeId: 'node-other', endpoint: 'http://other:9093' }),
+          ],
+        }),
+      ),
+    );
+
+    const seller = await sellerFor(HOME, 'llama-3.3-70b', {
+      chosen: { nodeId: 'node-wanted', providerId: 'wanted' },
+    });
+    expect(seller.endpoint).toBe('http://real-seller:9093');
+  });
+
+  it('needs BOTH halves of the identity, since neither alone names one offer', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        response({
+          providers: [
+            // One payout account, two boxes: an operator who added a second GPU.
+            provider({ id: 'shared', nodeId: 'node-a', endpoint: 'http://a:9093', pricePerUnit: '9' }),
+            provider({ id: 'shared', nodeId: 'node-b', endpoint: 'http://b:9093', pricePerUnit: '4' }),
+          ],
+        }),
+      ),
+    );
+
+    const a = await sellerFor(HOME, 'llama-3.3-70b', { chosen: { nodeId: 'node-a', providerId: 'shared' } });
+    const b = await sellerFor(HOME, 'llama-3.3-70b', { chosen: { nodeId: 'node-b', providerId: 'shared' } });
+    // Picked by payout account alone, these two would be indistinguishable, and
+    // a reader who chose the dearer box for a reason would silently get the
+    // other one.
+    expect(a.endpoint).toBe('http://a:9093');
+    expect(b.endpoint).toBe('http://b:9093');
+  });
+
+  it('fails loudly when the picked seller is gone, rather than serving somebody else', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => response({ providers: [provider({ id: 'someone-else', nodeId: 'node-else' })] })),
+    );
+
+    // Silently falling back to the cheapest would be the worst outcome: the
+    // reader picked a seller for a reason and would be served by a stranger
+    // without being told.
+    await expect(
+      sellerFor(HOME, 'llama-3.3-70b', { chosen: { nodeId: 'node-gone', providerId: 'gone' } }),
+    ).rejects.toThrow(/not offering/);
+  });
+
+  it('refuses a picked seller that publishes no address', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        response({ providers: [provider({ id: 'compute', nodeId: 'node-c', endpoint: '' })] }),
+      ),
+    );
+
+    await expect(
+      sellerFor(HOME, 'llama-3.3-70b', { chosen: { nodeId: 'node-c', providerId: 'compute' } }),
+    ).rejects.toThrow(/no address/);
+  });
+
+  it('honours the pick over the bond floor, because the reader chose knowingly', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        response({
+          providers: [provider({ id: 'unbonded', nodeId: 'node-u', bonded: '0', endpoint: 'http://u:9093' })],
+        }),
+      ),
+    );
+
+    // The floor exists to decide for a reader who is NOT choosing. One who
+    // picked a specific seller from a table showing its stake has already made
+    // that decision, and overriding it would be the page second-guessing them.
+    const seller = await sellerFor(HOME, 'llama-3.3-70b', {
+      minBond: 1_000n,
+      chosen: { nodeId: 'node-u', providerId: 'unbonded' },
+    });
+    expect(seller.id).toBe('unbonded');
+  });
+});
