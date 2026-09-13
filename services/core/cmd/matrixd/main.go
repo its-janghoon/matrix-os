@@ -98,12 +98,35 @@ func main() {
 		log.Fatalf("Failed to start node: %v", err)
 	}
 
-	// Handle shutdown signals
+	// Handle shutdown signals, and SIGHUP to re-read the API keys.
+	//
+	// SIGHUP is the conventional "re-read your config" signal, and it is here
+	// for one job: issuing or revoking a buyer's API key used to mean restarting
+	// the node. On a validator that is disruptive enough that keys get batched
+	// and a developer waiting on one waits for a maintenance window.
+	//
+	// Only the credentials are re-read. Addresses, the chain id and the
+	// validator set were wired into running servers and consensus at start, and
+	// a signal that silently changed some of them and not others would be worse
+	// than a restart.
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
-	// Wait for shutdown signal
-	<-sigChan
+	// Wait for shutdown, reloading on the way if asked.
+	for sig := range sigChan {
+		if sig == syscall.SIGHUP {
+			if err := n.ReloadAPIKeys(); err != nil {
+				// Not fatal, and it says what is still in force: the node kept
+				// the keys it had, so the operator can fix the file and signal
+				// again rather than discovering a locked-out node.
+				log.Printf("SIGHUP: %v", err)
+				continue
+			}
+			log.Printf("SIGHUP: API keys reloaded from %s", *configPath)
+			continue
+		}
+		break
+	}
 	fmt.Println("\nShutting down gracefully...")
 
 	// Initiate graceful shutdown

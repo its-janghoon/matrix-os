@@ -11,20 +11,26 @@ import { GITHUB_URL } from '@/lib/releases';
 type NavLink = { label: string; href: string; description?: string; external?: boolean };
 type NavMenu = { label: string; href?: string; links?: NavLink[] };
 
+// The two LIVE surfaces lead, then the pages that describe them.
+//
+// The directory and the chat client are the network itself - a reader can open
+// them and buy something. They were last in a list of nine, under seven pages
+// about the product, so the working marketplace was the hardest thing here to
+// find and the marketing page about it was the easiest.
 const productLinks: NavLink[] = [
-  { label: 'Compute Marketplace', href: '/products/marketplace' },
-  { label: 'MATRIX Token', href: '/products/token' },
-  { label: 'Base Bridge', href: '/bridge', description: 'Lock native MATRIX or burn wMATRIX with MetaMask' },
-  { label: 'Consensus', href: '/products/consensus' },
-  { label: 'LLM Inference', href: '/products/inference' },
-  { label: 'Matrix Console', href: '/products/console' },
-  { label: 'matrix CLI', href: '/products/cli' },
-  { label: 'Chat (self-custody)', href: '/chat', description: 'Pay for inference with a key your browser holds' },
   {
     label: 'Market directory',
     href: '/market',
     description: 'Who is selling, what they staked, and what the chain says they were paid',
   },
+  { label: 'Chat (self-custody)', href: '/chat', description: 'Pay for inference with a key your browser holds' },
+  { label: 'Base Bridge', href: '/bridge', description: 'Lock native MATRIX or burn wMATRIX with MetaMask' },
+  { label: 'Compute Marketplace', href: '/products/marketplace' },
+  { label: 'MATRIX Token', href: '/products/token' },
+  { label: 'Consensus', href: '/products/consensus' },
+  { label: 'LLM Inference', href: '/products/inference' },
+  { label: 'Matrix Console', href: '/products/console' },
+  { label: 'matrix CLI', href: '/products/cli' },
 ];
 const developerLinks: NavLink[] = [
   { label: 'Documentation', href: '/docs' },
