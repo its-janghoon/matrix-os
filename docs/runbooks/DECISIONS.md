@@ -4,7 +4,7 @@ Everything else on the launch path is now a script. This is the short list that
 is not, because each item is a judgement, a secret, or a piece of hardware - and
 a script that made these choices for you would be a script nobody should run.
 
-Work top to bottom. Items 1-3 block the relaunch; items 4-5 do not.
+Work top to bottom. Items 1-3 block the relaunch; items 4-6 do not.
 
 ---
 
@@ -105,7 +105,27 @@ working, unbadged.
 
 ---
 
-## 5. Who gets an API key
+## 5. Upgrading the three validators for the bridge fixes
+
+**Why it is yours.** It is three production hosts and a maintenance window.
+
+**What to do.** [`validator-upgrade.md`](validator-upgrade.md) is the procedure.
+The short version:
+
+- Run `matrix bridge reconcile` FIRST. If it does not close, stop - a duplicate
+  lock is already in history and that block becomes unsyncable after the upgrade.
+- Freeze bridge locks for the window. That is the only transaction type the two
+  versions disagree about; with none in flight the upgrade is an ordinary restart.
+- Three validators means quorum needs all three, so block production pauses while
+  each one restarts. Expected. It also means a mixed set cannot fork - only stall.
+- One node at a time. Wait for the chain to commit again before the next.
+
+Nothing on Base changes, and no burn has ever happened there, so there is no
+backlog to replay.
+
+---
+
+## 6. Who gets an API key
 
 **Why it is yours.** Who may spend, on whose account, is a product decision. The
 node deliberately has no self-serve signup: there is no RPC that mints
