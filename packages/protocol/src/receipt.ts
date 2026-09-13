@@ -197,10 +197,18 @@ export async function verifyReceipt(
   const got = fromBase64(receipt.exchange_digest);
   const boundToExchange =
     want.length === got.length && want.every((b, i) => b === got[i]);
-  return {
-    signatureValid,
-    arithmeticValid,
-    boundToExchange,
-    problem: boundToExchange ? undefined : 'this receipt was issued over a different prompt or completion',
-  };
+  // `problem` is OMITTED rather than set to undefined. Under
+  // exactOptionalPropertyTypes those are different things, and the distinction
+  // is the right one here: an optional field that is absent means "there was no
+  // problem", while one explicitly holding undefined is a field somebody filled
+  // in with nothing.
+  if (!boundToExchange) {
+    return {
+      signatureValid,
+      arithmeticValid,
+      boundToExchange,
+      problem: 'this receipt was issued over a different prompt or completion',
+    };
+  }
+  return { signatureValid, arithmeticValid, boundToExchange };
 }
