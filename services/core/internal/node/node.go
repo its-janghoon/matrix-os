@@ -1913,6 +1913,14 @@ func (n *Node) Start() error {
 					d.ID, d.NativeRecipient, convErr)
 				return
 			}
+			// Both spellings when they differ, so the operator's log agrees with
+			// the event a reader sees on a block explorer AND names the account
+			// that was actually credited.
+			if d.RawNativeRecipient != "" && d.RawNativeRecipient != d.NativeRecipient {
+				fmt.Printf("Bridge watcher: unlocked %d native base units to %s (burn %s; the contract emitted %q, normalised)\n",
+					native, d.NativeRecipient, d.ID, d.RawNativeRecipient)
+				return
+			}
 			fmt.Printf("Bridge watcher: unlocked %d native base units to %s (burn %s)\n",
 				native, d.NativeRecipient, d.ID)
 		},

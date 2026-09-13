@@ -68,6 +68,8 @@ func (f *fakeTransferSettler) SettleSignedTransfer(ctx context.Context, tx *toke
 	return result, nil
 }
 
+func (f *fakeTransferSettler) NextNonce(string) uint64 { return 0 }
+
 func (f *fakeTransferSettler) History(start uint64, limit int) ([]TransferView, uint64, error) {
 	total := uint64(len(f.history))
 	if start >= total {

@@ -6,13 +6,15 @@
 // hand. Against a local node there is no wallet UI, so this does the same call
 // with a local signer.
 //
-// It is ALSO the reproduction for a fund-loss bug found by running it: the
-// contract's `burn(uint256, string)` does not validate `nativeRecipient`. Pass
-// a native account id with an `0x` prefix - the natural thing for anyone used
-// to Ethereum - and the tokens burn, the escrow is never released, and the
-// node's watcher logs the rejection once and never retries. Run it with
-// NATIVE_RECIPIENT set to a 0x-prefixed id to see that; run it with a bare
-// 64-hex id to see the path that works.
+// The contract's `burn(uint256, string)` does not validate `nativeRecipient` -
+// it cannot, since a native account id means nothing to an EVM - so whatever
+// the burner typed is what gets emitted and the tokens are destroyed either
+// way. A `0x` prefix used to mean the escrow was never released.
+//
+// The node now normalizes a recipient that differs only in spelling (a `0x`
+// prefix, uppercase hex), so that case releases correctly. The warning below
+// stays because the contract still accepts anything: a recipient that is not an
+// account id after normalizing is refused, and those tokens are gone.
 //
 //   CONTRACT=0x... HOLDER=0x... AMOUNT=100000000000000000000 \
 //     NATIVE_RECIPIENT=<64 hex, no 0x> \
@@ -35,9 +37,10 @@ async function main() {
   // and only one of them can ever be released.
   if (nativeRecipient.startsWith("0x")) {
     console.warn(
-      "WARNING: nativeRecipient carries an 0x prefix. A native account id is bare hex.\n" +
-        "         The contract does not check this. The burn will succeed, the tokens will be\n" +
-        "         destroyed, and the escrow will never be released."
+      "NOTE: nativeRecipient carries an 0x prefix. A native account id is bare hex.\n" +
+        "      The contract does not check this; the node normalizes it, so the escrow will\n" +
+        "      release to the account named after the prefix. Anything that is NOT an account\n" +
+        "      id once normalized is refused, and those tokens are destroyed with no recovery."
     );
   }
 

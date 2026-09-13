@@ -203,6 +203,16 @@ type TransferSettler interface {
 	// TransferAt returns a single committed transfer by index for
 	// GetTransaction.
 	TransferAt(index uint64) (*TransferView, error)
+	// NextNonce returns the nonce this sender should use next, counting every
+	// committed transaction rather than only the ones History shows.
+	//
+	// The distinction is the whole point. History omits reserved recipients -
+	// bonds, withdrawals, bridge locks - because they are protocol state and not
+	// user payments, so a client counting that list to pick a nonce gets a value
+	// that never advances for an account doing exactly those things. A bridge
+	// lock derives its lock id from the nonce, so that client produced colliding
+	// lock ids and escrowed native that could never be minted.
+	NextNonce(sender string) uint64
 }
 
 // EarningsReader reads what an account has actually been paid, from THIS node's

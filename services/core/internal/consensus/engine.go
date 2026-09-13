@@ -1349,7 +1349,27 @@ func mempoolKey(tx *token.Transaction) string {
 // operations; each already has its own validation (verifyStakeTxLocked,
 // verifySetChangeLocked, verifyProviderChangeLocked) and its own dedup.
 func nonceKey(tx *token.Transaction) (string, bool) {
-	if IsReservedRecipient(tx.To) {
+	// A BRIDGE LOCK is nonce-checked despite being a reserved recipient.
+	//
+	// The rest of the reserved operations carry protocol state - a bond, a set
+	// change, a burn unlock a validator submits on the chain's behalf - and
+	// their own rules decide what a duplicate means, so a nonce would be a
+	// second, redundant uniqueness rule over them. A lock is not like that: it
+	// is a user signing away their own balance, and its LOCK ID is derived from
+	// this nonce.
+	//
+	// Leaving it out meant the nonce high-water mark never moved for an account
+	// that only locked, so every lock was signed at the same nonce and every one
+	// of them derived the SAME lock id. The second overwrote the first's record
+	// while its native stayed in escrow, the contract refused the duplicate
+	// mint - correctly - and reconcile then reported an escrow balance larger
+	// than anything outstanding. Found on a live chain: four locks, 500000000000
+	// escrowed against 300000000000 outstanding.
+	//
+	// CONSENSUS-AFFECTING. A node with this and a node without it disagree about
+	// whether a second lock at a spent nonce may commit, so it goes out to the
+	// whole validator set together.
+	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true

@@ -36,6 +36,8 @@ func (f *fakeTransferEngine) WaitForSettlement(_ context.Context, _ *token.Trans
 	return f.committed, f.applied, nil
 }
 
+func (f *fakeTransferEngine) NextNonce(string, bool) uint64 { return 0 }
+
 func (f *fakeTransferEngine) CommittedTransfers(start uint64, limit int) ([]consensus.CommittedTransfer, uint64, error) {
 	total := uint64(len(f.history))
 	if start >= total {

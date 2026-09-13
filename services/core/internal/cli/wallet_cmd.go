@@ -331,7 +331,30 @@ leaves the local wallet.`,
 // different transfer at a nonce the sender has spent or has pending
 // (consensus.ErrNonceAlreadyUsed), so the reuse is an error instead of a second
 // payment - which is what makes the deadline case below safe to retry.
+// WHAT COUNTING GOT WRONG, and why the node answers now. ListTransactions
+// deliberately omits RESERVED recipients - bonds, stake withdrawals, bridge
+// locks - because they are protocol state rather than user payments. So for an
+// account doing exactly those things the count never advanced, and every
+// transaction it signed reused one nonce.
+//
+// A bridge lock derives its lock id from that nonce. Two locks of the same
+// amount to the same recipient therefore produced the SAME lock id, the second
+// overwrote the first's record, and the native it had already escrowed became
+// unmintable - the contract refuses the duplicate, correctly. Reproduced on a
+// live chain: four locks, 500000000000 escrowed, 300000000000 outstanding, and
+// `matrix bridge reconcile` failing outright.
+//
+// GetBalance now carries the nonce the node itself would report, counting every
+// committed transaction. Zero falls back to counting, which is what an older
+// node and a brand-new account both mean by it, and is the answer counting
+// would have given anyway.
 func deriveNonce(ctx context.Context, client marketv1.MarketServiceClient, senderID string) (nonce uint64, err error) {
+	if bal, balErr := client.GetBalance(ctx, &marketv1.GetBalanceRequest{Account: senderID}); balErr == nil {
+		if next := bal.GetNextNonce(); next > 0 {
+			return next, nil
+		}
+	}
+
 	var (
 		start     uint64
 		senderTxs uint64
