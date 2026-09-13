@@ -1,0 +1,17 @@
+[
+  {
+    "account": "eth:0x00000000000000000000000000000000000000aa",
+    "bond": "consensus/stake/bond/eth:0x00000000000000000000000000000000000000aa",
+    "withdraw": "consensus/stake/withdraw/eth:0x00000000000000000000000000000000000000aa"
+  },
+  {
+    "account": "abababababababababababababababababababababababababababababababab",
+    "bond": "consensus/stake/bond/abababababababababababababababababababababababababababababababab",
+    "withdraw": "consensus/stake/withdraw/abababababababababababababababababababababababababababababababab"
+  },
+  {
+    "account": "eth:0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+    "bond": "consensus/stake/bond/eth:0xAbCdEf0123456789aBcDeF0123456789AbCdEf01",
+    "withdraw": "consensus/stake/withdraw/eth:0xAbCdEf0123456789aBcDeF0123456789AbCdEf01"
+  }
+]

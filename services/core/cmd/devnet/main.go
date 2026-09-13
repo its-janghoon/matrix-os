@@ -343,6 +343,21 @@ func writeConfigs(nodes []*devNode, buyer ethsig.Address, sellers []ethsig.Addre
 			// Connect endpoint a buyer's client actually dials. Each node gets a
 			// distinct one so the discovery check below can tell whose is whose.
 			setPath(cfg, []string{"market", "endpoint"}, fmt.Sprintf("http://127.0.0.1:%d", base+4))
+			// What a BROWSER needs, and a node does not give by default.
+			//
+			// A page cannot hold an API key - it is in the source for anyone to
+			// read - so a wallet client is refused outright unless a node opts
+			// into both: public reads, to see the directory at all, and signed
+			// writes, so the authority for a run is the buyer's signature rather
+			// than a shared secret. Without them `-keep` leaves a network no web
+			// client can talk to, which is a poor thing to hand somebody as a
+			// local backend.
+			setPath(cfg, []string{"connect", "public_reads"}, true)
+			setPath(cfg, []string{"connect", "signed_writes"}, true)
+			// The dev server's origin, so a browser preflight passes.
+			setPath(cfg, []string{"connect", "allowed_origins"}, []string{
+				"http://localhost:3000", "http://127.0.0.1:3000",
+			})
 			// Fast enough that the check does not wait out a production interval.
 			setPath(cfg, []string{"market", "announce_interval"}, "1s")
 			// Sell under a WALLET address, which is what the GPU runbook tells an

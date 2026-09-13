@@ -20,6 +20,11 @@ const productLinks: NavLink[] = [
   { label: 'Matrix Console', href: '/products/console' },
   { label: 'matrix CLI', href: '/products/cli' },
   { label: 'Chat (self-custody)', href: '/chat', description: 'Pay for inference with a key your browser holds' },
+  {
+    label: 'Market directory',
+    href: '/market',
+    description: 'Who is selling, what they staked, and what the chain says they were paid',
+  },
 ];
 const developerLinks: NavLink[] = [
   { label: 'Documentation', href: '/docs' },

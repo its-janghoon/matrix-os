@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"github.com/spf13/cobra"
 
+	"github.com/ecirlabs/matrix-core/internal/inference"
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
@@ -179,12 +181,43 @@ func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in cli
 			path, acct.AccountID(), in.buyer)
 	}
 
+	// Authorise the run before any work happens.
+	//
+	// WHY THIS IS NOT OPTIONAL. A node that serves this method without an API key
+	// - which is what a public endpoint and a browser both need, since a page
+	// cannot hold a key - has nothing but this signature to tell a real buyer
+	// from a string. Without it anyone could name somebody else's funded account,
+	// have a provider do the work, and never sign for it: the victim's balance is
+	// untouched, and the PROVIDER works for free with its capacity held until the
+	// payment request expires.
+	//
+	// It was missing here, which meant --client-signed only worked against a node
+	// with signed_writes OFF - a node that takes `buyer` on trust, which is
+	// exactly the configuration a public one must not run. So the path that
+	// exists to avoid handing a node your key could not be used against any node
+	// configured for buyers who do not.
+	request := inference.InferenceRequest{Prompt: in.prompt, Model: in.model}
+	auth := &inference.RunAuthorization{
+		PublicKey: acct.PublicKey,
+		Provider:  in.provider,
+		Model:     in.model,
+		Timestamp: time.Now().UTC().UnixNano(),
+	}
+	if err := auth.Sign(request, acct.PrivateKey); err != nil {
+		return nil, fmt.Errorf("sign the run authorization: %w", err)
+	}
+
 	runResp, err := ic.inference.RunInferenceJob(ctx, &inferencev1.RunInferenceJobRequest{
 		Buyer:         in.buyer,
 		Provider:      in.provider,
 		Model:         in.model,
 		Prompt:        in.prompt,
 		UnitsEstimate: in.units,
+		Authorization: &inferencev1.RunAuthorization{
+			PublicKey: auth.PublicKey,
+			Timestamp: auth.Timestamp,
+			Signature: auth.Signature,
+		},
 	})
 	if err != nil {
 		return nil, mapErr(addr, err)

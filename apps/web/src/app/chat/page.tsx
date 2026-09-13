@@ -34,9 +34,9 @@ import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/w
  * nothing; the point of one is that the holder can check it without asking the
  * seller, or us, for anything.
  *
- * It is deliberately plain about what it cannot do. There is no on-ramp, so the
- * account starts empty and the page hands over the command to fund it rather
- * than pretending. There is no streaming, because the completion is withheld
+ * It is deliberately plain about what it cannot do. The account starts empty and
+ * the page points at the bridge rather than pretending a public on-ramp exists.
+ * There is no streaming, because the completion is withheld
  * until the payment is signed. The provider sees the prompt, which no amount of
  * browser-side key handling changes. And a verified receipt means the seller
  * MADE its claim, not that the claim is true: no signature can tell a buyer that
@@ -375,15 +375,25 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
 
 function Funding({ account }: { account: string }) {
   return (
-    <div className='mt-4 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4'>
-      <p className='mb-2 text-sm text-yellow-100'>
-        This account holds nothing, so a provider will refuse the job before doing any work. MATRIX is not pegged to
-        USDC, and this page does not claim a live public on-ramp. On a node you run, fund the account yourself. If a
-        verified Base bridge is offered separately, its user pays Base gas and uses only the exact configured contract:
+    <div className='mt-4 space-y-3 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4'>
+      <p className='text-sm text-yellow-100'>
+        This account holds nothing, so a provider will refuse the job before doing any work.
       </p>
-      <pre className='overflow-x-auto rounded bg-black/60 p-3 text-xs text-gray-200'>
-        <code>{`matrix --api-key <key> fund --account ${account} --amount 1000000`}</code>
-      </pre>
+      <p className='text-sm text-yellow-100/90'>
+        If you hold wMATRIX on Base, the{' '}
+        <a className='underline underline-offset-2' href='/bridge'>
+          bridge
+        </a>{' '}
+        is the way in: burn it there naming this account as the recipient, and the escrow is released to you here. You
+        pay Base gas, and the page uses only the configured contract.
+      </p>
+      <p className='text-sm text-yellow-100/70'>
+        Otherwise somebody sends you some. MATRIX is not pegged to anything and this page does not claim a public
+        on-ramp that does not exist. On a node you run yourself, seed the account from its genesis allocation - a reward
+        pool transfer is refused on a multi-validator network, because it is not consensus-ordered and would leave the
+        validators disagreeing about the pool.
+      </p>
+      <p className='font-mono text-xs text-yellow-100/60'>{account}</p>
     </div>
   );
 }
