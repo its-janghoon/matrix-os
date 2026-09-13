@@ -200,9 +200,22 @@ function obj(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
+/**
+ * How long a READ may take before a page gives up on a node.
+ *
+ * rpc() has no timeout unless one is given, which is right for running a model -
+ * that legitimately takes as long as it takes - and wrong for anything a page
+ * blocks its own render on. A node that accepts a connection and never answers,
+ * or an address with nothing behind it, otherwise leaves a page loading forever
+ * with no error to explain it and nothing for the reader to do.
+ *
+ * Generous enough that a slow node on a slow link still answers.
+ */
+const READ_TIMEOUT_MS = 10_000;
+
 /** Reads a balance. Needs `connect.public_reads` on a node with ACLs. */
 export async function getBalance(endpoint: string, account: string): Promise<bigint> {
-  const out = await rpc(endpoint, MARKET, 'GetBalance', { account });
+  const out = await rpc(endpoint, MARKET, 'GetBalance', { account }, { timeoutMs: READ_TIMEOUT_MS });
   return big(out.balance);
 }
 
@@ -302,7 +315,7 @@ export async function getBridgeReconciliation(endpoint: string): Promise<BridgeR
  * route sits behind an API key and this page has none.
  */
 export async function listModels(endpoint: string): Promise<ModelOffer[]> {
-  const out = await rpc(endpoint, MARKET, 'ListProviders', { includeRemote: true });
+  const out = await rpc(endpoint, MARKET, 'ListProviders', { includeRemote: true }, { timeoutMs: READ_TIMEOUT_MS });
   const providers = Array.isArray(out.providers) ? out.providers : [];
 
   const byModel = new Map<string, { providers: number; cheapest: bigint }>();
@@ -336,7 +349,13 @@ export async function listModels(endpoint: string): Promise<ModelOffer[]> {
  * read from. A different node may have heard others.
  */
 export async function listSellers(endpoint: string, model?: string): Promise<Seller[]> {
-  const out = await rpc(endpoint, MARKET, 'ListProviders', { includeRemote: true, ...(model ? { model } : {}) });
+  const out = await rpc(
+    endpoint,
+    MARKET,
+    'ListProviders',
+    { includeRemote: true, ...(model ? { model } : {}) },
+    { timeoutMs: READ_TIMEOUT_MS },
+  );
   const providers = Array.isArray(out.providers) ? out.providers : [];
 
   const sellers: Seller[] = [];

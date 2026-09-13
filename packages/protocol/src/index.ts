@@ -208,6 +208,7 @@ export const BRIDGE_LOCK_PREFIX = 'bridge/lock/';
 // but exported from here so a client has one import for everything it signs.
 export * from './eip712';
 export * from './receipt';
+export * from './stake';
 export { keccak256 } from './keccak';
 
 

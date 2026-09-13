@@ -1575,6 +1575,13 @@ func (n *Node) Start() error {
 			PricePerUnit: demoInferencePrice,
 			ObservedAt:   observedAt,
 			ValidUntil:   observedAt.Add(market.DefaultQuoteTTL),
+			// Advertised under a model name, because a provider that names none
+			// cannot be ROUTED to - and routing by model is how every buyer finds
+			// a seller. Without it the demo backend was reachable only by a caller
+			// who already knew its provider id, which a client that came in
+			// through the directory never does. "echo" is what it is; a name
+			// suggesting otherwise would put a fake model in a listing.
+			Models: []string{"echo"},
 		}
 		if _, exists := n.market.GetProvider(n.config.Inference.EchoProvider); !exists {
 			if err := n.market.RegisterProvider(demoQuote); err != nil {
