@@ -35,6 +35,9 @@ type testNode struct {
 	peerID peer.ID
 	// bus is the shared gossip bus every node in the cluster is wired to.
 	bus *memBus
+	// seeds applies this node's share of the cluster's out-of-band credits, at
+	// the log position each was filed against. See mintAll.
+	seeds *seedApplier
 }
 
 // newCluster spins up n in-process consensus nodes wired to a shared in-memory
@@ -108,6 +111,24 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		if opts != nil {
 			opts(&cfg)
 		}
+		// Set after opts, not before: a test that wired its own observer would
+		// otherwise silently take the cluster's credits with it, and the symptom
+		// - one node short of money, much later - names nothing.
+		seeds := newSeedApplier(bus, ledger)
+		prior := cfg.OnCommit
+		cfg.OnCommit = func(b *Block) {
+			// This node has committed b, so its next block is b.Height+1, and
+			// every credit filed at or before that height is now due. Running it
+			// here puts the credit inside the commit path, which is the only
+			// place every node passes through in the same order - a block this
+			// node voted for and a block it caught up on both arrive here.
+			if err := seeds.beforeBlock(b.Height + 1); err != nil {
+				panic(fmt.Sprintf("apply seeded credit after height %d: %v", b.Height, err))
+			}
+			if prior != nil {
+				prior(b)
+			}
+		}
 		eng, err := New(cfg)
 		if err != nil {
 			t.Fatalf("new engine: %v", err)
@@ -120,6 +141,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			store:     store,
 			peerID:    peerID,
 			bus:       bus,
+			seeds:     seeds,
 			evidence:  evidence,
 			sets:      sets,
 			selfVotes: selfVotes,
@@ -146,22 +168,65 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 	return nodes, stop
 }
 
-// mint credits an account directly on every node's ledger so a signed transfer
-// from it can be afforded. In production genesis balances would be seeded once;
-// here each node's ledger starts empty, so we seed identically across nodes.
+// mintAll credits an account on every node's ledger so a signed transfer from
+// it can be afforded. In production genesis balances are seeded once, from a
+// file every node holds; here each node's ledger starts empty, so the cluster
+// seeds itself.
+//
+// It is the POSITION of the credit that this has to get right, not the amount.
+// Writing to four ledgers in a loop leaves the four holding different balances
+// until the loop ends, and a live cluster does not wait: the four disagree about
+// the state root immediately, and any block landing in the window is applied
+// against different balances on different nodes. A transfer affordable on one
+// and unaffordable on another is skipped on that one, and a skipped transfer is
+// still committed, so nothing ever retries it. The ledgers never come back
+// together. That is not theory - it is what the weighted-cluster test hit, as
+// two distinct state digests at height 0, before a single block existed.
+//
+// So the credit is given a fixed place in the log instead. Every node applies it
+// immediately before the block at `target`, and `target` is chosen while no node
+// can move, as a height none of them has reached:
+//
+//   - a node already standing at `target` is between blocks, so it is credited
+//     here and now, before it applies that block;
+//   - a node still below it applies the credit in its commit path, on the way
+//     past - see the OnCommit wired in newCluster.
+//
+// Both routes go through the same exactly-once applier, so the node that crosses
+// `target` while this function is running is credited once, not twice.
 func mintAll(t *testing.T, nodes []*testNode, account string, amount uint64) {
 	t.Helper()
+	if len(nodes) == 0 {
+		return
+	}
+
+	// Every engine's lock, held across the choice and the filing. e.height is
+	// guarded by e.mu and advanceHeight takes it, so no node can cross the target
+	// between being measured and being credited - which is the one gap that would
+	// leave a node uncredited on both routes.
 	for _, nd := range nodes {
-		if err := nd.ledger.Credit(account, amount); err != nil {
+		nd.engine.mu.Lock()
+	}
+	var target uint64
+	for _, nd := range nodes {
+		if nd.engine.height > target {
+			target = nd.engine.height
+		}
+	}
+	nodes[0].bus.fileSeed(target, account, amount)
+	for _, nd := range nodes {
+		if nd.engine.height != target {
+			continue
+		}
+		if err := nd.seeds.beforeBlock(target); err != nil {
+			for _, other := range nodes {
+				other.engine.mu.Unlock()
+			}
 			t.Fatalf("credit: %v", err)
 		}
 	}
-	// Recorded on the shared bus so a node joining later starts from the same
-	// balances, which is what every node sharing one genesis file means. Without
-	// it the joiner reaches different balances from the same blocks and the state
-	// root check correctly stops it from voting.
-	if len(nodes) > 0 {
-		nodes[0].bus.recordSeed(account, amount)
+	for _, nd := range nodes {
+		nd.engine.mu.Unlock()
 	}
 }
 
