@@ -197,7 +197,7 @@ cat <<CHECKLIST
 
    6. Confirm the badge from ANOTHER node, which is the only check that counts -
       a node vouching for itself proves nothing:
-        matrix provider directory --remote --endpoint <another node's connect addr>
+        matrix provider directory --addr <another node's market addr, default port 9091>
       Your seller should show VOUCHED BY $OPERATOR. If it does not, the
       attestation verified against a maintainer that chain does not name.
 
