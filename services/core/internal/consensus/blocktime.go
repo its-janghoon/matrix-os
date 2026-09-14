@@ -31,18 +31,39 @@ func (e *Engine) proposalTimestampLocked() int64 {
 	return now
 }
 
+// blockOrigin says how a block reached this node. It changes exactly one rule:
+// whether the timestamp has to be near this node's clock.
+//
+// A LIVE PROPOSAL is a claim about now, so the window is what stops a proposer
+// dating a block to next year. COMMITTED HISTORY is old by definition - that is
+// what makes it history - and its validity comes from the quorum of precommits
+// served with it, which this node verifies independently. Holding backfilled
+// blocks to a freshness window made joining an existing network impossible: a
+// chain more than BlockTimestampSkew old rejected every block of its own past,
+// so a new node sat at height zero forever.
+type blockOrigin int
+
+const (
+	// blockFromProposal is a leader's block for the height this node is deciding.
+	blockFromProposal blockOrigin = iota
+	// blockFromSync is already-committed history a peer served for backfill.
+	blockFromSync
+)
+
 // verifyBlockTimestampLocked applies both rules to a block this node is deciding
 // whether to vote for. Callers must hold e.mu.
 //
 // Genesis has no parent, so only the skew rule applies there.
-func (e *Engine) verifyBlockTimestampLocked(b *Block) error {
+func (e *Engine) verifyBlockTimestampLocked(b *Block, origin blockOrigin) error {
 	if b.Timestamp <= 0 {
 		return fmt.Errorf("%w: block %d carries no timestamp", ErrInvalidMessage, b.Height)
 	}
 	stamped := time.Unix(b.Timestamp, 0)
-	if delta := e.now().Sub(stamped); delta > BlockTimestampSkew || delta < -BlockTimestampSkew {
-		return fmt.Errorf("%w: block %d is stamped %s, outside the %s window around this node's clock",
-			ErrInvalidMessage, b.Height, stamped.UTC().Format(time.RFC3339), BlockTimestampSkew)
+	if origin == blockFromProposal {
+		if delta := e.now().Sub(stamped); delta > BlockTimestampSkew || delta < -BlockTimestampSkew {
+			return fmt.Errorf("%w: block %d is stamped %s, outside the %s window around this node's clock",
+				ErrInvalidMessage, b.Height, stamped.UTC().Format(time.RFC3339), BlockTimestampSkew)
+		}
 	}
 	if parent, ok := e.parentTimestampLocked(); ok && b.Timestamp <= parent {
 		return fmt.Errorf("%w: block %d is stamped %d, not after its parent's %d",
