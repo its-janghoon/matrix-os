@@ -1346,6 +1346,16 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to initialize bridge: %w", err)
 	}
 	n.bridge = nodeBridge
+	// A relaunched chain is handed its escrow by genesis rather than by locking
+	// for it, and the bridge's running totals only move on a lock. Adopt that
+	// opening balance here - after ApplyGenesis, so the escrow account exists,
+	// and before the watcher runs, so nothing asks for an unlock first. It is a
+	// no-op on a chain that has ever locked.
+	if nodeBridge != nil {
+		if err := nodeBridge.AdoptGenesisEscrow(); err != nil {
+			return fmt.Errorf("failed to adopt the genesis escrow: %w", err)
+		}
+	}
 	// Unlock the attestor key before anything can ask for a signature. A
 	// configured key that will not unlock stops the node here rather than at the
 	// first mint request, because a validator that looks like it is attesting and
