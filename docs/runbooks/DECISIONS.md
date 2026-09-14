@@ -159,5 +159,8 @@ drift between regions, or disks filling up. The first real GPU box (item 4) is
 what answers those, which is a reason to do it before the relaunch rather than
 after.
 
-**The bridge rehearsal.** `docs/runbooks/sepolia-rehearsal.md` exists and we have
-no record of it having been run. Check before relying on it.
+**The bridge rehearsal.** It has now been run - against a local EVM, since
+Sepolia itself needs a funded key and an RPC endpoint. It found two ways to lose
+money, both fixed in the node rather than the contract, and both re-proven end to
+end afterwards. What it still does not cover is Sepolia's own network: real
+confirmations, a real RPC's failure modes, and a real funded key.
