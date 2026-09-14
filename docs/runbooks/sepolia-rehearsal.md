@@ -16,6 +16,15 @@ Everything here has been run locally against a real `matrixd` and a real EVM
 chain. What has NOT been run is Sepolia itself, because that needs a funded key
 and an RPC endpoint, which are yours and not the repository's.
 
+The local run found two fund-loss defects - locking the same amount twice, and
+burning to a recipient that differed only by an `0x` prefix - and **both are
+fixed**. Neither needed a contract change: the contract only emits, and it is
+the node that decides whether escrow is released. Both fixes are consensus
+code, so they go out to the whole validator set together.
+
+Re-run after the fix: three identical locks now produce three distinct ids, a
+`0x`-prefixed burn releases correctly, and reconcile closes exactly.
+
 ---
 
 ## "Can I just use my MetaMask account that has test ETH?"
@@ -229,6 +238,22 @@ Escrow receives the full amount - a lock pays no protocol fee, because the
 wrapped supply minted against it is computed from what was locked, and a fee
 would mint more wrapped than the escrow holds.
 
+> **FIXED - needs the whole validator set on the new binary.** Two locks with
+> the same recipient AND the same amount used to produce the same lock id, so the second overwrites the
+> first's record. The native moves into escrow both times; only one lock is ever
+> mintable, and the contract refuses the duplicate with `LockAlreadyMinted`. The
+> rest is escrowed with no wrapped token against it and `matrix bridge
+> reconcile` then fails with `reconciliation mismatch: escrow balance X !=
+> outstanding Y`.
+>
+> It is not a timing race - locks thirty seconds apart collide the same way. The
+> lock id is derived from the sender's transaction nonce, which the CLI computes
+> by counting that sender's settled transactions, and `matrix tx list` reports
+> zero of them however many locks have committed. So the nonce never advances.
+>
+> Reproduced on a local EVM: four locks, 500000000000 into escrow, 300000000000
+> outstanding.
+
 ## 8. Collect the attestations
 
 ```sh
@@ -275,6 +300,20 @@ broadcast; it must never lag it.
 From MetaMask, or Etherscan's Write Contract tab, call
 `burn(amount, nativeRecipient)` where `nativeRecipient` is your Matrix account
 id. The amount must be an exact multiple of 1e9.
+
+> **FIXED - needs the whole validator set on the new binary.**
+> `nativeRecipient` is a `string` and the contract does not validate it - it
+> cannot, since a native account id means nothing to an EVM. An `0x` prefix
+> used to mean the tokens were destroyed and the escrow never released.
+>
+> The node now normalizes a recipient that differs only in SPELLING (an `0x`
+> prefix, uppercase hex) before validating, and logs both forms so the node's
+> account of itself still agrees with the event on a block explorer. It does not
+> guess: anything that is not an account id after normalizing is still refused,
+> and those tokens are still gone.
+>
+> `scripts/rehearsal-burn.ts` warns before sending, and is the reproduction.
+> A bare 64-hex id is the form that works.
 
 The node's watcher sees the `Burned` event after `confirmations` blocks and
 releases the escrow. Re-run `matrix bridge reconcile`: outstanding should be

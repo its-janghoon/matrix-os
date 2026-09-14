@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"encoding/hex"
+	"fmt"
 	"testing"
 	"time"
 
@@ -36,7 +37,6 @@ func joinNode(
 	self *token.Account,
 	genesis *ValidatorSet,
 	opts func(*Config),
-	prepare func(*market.Ledger),
 ) *testNode {
 	t.Helper()
 
@@ -49,6 +49,7 @@ func joinNode(
 	ledger := market.NewLedger(store)
 	chain := NewBlockChain(store)
 	bus := existing[0].bus
+	seeds := newSeedApplier(bus, ledger)
 	peerID := peer.ID("joiner-" + self.AccountID()[:8])
 
 	cfg := Config{
@@ -69,6 +70,15 @@ func joinNode(
 	if opts != nil {
 		opts(&cfg)
 	}
+	prior := cfg.OnCommit
+	cfg.OnCommit = func(b *Block) {
+		if err := seeds.beforeBlock(b.Height + 1); err != nil {
+			panic(fmt.Sprintf("apply seeded credit after height %d: %v", b.Height, err))
+		}
+		if prior != nil {
+			prior(b)
+		}
+	}
 	eng, err := New(cfg)
 	if err != nil {
 		t.Fatalf("new joining engine: %v", err)
@@ -78,8 +88,13 @@ func joinNode(
 	// config, not from the chain it downloads. A joining node whose genesis
 	// config differs from the network's ends up with the same blocks and
 	// different balances - see the note in the catch-up test.
-	if prepare != nil {
-		prepare(ledger)
+	//
+	// Only the allocations that predate block 0 belong here. The cluster may
+	// have seeded more later, at a height this node has yet to replay, and those
+	// arrive on the way past like they did for everyone else - applying them now
+	// would put this node's ledger ahead of the blocks it is about to apply.
+	if err := seeds.beforeBlock(0); err != nil {
+		t.Fatalf("apply the cluster genesis: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -92,7 +107,7 @@ func joinNode(
 	}
 	return &testNode{
 		acct: self, engine: eng, ledger: ledger, chain: chain,
-		store: store, peerID: peerID, bus: bus,
+		store: store, peerID: peerID, bus: bus, seeds: seeds,
 	}
 }
 
@@ -137,16 +152,11 @@ func TestAFreshNodeCatchesUpToARunningNetwork(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate: %v", err)
 	}
-	// The same genesis state the cluster has. mintAll credited the payer on each
-	// existing node's ledger directly, which is what a genesis allocation does,
-	// so the joining node has to start from the same place. This is the second
-	// operational requirement: the chain tells a joining node the TRANSACTIONS,
-	// never the state they started from.
-	joiner := joinNode(t, nodes, newcomer, genesisSetOf(t, nodes), nil, func(l *market.Ledger) {
-		if err := l.Credit(payer.AccountID(), 1000000); err != nil {
-			t.Fatalf("genesis credit: %v", err)
-		}
-	})
+	// The same genesis state the cluster has: joinNode applies the allocations
+	// the cluster was seeded with before block 0, which is what sharing a genesis
+	// file means. This is the second operational requirement - the chain tells a
+	// joining node the TRANSACTIONS, never the state they started from.
+	joiner := joinNode(t, nodes, newcomer, genesisSetOf(t, nodes), nil)
 
 	if got := joiner.engine.Height(); got != 0 {
 		t.Fatalf("the joining node started at height %d, want 0 - its store is supposed to be empty", got)
@@ -232,7 +242,7 @@ func TestAFreshNodeReplaysSetChangesItWasNotPresentFor(t *testing.T) {
 	}
 	joiner := joinNode(t, nodes, late, genesis, func(c *Config) {
 		c.EpochLength = 2
-	}, nil)
+	})
 	if joiner.engine.vset().Len() != 4 {
 		t.Fatalf("the joining node started with %d validators, want the 4 its config named",
 			joiner.engine.vset().Len())
@@ -312,7 +322,7 @@ func TestAJoiningNodeConfiguredWithTheCurrentSetCannotReplayHistory(t *testing.T
 	}
 	joiner := joinNode(t, nodes, late, wrong, func(c *Config) {
 		c.EpochLength = 2
-	}, nil)
+	})
 
 	// Give it as long as the successful case gets, and it still cannot start:
 	// the leader for height 0 under a five-member set is not the validator who

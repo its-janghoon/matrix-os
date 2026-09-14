@@ -93,26 +93,37 @@ func localProviderToProto(p market.Provider) *marketv1.Provider {
 }
 
 // remoteProviderToProto converts a discovered remote provider to proto, flagged
-// REMOTE and carrying the announcing peer ID.
+// REMOTE and carrying what a buyer needs to act on it: which node is offering,
+// where to reach it, and how long this node has been hearing from it.
+//
+// Before the endpoint was carried, a caller receiving one of these learned that
+// somebody somewhere sold a model and had no way to connect - the peer id is how
+// NODES find each other and is not an address any HTTP client can dial.
 func remoteProviderToProto(rp marketexchange.RemoteProvider) *marketv1.Provider {
 	out := &marketv1.Provider{
-		Id:                rp.ID,
-		Capacity:          rp.Capacity,
-		PricePerUnit:      rp.PricePerUnit,
-		Available:         rp.Available,
-		Origin:            marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
-		PeerId:            rp.PeerID,
-		Models:            rp.Models,
-		CostPerUnit:       rp.CostPerUnit,
-		MarkupBasisPoints: rp.MarkupBasisPoints,
-		QuoteId:           rp.QuoteID,
-		QuoteVersion:      rp.QuoteVersion,
+		Id:                 rp.ID,
+		NodeId:             rp.NodeID,
+		Endpoint:           rp.Endpoint,
+		AnnouncementsHeard: rp.Announcements,
+		Capacity:           rp.Capacity,
+		PricePerUnit:       rp.PricePerUnit,
+		Available:          rp.Available,
+		Origin:             marketv1.ProviderOrigin_PROVIDER_ORIGIN_REMOTE,
+		PeerId:             rp.PeerID,
+		Models:             rp.Models,
+		CostPerUnit:        rp.CostPerUnit,
+		MarkupBasisPoints:  rp.MarkupBasisPoints,
+		QuoteId:            rp.QuoteID,
+		QuoteVersion:       rp.QuoteVersion,
 	}
 	if !rp.ObservedAt.IsZero() {
 		out.ObservedAt = timestamppb.New(rp.ObservedAt)
 	}
 	if !rp.ValidUntil.IsZero() {
 		out.ValidUntil = timestamppb.New(rp.ValidUntil)
+	}
+	if !rp.FirstSeen.IsZero() {
+		out.FirstSeen = timestamppb.New(rp.FirstSeen)
 	}
 	return out
 }
@@ -258,7 +269,15 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 	}
 	out := make([]*marketv1.Provider, 0, len(locals))
 	for _, p := range locals {
-		out = append(out, localProviderToProto(p))
+		entry := localProviderToProto(p)
+		// The stake and settled history are read off this node's own chain by
+		// payout account, so they say the same thing about a local provider as
+		// about a remote one. Left off, an operator opening their own directory
+		// saw their own listing reporting no stake and no payments, which is
+		// both wrong and the most discouraging possible thing to show them.
+		s.attachEarnings(entry)
+		s.attachLocalAttestation(entry)
+		out = append(out, entry)
 	}
 
 	if req.GetIncludeRemote() && s.exchange != nil {
@@ -268,7 +287,10 @@ func (s *Service) ListProviders(ctx context.Context, req *marketv1.ListProviders
 			if model != "" && (rp.Available == 0 || !rp.ServesModel(model)) {
 				continue
 			}
-			out = append(out, remoteProviderToProto(rp))
+			entry := remoteProviderToProto(rp)
+			s.attachEarnings(entry)
+			s.attachAttestation(entry, rp)
+			out = append(out, entry)
 		}
 	}
 
@@ -373,7 +395,11 @@ func (s *Service) GetBalance(ctx context.Context, req *marketv1.GetBalanceReques
 	if err != nil {
 		return nil, mapMarketError(err)
 	}
-	return &marketv1.GetBalanceResponse{Account: req.GetAccount(), Balance: bal}, nil
+	resp := &marketv1.GetBalanceResponse{Account: req.GetAccount(), Balance: bal}
+	if s.transferSettler != nil {
+		resp.NextNonce = s.transferSettler.NextNonce(req.GetAccount())
+	}
+	return resp, nil
 }
 
 // GetTransaction reads a single committed transfer by its stable index. When a
@@ -661,4 +687,92 @@ func (s *Service) GetLockAttestation(ctx context.Context, req *marketv1.GetLockA
 		Attestor:     att.Attestor,
 		NativeAmount: att.NativeAmount,
 	}, nil
+}
+
+// attachEarnings fills in what this node's chain says a provider's payout
+// account has been paid.
+//
+// Read for REMOTE providers only, and read from the answering node's own chain.
+// That is the point of putting it here rather than in the announcement: a
+// figure the seller publishes about itself is a claim, and one the buyer's own
+// node computes from blocks it validated is not. The seller cannot influence it
+// and does not know it is being asked.
+//
+// A read failure leaves the fields zero rather than failing the listing. The
+// directory's job is to say who is selling; losing a history figure should not
+// take the address with it.
+func (s *Service) attachEarnings(p *marketv1.Provider) {
+	if s.earnings == nil || p == nil || p.GetId() == "" {
+		return
+	}
+	received, payments, payers, first, last, from, err := s.earnings.Earnings(p.GetId())
+	if err != nil {
+		return
+	}
+	p.SettledReceived = received
+	p.SettledPayments = payments
+	p.SettledPayers = payers
+	p.SettledFirstHeight = first
+	p.SettledLastHeight = last
+	p.SettledIndexedFrom = from
+
+	bonded, withdrawableAt, err := s.earnings.Bonded(p.GetId())
+	if err != nil {
+		return
+	}
+	p.Bonded = bonded
+	p.BondWithdrawableAt = withdrawableAt
+}
+
+// attachAttestation decides whether this node will vouch for a seller, and says
+// who vouched.
+//
+// The verdict is computed HERE, per listing, against the maintainer this node's
+// chain names right now. Not stored with the announcement, and not taken from
+// it: an attestation arrives as bytes a seller chose to send, and the only thing
+// that makes it mean anything is a signature check against consensus state. A
+// cached verdict would also survive a maintainer rotation it should not.
+//
+// A failed check leaves the seller unbadged and is not an error. An attestation
+// that expired, or was signed by a key the chain has rotated away from, is an
+// ordinary thing to see - the listing simply does not vouch for it, exactly as
+// if none had been presented.
+func (s *Service) attachAttestation(p *marketv1.Provider, rp marketexchange.RemoteProvider) {
+	if s.earnings == nil || p == nil || rp.Attestation == nil {
+		return
+	}
+	maintainer := s.earnings.Maintainer()
+	if maintainer == "" {
+		return
+	}
+	if err := rp.Attestation.VerifyFor(rp.NodeID, rp.ID, maintainer, time.Now().UTC()); err != nil {
+		return
+	}
+	p.OperatorAttested = true
+	p.OperatorName = rp.Attestation.Operator
+}
+
+// attachLocalAttestation does the same for a provider this node runs itself.
+//
+// Holding the signed file is not what earns the badge: it is verified against
+// the maintainer this node's own chain names, on the same code path and with the
+// same refusals as a stranger's. A node whose attestation has expired, or was
+// signed by somebody the chain no longer names, does not get to badge itself.
+func (s *Service) attachLocalAttestation(p *marketv1.Provider) {
+	if s.earnings == nil || s.exchange == nil || p == nil || p.GetId() == "" {
+		return
+	}
+	att, selfNodeID := s.exchange.SelfAttestation(p.GetId())
+	if att == nil || selfNodeID == "" {
+		return
+	}
+	maintainer := s.earnings.Maintainer()
+	if maintainer == "" {
+		return
+	}
+	if err := att.VerifyFor(selfNodeID, p.GetId(), maintainer, time.Now().UTC()); err != nil {
+		return
+	}
+	p.OperatorAttested = true
+	p.OperatorName = att.Operator
 }

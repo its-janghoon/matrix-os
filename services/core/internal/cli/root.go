@@ -74,7 +74,9 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 	root.AddCommand(
 		newStatusCommand(opts),
 		newHealthCommand(opts),
+		newAttestCommand(opts),
 		newProviderCommand(opts),
+		newReceiptCommand(opts),
 		newJobCommand(opts),
 		newBalanceCommand(opts),
 		newFundCommand(opts),
@@ -83,6 +85,7 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		newAgentCommand(opts),
 		newTxCommand(opts),
 		newWalletCommand(opts),
+		newStakeCommand(opts),
 		newBridgeCommand(opts),
 	)
 

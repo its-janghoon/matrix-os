@@ -172,9 +172,45 @@ genesis reward pool. It is not a mint: issued supply is unchanged and
   non-increasing, so the precondition can never hold again regardless of
   what the recipient later does with the funds. Re-verified as refused
   after the transfer landed.
-- Remaining wrapped mint headroom is unchanged by this: 50,000,000 of
-  the immutable 60,000,000 cap is held by the founder vault, so
-  10,000,000 MATRIX is the maximum that can ever reach Base.
+- Remaining wrapped mint headroom is unchanged by this: the allocation
+  moves native units between native accounts and mints no wMATRIX.
+
+Corrected 2026-09-13. This entry previously read "50,000,000 of the
+immutable 60,000,000 cap is held by the founder vault, so 10,000,000
+MATRIX is the maximum that can ever reach Base". The vault's balance is
+not the minted total, and the cap constrains the minted total: anything
+minted against a native lock counts against it without ever touching the
+vault. Headroom is `cap - totalSupply()`, not `cap - vaultBalance()`.
+
+Read from Base on 2026-09-13, contract
+`0x0ec1C40829B3A5C2349Afa8C4Da6dC8B727fC87c`:
+
+```
+totalSupply():          50,100,000 wMATRIX
+founder vault balance:  50,000,000 wMATRIX
+headroom to the cap:     9,900,000 wMATRIX
+```
+
+The 100,000 difference is backed, not unaccounted. Checked the same day
+against the native side, `GetBridgeReconciliation` on
+`validator-1.ecirlabs.com` at height 1075:
+
+```
+lockedNative:       50100000000000000   (50,100,000 MATRIX)
+unlockedNative:                     0
+outstandingNative:  50100000000000000
+escrowBalance:      50100000000000000
+outstandingErc20:   50100000000000000000000000
+```
+
+Escrow equals outstanding to the unit, and outstanding native times the
+1e9 mirror ratio is exactly the wrapped supply, so the extra 100,000 is
+native units locked and mirrored - the bridge doing its job - rather than
+a mint against nothing.
+
+The figure of 50,000,000 recorded at the gate above was correct when it
+was read. It is a measurement, not a bound, and this section wrongly
+treated it as one.
 
 ## Consensus liveness incident, height 400
 

@@ -1,0 +1,98 @@
+[
+  {
+    "name": "ordinary",
+    "receipt": {
+      "job_id": "job-1",
+      "buyer": "buyer-1",
+      "provider": "eth:0x00000000000000000000000000000000000000aa",
+      "node_id": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+      "model": "llama-3.3-70b",
+      "prompt_tokens": 7,
+      "completion_tokens": 8,
+      "total_tokens": 15,
+      "units": "15",
+      "price_per_unit": "5",
+      "total": "75",
+      "exchange_digest": "CGQzhzlpBMRp478LBDJoUx7CY/VCDNhLKMy9V9YgwTQ=",
+      "issued_at": "1789000000000000000",
+      "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "signature": "b7GIza/uwLxf+9UT5gO5o/Uq7Z0cbWoyWxXjqF2PToRZVJVf/+4bhxiwzcj6sBTt0PpHjUA8qvQxqLfYHvmQCQ=="
+    },
+    "signing_digest": "13d88cd379cd20d6f4f535db36e5f7eac64b519eeaa7c9e895fd66406649154e",
+    "prompt": "what is the capital of france",
+    "completion": "paris",
+    "exchange_digest": "08643387396904c469e3bf0b043268531ec263f5420cd84b28ccbd57d620c134"
+  },
+  {
+    "name": "empty strings and zeros",
+    "receipt": {
+      "job_id": "j",
+      "buyer": "b",
+      "provider": "p",
+      "node_id": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+      "model": "",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "units": "0",
+      "price_per_unit": "0",
+      "total": "0",
+      "exchange_digest": "05/7Py1KF9w9sxQfhGRPvE9D+ziMY/P9XJgF9oaSpVc=",
+      "issued_at": "0",
+      "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "signature": "DJ++GaJ8YgZK29nOeUetqr1ZDOMG/vaeH/P0x8FoO+vKW2Ex8LdUIBXcxJwltH1WdUOR791CExlINM3SiNdJAw=="
+    },
+    "signing_digest": "2685d33f276ad603f85bbd9b87dc9e18eae7b79c595b2978dc84595ad226058a",
+    "prompt": "",
+    "completion": "",
+    "exchange_digest": "d39ffb3f2d4a17dc3db3141f84644fbc4f43fb388c63f3fd5c9805f68692a557"
+  },
+  {
+    "name": "multi-byte text",
+    "receipt": {
+      "job_id": "일자리-1",
+      "buyer": "구매자",
+      "provider": "판매자",
+      "node_id": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+      "model": "모델-🙂",
+      "prompt_tokens": 3,
+      "completion_tokens": 4,
+      "total_tokens": 7,
+      "units": "7",
+      "price_per_unit": "3",
+      "total": "21",
+      "exchange_digest": "qp0JuC7161ohwljZxcaLR/Fkj5qiarwjHhKxSwBNQL8=",
+      "issued_at": "1",
+      "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "signature": "5Fe93LBajap+k9prjGxESquSniSy1se8Wqx/413wc1WJOG9w3U0HcxBUsKbsRNL7s9MkiYtobW9h3g6B7UdaDA=="
+    },
+    "signing_digest": "cd060e1f36222d795992e1d58bcb5b22050f9566a7ca9613cf823829853892ec",
+    "prompt": "안녕하세요 🙂",
+    "completion": "반갑습니다 🙃",
+    "exchange_digest": "aa9d09b82ef5eb5a21c258d9c5c68b47f1648f9aa26abc231e12b14b004d40bf"
+  },
+  {
+    "name": "values a double cannot hold",
+    "receipt": {
+      "job_id": "big",
+      "buyer": "b",
+      "provider": "p",
+      "node_id": "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+      "model": "m",
+      "prompt_tokens": 0,
+      "completion_tokens": 0,
+      "total_tokens": 0,
+      "units": "9007199254740993",
+      "price_per_unit": "1",
+      "total": "9007199254740993",
+      "exchange_digest": "mf5ZhyurK9LAEpRYyLTTyqIkHqe9Hj4XggAfHMFO9cU=",
+      "issued_at": "9223372036854775807",
+      "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
+      "signature": "VQMmp9VXpnGxAac/fmpumYrB860psC+Qv0AEywuyCgMOnSvwQJfo0WAAPht1k6GM4nzXA7eZgnusK/L2yhnTCA=="
+    },
+    "signing_digest": "79833b6d71093f7307e670af9f37fd05d15674e4b360afa7b3fcf3e46327fd7c",
+    "prompt": "x",
+    "completion": "y",
+    "exchange_digest": "99fe59872bab2bd2c0129458c8b4d3caa2241ea7bd1e3e1782001f1cc14ef5c5"
+  }
+]

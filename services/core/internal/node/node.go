@@ -72,6 +72,23 @@ type Config struct {
 	} `yaml:"admin"`
 	Market struct {
 		Addr string `yaml:"addr"`
+		// Endpoint is the base URL buyers reach this node on, published in the
+		// provider announcements this node gossips. It is what turns discovery
+		// into something a buyer can act on: a peer id tells other NODES where to
+		// find each other and is not an address any HTTP client can dial.
+		//
+		// Configured rather than derived, because a node cannot see its own public
+		// address - on a cloud instance the reachable name belongs to a load
+		// balancer or a NAT while the interface holds a private one - and an
+		// advertised address nobody can reach is worse than none, since a buyer
+		// would try it.
+		//
+		// Empty means this node publishes no address. It still announces, so it is
+		// discoverable for compute units, and a buyer's inference client passes
+		// over it.
+		Endpoint string `yaml:"endpoint"`
+		// AnnounceInterval overrides DefaultAnnounceInterval when non-zero.
+		AnnounceInterval time.Duration `yaml:"announce_interval"`
 	} `yaml:"market"`
 	Inference InferenceConfig `yaml:"inference"`
 	// Agent configures the external agent-deployment gRPC API
@@ -87,6 +104,23 @@ type Config struct {
 	// without a bridge. See bridge_watch.go for the fields and the authority
 	// model.
 	Bridge BridgeConfig `yaml:"bridge"`
+	// EthRPC serves the subset of Ethereum's JSON-RPC a wallet needs, so this
+	// chain can be added to MetaMask as a network. It is off unless an address
+	// is set, and refuses to start without consensus.chain_id.
+	EthRPC struct {
+		// Addr is the TCP listen address, e.g. "0.0.0.0:9095". Empty or "off"
+		// disables the endpoint.
+		//
+		// This is a PUBLIC endpoint by intent - a wallet has to reach it - so put
+		// TLS in front of it. It is read-mostly and holds no keys: the only write
+		// is eth_sendRawTransaction, which carries the sender's own signature and
+		// can spend nobody else's balance.
+		Addr string `yaml:"addr"`
+		// AllowedOrigins lists the browser origins allowed to call it. Empty
+		// means no browser may, which is the safe default and costs a wallet
+		// extension nothing: it proxies the request itself and sends no Origin.
+		AllowedOrigins []string `yaml:"allowed_origins"`
+	} `yaml:"eth_rpc"`
 	// Connect exposes the same market and inference services over plain HTTP
 	// (the Connect protocol's unary JSON form) so a browser can call them. Raw
 	// gRPC needs HTTP/2 trailers, which no browser can produce, so without this
@@ -151,6 +185,37 @@ type Config struct {
 		RateLimitBurst int `yaml:"rate_limit_burst"`
 	} `yaml:"connect"`
 	Consensus struct {
+		// ChainID is this chain's EIP-155 identifier. It is inside the signature
+		// of every transaction an Ethereum wallet produces, which is what stops a
+		// transaction signed for another network - a testnet, or someone else's
+		// chain - from being replayed here.
+		//
+		// It must be IDENTICAL on every node and must never be changed on a
+		// running chain: a node with a different value reaches a different verdict
+		// on the same block, and changing it invalidates every signature already
+		// made for the old one. Pick an id nobody else uses (chainlist.org is the
+		// registry people check) before any wallet connects.
+		//
+		// Zero, the default, means this node accepts no Ethereum-enveloped
+		// transaction at all. It is never read as "any chain".
+		ChainID uint64 `yaml:"chain_id"`
+		// ProtocolUpgrades schedules protocol-version activations by height, as
+		// entries of {height, version}. It must be IDENTICAL on every node: the
+		// version is part of block validity, so two nodes with different schedules
+		// disagree about the same block.
+		//
+		// This is how the next rule change avoids being another coordinated
+		// restart. Add an entry far enough out that every operator can upgrade,
+		// roll the binary over days, and every node switches at the same HEIGHT
+		// rather than at a moment agreed in a chat. A node that has not upgraded
+		// by then stops voting, which is the loud failure.
+		//
+		// Empty means the chain runs the genesis version forever, which is the
+		// right value until a change is actually planned.
+		ProtocolUpgrades []struct {
+			Height  uint64 `yaml:"height"`
+			Version uint32 `yaml:"version"`
+		} `yaml:"protocol_upgrades"`
 		// MembershipMode is "operator-approved" for the legacy allow-list or
 		// "bonded-open" for permissionless, self-signed admission after the
 		// configured minimum bond has committed.
@@ -292,6 +357,19 @@ type StakeConfig struct {
 	// The node's consensus account has to hold the coins first. Its id is
 	// printed at startup; fund it with `matrix fund` or a transfer.
 	Bond uint64 `yaml:"bond"`
+	// BondResidency is the minimum number of blocks a bond stays posted before it
+	// may be withdrawn, counted from the height it was posted.
+	//
+	// It is what makes a bond a stake rather than a formality, and it is why a
+	// marketplace listing can cost anything at all: without it an account that
+	// was never a validator could withdraw the instant it bonded, so a seller
+	// could bond to clear a buyer's floor, take the business, and pull the money
+	// in the next block.
+	//
+	// Consensus-critical. It decides whether a withdrawal is valid in a block, so
+	// every node must carry the same value or they will disagree about whether a
+	// block is legal. Zero keeps the old behaviour.
+	BondResidency uint64 `yaml:"bond_residency"`
 }
 
 // effectiveMinBond and effectiveUnbonding resolve what the engine will actually
@@ -435,6 +513,44 @@ type InferenceBackendConfig struct {
 	// APIKeyEnv names the environment variable holding the upstream API key for
 	// "openai". Empty defaults to OPENAI_API_KEY.
 	APIKeyEnv string `yaml:"api_key_env"`
+	// RequestTimeout bounds one upstream request to this backend end to end,
+	// including the time spent reading a streamed body. Zero means the inference
+	// package default (60s).
+	//
+	// A provider serving a model on its own GPU is the reason this is
+	// configurable. 60s is a fair cap on a hosted API, but a local model asked
+	// for a few thousand tokens routinely runs longer, and the fixed cap failed
+	// the job AFTER the GPU had already produced the answer. Size it from the
+	// model and the completion length actually advertised, not generously: the
+	// timeout is also what stops a wedged runner from holding a reservation.
+	RequestTimeout time.Duration `yaml:"request_timeout"`
+	// Attestation is a path to a maintainer-signed statement that this network
+	// operates this seller, published in the announcements for it.
+	//
+	// Only the people running a network have the key that makes one verify, so an
+	// ordinary provider leaves this empty and is listed unbadged - which is the
+	// normal case, not a deficiency. A file that does not parse, or one signed by
+	// a key the chain does not name as maintainer, leaves the seller unbadged
+	// too: readers check it themselves and simply do not vouch.
+	Attestation string `yaml:"attestation"`
+	// HealthCheck turns the readiness probe on or off for this backend. Unset
+	// means ON: a provider that did not think about it gets the protection
+	// rather than the silent failure it replaced.
+	//
+	// The switch exists because "openai" also points at PAID third-party vendors,
+	// where a probe every interval is a billed request that counts against a rate
+	// limit. On your own model server, leave it on.
+	HealthCheck *bool `yaml:"health_check"`
+	// HealthCheckInterval is how often the backend is probed. Zero means 30s.
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"`
+	// HealthCheckPath overrides the path the probe GETs. Empty means the per-kind
+	// default: /v1/models for "openai", /api/tags for "local-http".
+	//
+	// vLLM, SGLang and TGI expose /health, which reports on the inference engine
+	// rather than only the HTTP layer in front of it, and is the better signal
+	// when the backend is a local server. A wedged engine can still answer
+	// /v1/models from a list it built at startup.
+	HealthCheckPath string `yaml:"health_check_path"`
 	// Models are the model identifiers this backend serves. They are what a
 	// request naming a model is routed on; a backend that declares none can
 	// still be reached by naming its provider ID explicitly.
@@ -532,6 +648,95 @@ func generateAPIKey() (string, error) {
 	return hex.EncodeToString(buf), nil
 }
 
+// apiKeysFromConfig builds the credential set a node accepts, from its config
+// and environment.
+//
+// Extracted so that RELOADING and STARTING cannot drift. A reload that assembled
+// keys slightly differently from startup - forgetting the environment key, or
+// naming unnamed entries differently - would hand an operator a node whose
+// accepted credentials silently changed on a signal they expected to be a no-op.
+func apiKeysFromConfig(cfg *Config) ([]*admin.APIKey, error) {
+	if !cfg.Security.EnableACLs {
+		return nil, nil
+	}
+	var keys []*admin.APIKey
+	for i, k := range cfg.Security.APIKeys {
+		if k.Key == "" {
+			return nil, fmt.Errorf("security.api_keys[%d] has no key", i)
+		}
+		name := k.Name
+		if name == "" {
+			name = fmt.Sprintf("config-key-%d", i)
+		}
+		keys = append(keys, &admin.APIKey{
+			Key:     k.Key,
+			Role:    roleFromConfig(k.Role),
+			Name:    name,
+			Account: k.Account,
+		})
+	}
+	// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
+	// of files entirely.
+	if envKey := os.Getenv("MATRIX_ADMIN_API_KEY"); envKey != "" {
+		keys = append(keys, &admin.APIKey{
+			Key:  envKey,
+			Role: admin.RoleAdmin,
+			Name: "env-admin",
+		})
+	}
+	return keys, nil
+}
+
+// ReloadAPIKeys re-reads the node's config file and swaps in the credentials it
+// names, without a restart.
+//
+// WHY THIS EXISTS. Issuing a buyer an API key meant editing the config and
+// restarting the node. On a validator that is not a small thing: the restart is
+// disruptive to a network that is counting on it, so keys got batched, and a
+// developer waiting on one waited for a maintenance window.
+//
+// WHAT IT DELIBERATELY IS NOT. There is no self-serve signup here and no RPC
+// that mints credentials. Who may hold a key, what it may spend and what it
+// costs are product decisions, and a node should not invent them. This removes
+// the restart and nothing else: the operator still decides, in the same file,
+// reviewed the same way.
+//
+// A BAD FILE MUST NOT DISARM THE NODE. The new set is parsed and validated in
+// full before anything is swapped, and on any error the running credentials are
+// left exactly as they were. The alternative - clearing first, then failing to
+// load - locks the operator out of the node they were trying to administer, at
+// the moment they are already holding a broken config.
+func (n *Node) ReloadAPIKeys() error {
+	if n.adminServer == nil {
+		return fmt.Errorf("node is not started")
+	}
+	if n.configPath == "" {
+		return fmt.Errorf("node was not loaded from a config file, so there is nothing to re-read")
+	}
+	cfg, err := LoadConfig(n.configPath)
+	if err != nil {
+		return fmt.Errorf("re-read config: %w", err)
+	}
+	if cfg.Security.EnableACLs != n.config.Security.EnableACLs {
+		// Turning authentication on or off changes which servers require a
+		// credential at all, and those were wired at start. Refusing is honest;
+		// reporting success while half the surfaces kept the old rule is not.
+		return fmt.Errorf("security.enable_acls changed, which needs a restart rather than a reload")
+	}
+	keys, err := apiKeysFromConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("the new config is not usable, so the running keys were kept: %w", err)
+	}
+	if cfg.Security.EnableACLs && len(keys) == 0 {
+		return fmt.Errorf("the new config names no API keys, which would refuse every RPC; the running keys were kept")
+	}
+	if err := n.adminServer.GetAuthenticator().ReplaceKeys(keys); err != nil {
+		return fmt.Errorf("the new keys were rejected, so the running keys were kept: %w", err)
+	}
+	n.config.Security.APIKeys = cfg.Security.APIKeys
+	return nil
+}
+
 // roleFromConfig maps a configured role name to an admin role, defaulting to
 // admin for an unset value: a single-operator node that bothered to write a key
 // means it to work.
@@ -607,26 +812,31 @@ func metadataFromHTTPHeader(h http.Header) metadata.MD {
 
 // Node represents a Matrix node instance
 type Node struct {
-	ctx              context.Context
-	cancel           context.CancelFunc
-	config           *Config
-	p2pHost          *p2p.Host
-	transport        *transport.Transport
-	eventBus         *transport.EventBus
-	kvStore          *kv.Store
-	market           *market.Market
-	tokenChain       *token.Chain
-	treasury         *token.Treasury
-	exchange         *marketexchange.Exchange
-	consensus        *consensus.Engine
-	consensusAccount *token.Account
-	evidence         *consensus.EvidenceStore
-	metrics          *metrics.Collector
-	adminServer      *admin.Server
-	marketServer     *marketapi.Server
-	inferenceSvc     *inference.Service
-	inferenceServer  *inferenceapi.Server
-	agentServer      *agentapi.Server
+	ctx    context.Context
+	cancel context.CancelFunc
+	config *Config
+	// configPath is the file this node was loaded from, kept so a reload reads
+	// the same file rather than a path passed in again from somewhere else.
+	configPath            string
+	p2pHost               *p2p.Host
+	transport             *transport.Transport
+	eventBus              *transport.EventBus
+	kvStore               *kv.Store
+	market                *market.Market
+	tokenChain            *token.Chain
+	treasury              *token.Treasury
+	exchange              *marketexchange.Exchange
+	consensus             *consensus.Engine
+	consensusAccount      *token.Account
+	evidence              *consensus.EvidenceStore
+	metrics               *metrics.Collector
+	adminServer           *admin.Server
+	marketServer          *marketapi.Server
+	ethRPCServer          *http.Server
+	inferenceHealthChecks []inferenceHealthCheck
+	inferenceSvc          *inference.Service
+	inferenceServer       *inferenceapi.Server
+	agentServer           *agentapi.Server
 	// unhealthy is why this node cannot serve, or nil when it can.
 	//
 	// It is here rather than inside a subsystem because two surfaces have to
@@ -807,8 +1017,13 @@ func Initialize(configPath string) error {
 }
 
 // New creates a new Node instance
-func New(ctx context.Context, configPath string) (*Node, error) {
-	// Load configuration
+// LoadConfig reads and defaults a node config file.
+//
+// Split out of New so that a RELOAD reads a config exactly the way a start
+// does. Two copies of "read, parse, apply defaults" drift, and a config that
+// means one thing at boot and another on a signal is the worst kind of bug to
+// be holding during an incident.
+func LoadConfig(configPath string) (*Config, error) {
 	config := &Config{}
 	configData, err := os.ReadFile(configPath)
 	if err != nil {
@@ -838,16 +1053,25 @@ func New(ctx context.Context, configPath string) (*Node, error) {
 	if config.Storage.Path == "" {
 		config.Storage.Path = "./data"
 	}
+	return config, nil
+}
+
+func New(ctx context.Context, configPath string) (*Node, error) {
+	config, err := LoadConfig(configPath)
+	if err != nil {
+		return nil, err
+	}
 
 	nodeCtx, cancel := context.WithCancel(ctx)
 
 	return &Node{
-		ctx:      nodeCtx,
-		cancel:   cancel,
-		config:   config,
-		agents:   make(map[string]*agent.Agent),
-		souls:    make(map[string]*soul.Soul),
-		matrices: make(map[string]*matrix.Matrix),
+		ctx:        nodeCtx,
+		cancel:     cancel,
+		config:     config,
+		configPath: configPath,
+		agents:     make(map[string]*agent.Agent),
+		souls:      make(map[string]*soul.Soul),
+		matrices:   make(map[string]*matrix.Matrix),
 	}, nil
 }
 
@@ -988,11 +1212,21 @@ func (n *Node) Start() error {
 	// It owns background receive loops that terminate when n.ctx is cancelled, so
 	// no explicit stop is required beyond cancelling the node context in Stop().
 	settled := token.NewSettledLedger(n.market.Ledger(), n.tokenChain)
+	endpoint, err := marketEndpoint(n.config)
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
+	}
+	attestations, err := loadAttestations(n.config.Inference.Backends)
+	if err != nil {
+		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
+	}
 	exchange, err := marketexchange.New(marketexchange.Config{
-		Transport: n.transport,
-		Settled:   settled,
-		Market:    n.market,
-		PeerID:    n.p2pHost.GetPeerID().String(),
+		Transport:    n.transport,
+		Settled:      settled,
+		Market:       n.market,
+		PeerID:       n.p2pHost.GetPeerID().String(),
+		Endpoint:     endpoint,
+		Attestations: attestations,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to initialize marketplace exchange: %w", err)
@@ -1178,14 +1412,18 @@ func (n *Node) Start() error {
 		MinBond:                       minBond,
 		ZeroMinBond:                   zeroMinBond,
 		UnbondingPeriod:               n.config.Consensus.Stake.UnbondingPeriod,
+		BondResidency:                 n.config.Consensus.Stake.BondResidency,
 		TargetBond:                    n.config.Consensus.Stake.Bond,
 		FeeBasisPoints:                n.config.Consensus.FeeBasisPoints,
 		MaintainerAccount:             n.config.Consensus.MaintainerAccount,
 		MaintainerFeeShareBasisPoints: n.config.Consensus.MaintainerFeeShareBasisPoints,
 		// The provider emission and the registry that decides who earns it.
 		Providers:                consensus.NewProviderRegistry(n.kvStore),
+		Earnings:                 consensus.NewEarningsStore(n.kvStore),
 		ProviderEmissionPerBlock: n.config.Consensus.Rewards.PerBlock,
 		ProviderEmissionHalfLife: n.config.Consensus.Rewards.HalfLife,
+		ChainID:                  n.config.Consensus.ChainID,
+		ProtocolUpgrades:         protocolUpgradesFromConfig(n.config.Consensus.ProtocolUpgrades),
 		ApprovedProviders:        n.config.Consensus.Rewards.ApprovedProviders,
 		OnEquivocation: func(eq *consensus.Equivocation) {
 			fmt.Printf("consensus: validator %s equivocated at height %d round %d; evidence stored under "+
@@ -1213,40 +1451,17 @@ func (n *Node) Start() error {
 	n.startBootstrapDialer()
 
 	// Initialize admin server with authentication if enabled
-	var apiKeys []*admin.APIKey
-	if n.config.Security.EnableACLs {
-		for i, k := range n.config.Security.APIKeys {
-			if k.Key == "" {
-				return fmt.Errorf("security.api_keys[%d] has no key", i)
-			}
-			name := k.Name
-			if name == "" {
-				name = fmt.Sprintf("config-key-%d", i)
-			}
-			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:     k.Key,
-				Role:    roleFromConfig(k.Role),
-				Name:    name,
-				Account: k.Account,
-			})
-		}
-		// MATRIX_ADMIN_API_KEY is additive, for deployments that keep secrets out
-		// of files entirely.
-		if envKey := os.Getenv("MATRIX_ADMIN_API_KEY"); envKey != "" {
-			apiKeys = append(apiKeys, &admin.APIKey{
-				Key:  envKey,
-				Role: admin.RoleAdmin,
-				Name: "env-admin",
-			})
-		}
-		if len(apiKeys) == 0 {
-			// Worth shouting about: with ACLs on and no valid key, every RPC on
-			// every surface answers "authentication required" and the node cannot
-			// be driven at all - including by its own CLI.
-			fmt.Printf("Warning: security.enable_acls is true but no API keys are configured, " +
-				"so every RPC will refuse. Add one under security.api_keys, set " +
-				"MATRIX_ADMIN_API_KEY, or run `matrixd -init` to generate a config with a key.\n")
-		}
+	apiKeys, err := apiKeysFromConfig(n.config)
+	if err != nil {
+		return err
+	}
+	if n.config.Security.EnableACLs && len(apiKeys) == 0 {
+		// Worth shouting about: with ACLs on and no valid key, every RPC on
+		// every surface answers "authentication required" and the node cannot
+		// be driven at all - including by its own CLI.
+		fmt.Printf("Warning: security.enable_acls is true but no API keys are configured, " +
+			"so every RPC will refuse. Add one under security.api_keys, set " +
+			"MATRIX_ADMIN_API_KEY, or run `matrixd -init` to generate a config with a key.\n")
 	}
 
 	adminServer, err := admin.NewServer(admin.Config{
@@ -1354,6 +1569,9 @@ func (n *Node) Start() error {
 		Funder:          n.treasury,
 		Settler:         settlementCoordinator,
 		TransferSettler: transferCoordinator,
+		// Settled history for directory listings, read from THIS node's chain so a
+		// seller has no say in the figures shown for it.
+		Earnings: engineEarnings{engine: n.consensus},
 		// Reconciler is a marketapi.Reconciler interface value. Passing a typed
 		// nil *bridgeReconciler would be a non-nil interface, defeating the
 		// "no bridge -> FailedPrecondition" check, so only set it when present.
@@ -1417,6 +1635,11 @@ func (n *Node) Start() error {
 		Registry: inferenceRegistry,
 		Settler:  n.consensus,
 		Accounts: n.signingAccts,
+		// The key that signs the receipt handed to each buyer. The node's own,
+		// not the payout account's: a payout account may be a wallet address
+		// whose key this node does not hold, and the node is the party
+		// answerable for the claim anyway - it is what ran the model.
+		Node: n.consensusAccount,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create inference service: %w", err)
@@ -1449,6 +1672,13 @@ func (n *Node) Start() error {
 			PricePerUnit: demoInferencePrice,
 			ObservedAt:   observedAt,
 			ValidUntil:   observedAt.Add(market.DefaultQuoteTTL),
+			// Advertised under a model name, because a provider that names none
+			// cannot be ROUTED to - and routing by model is how every buyer finds
+			// a seller. Without it the demo backend was reachable only by a caller
+			// who already knew its provider id, which a client that came in
+			// through the directory never does. "echo" is what it is; a name
+			// suggesting otherwise would put a fake model in a listing.
+			Models: []string{"echo"},
 		}
 		if _, exists := n.market.GetProvider(n.config.Inference.EchoProvider); !exists {
 			if err := n.market.RegisterProvider(demoQuote); err != nil {
@@ -1462,6 +1692,21 @@ func (n *Node) Start() error {
 	}
 
 	if err := n.registerConfiguredInferenceBackends(inferenceRegistry); err != nil {
+		return err
+	}
+	// Follow each backend's health and keep its order-book listing honest, so a
+	// dead model server stops winning routing decisions instead of taking
+	// reservations it cannot serve.
+	n.startInferenceHealthChecks()
+
+	// Publish this node's providers to the directory, now that they are
+	// registered and their health is being tracked. Started here rather than
+	// beside the exchange because announcing before the order book is populated
+	// would spend the first interval advertising nothing.
+	go n.announceLoop(n.ctx, n.config.Market.AnnounceInterval)
+
+	// The endpoint a wallet adds as a network.
+	if err := n.startEthRPC(); err != nil {
 		return err
 	}
 
@@ -1582,6 +1827,10 @@ func (n *Node) Start() error {
 			Inference: n.inferenceSvc,
 			Router:    n.market,
 			Auth:      openAIAuth(marketAuth),
+			// Persisted, because the failure it prevents outlives a process: a node
+			// that restarted between a charge and the retry of it would forget the
+			// key and charge again.
+			Idempotency: newIdempotencyStore(n.kvStore),
 		})
 		if err != nil {
 			return fmt.Errorf("failed to build the OpenAI-compatible handler: %w", err)
@@ -1664,6 +1913,14 @@ func (n *Node) Start() error {
 					d.ID, d.NativeRecipient, convErr)
 				return
 			}
+			// Both spellings when they differ, so the operator's log agrees with
+			// the event a reader sees on a block explorer AND names the account
+			// that was actually credited.
+			if d.RawNativeRecipient != "" && d.RawNativeRecipient != d.NativeRecipient {
+				fmt.Printf("Bridge watcher: unlocked %d native base units to %s (burn %s; the contract emitted %q, normalised)\n",
+					native, d.NativeRecipient, d.ID, d.RawNativeRecipient)
+				return
+			}
 			fmt.Printf("Bridge watcher: unlocked %d native base units to %s (burn %s)\n",
 				native, d.NativeRecipient, d.ID)
 		},
@@ -1719,6 +1976,11 @@ func (n *Node) Stop() error {
 		n.cancel()
 		<-n.bridgeWatchDone
 	}
+
+	// Stop the wallet-facing JSON-RPC listener before the subsystems it reads
+	// from are torn down, so an in-flight wallet poll cannot reach a half-closed
+	// engine.
+	n.stopEthRPC(n.ctx)
 
 	// Stop inference API server
 	if n.connectServer != nil {
@@ -2275,11 +2537,14 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 
 		// Build and install the backend first: a bad kind or a missing API key
 		// should stop the node before it advertises capacity it cannot serve.
-		if _, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
-			Kind:      inference.BackendKind(b.Kind),
-			BaseURL:   b.BaseURL,
-			APIKeyEnv: b.APIKeyEnv,
-		}); err != nil {
+		backend, err := registry.RegisterFromConfig(b.ID, inference.BackendConfig{
+			Kind:           inference.BackendKind(b.Kind),
+			BaseURL:        b.BaseURL,
+			APIKeyEnv:      b.APIKeyEnv,
+			RequestTimeout: b.RequestTimeout,
+			ProbePath:      b.HealthCheckPath,
+		})
+		if err != nil {
 			return fmt.Errorf("inference.backends[%d] (%s): %w", i, b.ID, err)
 		}
 
@@ -2310,6 +2575,18 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 			return fmt.Errorf("inference.backends[%d] (%s): refresh market quote: %w", i, b.ID, err)
 		}
 
+		// Collect rather than start: Start launches these once the node context
+		// exists, so registration stays callable without spawning goroutines.
+		if probeable, ok := backend.(inference.ProbeableBackend); ok {
+			if interval, enabled := inferenceHealthCheckInterval(b); enabled {
+				n.inferenceHealthChecks = append(n.inferenceHealthChecks, inferenceHealthCheck{
+					providerID: b.ID,
+					backend:    probeable,
+					interval:   interval,
+				})
+			}
+		}
+
 		stored, _ := n.market.GetProvider(b.ID)
 		models := "none (reachable by provider id only)"
 		if len(stored.Models) > 0 {
@@ -2331,4 +2608,21 @@ func (n *Node) RegisterInferenceAccount(acct *token.Account) {
 		return
 	}
 	n.signingAccts.Add(acct)
+}
+
+// protocolUpgradesFromConfig converts the YAML shape into the consensus one. The
+// two are separate types so the config file's field names are a config decision
+// rather than a consensus one.
+func protocolUpgradesFromConfig(in []struct {
+	Height  uint64 `yaml:"height"`
+	Version uint32 `yaml:"version"`
+}) []consensus.ProtocolUpgrade {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]consensus.ProtocolUpgrade, 0, len(in))
+	for _, u := range in {
+		out = append(out, consensus.ProtocolUpgrade{Height: u.Height, Version: u.Version})
+	}
+	return out
 }

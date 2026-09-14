@@ -161,6 +161,50 @@ func credentialDigest(credential string) string {
 	return string(sum[:])
 }
 
+// ReplaceKeys swaps the whole accepted credential set atomically.
+//
+// It exists so an operator can issue or revoke a key without restarting the
+// node. The restart is the expensive part on a validator - a network is
+// counting on it - so keys got batched and a developer waiting on one waited
+// for a maintenance window.
+//
+// BUILT BEFORE ANYTHING IS SWAPPED. The replacement map is constructed and
+// every entry validated first; only then does it take the lock and swap. The
+// obvious implementation - clear the map, then add the new keys - locks the
+// operator out of the node at exactly the moment they are holding a config that
+// does not load, which is when they most need to be able to reach it.
+//
+// An empty set is refused for the same reason. "Accept nothing" is not a
+// credential set anybody means to install on a running node; it is what a
+// mis-parsed file looks like.
+func (a *Authenticator) ReplaceKeys(keys []*APIKey) error {
+	if len(keys) == 0 {
+		return fmt.Errorf("refusing to replace the key set with an empty one: every request would be rejected")
+	}
+	next := make(map[string]*APIKey, len(keys))
+	for i, key := range keys {
+		if key == nil {
+			return fmt.Errorf("key %d is nil", i)
+		}
+		if key.Key == "" {
+			return fmt.Errorf("key %d (%q) has no credential", i, key.Name)
+		}
+		if key.Role == "" {
+			return fmt.Errorf("key %d (%q) has no role", i, key.Name)
+		}
+		// Same rule as AddKey: what is stored never carries a usable credential,
+		// because these records are handed back to callers and travel toward logs.
+		stored := *key
+		stored.Key = ""
+		next[credentialDigest(key.Key)] = &stored
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.keys = next
+	return nil
+}
+
 // RemoveKey removes an API key
 func (a *Authenticator) RemoveKey(key string) {
 	a.mu.Lock()

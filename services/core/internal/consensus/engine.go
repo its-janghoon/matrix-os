@@ -10,6 +10,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/ecirlabs/matrix-core/internal/ethsig"
 	"github.com/ecirlabs/matrix-core/internal/market"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"github.com/ecirlabs/matrix-core/internal/transport"
@@ -188,6 +189,19 @@ type Config struct {
 	// ZeroMinBond removes the minimum-bond requirement, which is only
 	// appropriate on a network that is not using stake for security.
 	ZeroMinBond bool
+	// BondResidency is the minimum number of blocks a bond stays posted before it
+	// may be withdrawn, counted from the height it was posted.
+	//
+	// It is what makes a bond a stake rather than a formality. Without it an
+	// account that was never a validator could withdraw the instant it bonded -
+	// the only clock was the one measuring a departure from the validator set,
+	// and it had never made one - so a seller could bond to clear a buyer's
+	// floor, take the business, and pull the money in the next block.
+	//
+	// Consensus-critical: it decides whether a withdrawal is VALID in a block, so
+	// every node must be configured with the same value or they will disagree
+	// about whether a block is legal. Zero keeps the old behaviour.
+	BondResidency uint64
 	// UnbondingPeriod is how many blocks after leaving the validator set an
 	// account must wait before withdrawing its bond. Zero means
 	// DefaultUnbondingPeriod.
@@ -227,6 +241,11 @@ type Config struct {
 	// from the same block and forks itself off, which is also why an operator
 	// cannot quietly set it to zero and keep the network.
 	MaintainerFeeShareBasisPoints uint32
+	// Earnings, when non-nil, tallies what each account has been paid as blocks
+	// apply, so a buyer can weigh a seller by settled history rather than by what
+	// the seller says about itself. Leaving it nil turns the tally off; nothing
+	// else changes.
+	Earnings *EarningsStore
 	// Providers, when non-nil, is the registry of accounts that earn provider
 	// rewards from the genesis pool. Without it no emission is paid.
 	Providers *ProviderRegistry
@@ -243,6 +262,22 @@ type Config struct {
 	// ProviderEmissionHalfLife is how many blocks halve the emission. Zero means
 	// DefaultProviderEmissionHalfLife.
 	ProviderEmissionHalfLife uint64
+	// ProtocolUpgrades schedules protocol-version activations by height. It must
+	// be identical on every node: the version is part of block validity, so two
+	// nodes with different schedules disagree about the same block.
+	//
+	// Empty means the chain runs ProtocolVersionGenesis forever, which is the
+	// right value until a rule change is actually planned.
+	ProtocolUpgrades []ProtocolUpgrade
+	// ChainID identifies this chain inside the signature of every
+	// Ethereum-enveloped transaction, which is what stops one signed for another
+	// network from being replayed here. It must be identical on every node: a
+	// node with a different value reaches a different verdict on the same block.
+	//
+	// Zero means no Ethereum-enveloped transaction is accepted at all, which is
+	// the safe reading for a network that has not chosen an id. It is never
+	// treated as "any chain".
+	ChainID uint64
 	// ApprovedProviders is this operator's allow-list of provider registry
 	// changes, as "add:<account id>" / "remove:<account id>". Same veto model as
 	// ApprovedSetChanges: a node offers what its operator listed and votes
@@ -308,6 +343,7 @@ type Engine struct {
 	maxMempoolTxs        int
 	headAnnounceInterval time.Duration
 	onCommit             CommitObserver
+	earnings             *EarningsStore
 	evidence             *EvidenceStore
 	onEquivocation       func(eq *Equivocation)
 	selfVotes            *SelfVoteStore
@@ -324,7 +360,22 @@ type Engine struct {
 	heightEnteredAt      time.Time
 	membershipMode       MembershipMode
 	participateInOpenSet bool
-	approvedChanges      map[string]struct{}
+	// chainID is what an Ethereum-enveloped transaction's signature must commit
+	// to for this node to accept it. See Config.ChainID.
+	chainID uint64
+	// protocolUpgrades is the version schedule, normalized and sorted by height.
+	protocolUpgrades []ProtocolUpgrade
+	// stateRoot caches the ledger digest, and stateRootEpoch the ledger write
+	// epoch it was taken at. See stateRootLocked.
+	stateRoot      []byte
+	stateRootEpoch uint64
+	// headComplaints remembers the last disagreement reported about each peer, so
+	// an announcement that repeats on a timer does not repeat the log line.
+	headComplaints map[string]string
+	// now is the wall clock the block-timestamp rules read, injectable so a test
+	// can drive a proposer and a validator whose clocks disagree.
+	now             func() time.Time
+	approvedChanges map[string]struct{}
 	// approvedSpecs is the same allow-list in parsed form. A node does not only
 	// vote for the changes its operator approved, it also PROPOSES them: without
 	// that, approving a change would have no effect until some other node
@@ -340,6 +391,8 @@ type Engine struct {
 	// minBond gates admission; unbondingPeriod gates withdrawal.
 	minBond         uint64
 	unbondingPeriod uint64
+	// bondResidency is the minimum a bond stays posted, whoever posted it.
+	bondResidency uint64
 	// feeBasisPoints is the protocol fee rate; see Config.FeeBasisPoints.
 	feeBasisPoints uint32
 	// maintainerAccount / maintainerShareBPS are the standing cut of the fee
@@ -421,6 +474,23 @@ type Engine struct {
 	// node computes the identical set.
 	committedNonces map[string]struct{}
 	mempoolNonces   map[string]struct{}
+	// nonceHigh is the highest nonce each sender has had committed, which is
+	// what eth_getTransactionCount reports the successor of.
+	//
+	// A wallet expects a COUNTER, because on Ethereum a sender's nonces are
+	// consecutive. This chain treats a nonce as a uniquifier instead - a set
+	// membership test, not a sequence - so it has no counter to report. Tracking
+	// the high-water mark bridges the two: a wallet handed high+1 produces
+	// consecutive nonces from there, and the set accepts them because none has
+	// been seen. Counting the sender's committed transfers instead would be a
+	// scan of the whole chain on every wallet poll.
+	nonceHigh map[string]uint64
+	// evmIndex maps an Ethereum transaction id to where it committed, so a
+	// wallet polling for a receipt can be answered. See evmindex.go.
+	evmIndex map[string]TxLocation
+	// blockIndex maps a committed block hash to its height, so a receipt can be
+	// followed back to the block that carries it.
+	blockIndex map[string]uint64
 	// pendingMembership gives each identity one stable slot per open-membership
 	// operation. Unlike mempoolKey, its key excludes nonce, timestamp and
 	// signature, so re-signing the same admission, exit, bond or withdrawal
@@ -592,6 +662,10 @@ func New(cfg Config) (*Engine, error) {
 	if err != nil {
 		return nil, err
 	}
+	upgrades, err := normalizeUpgrades(cfg.ProtocolUpgrades)
+	if err != nil {
+		return nil, err
+	}
 	participateInOpenSet := true
 	if cfg.ParticipateInOpenSet != nil {
 		participateInOpenSet = *cfg.ParticipateInOpenSet
@@ -649,9 +723,11 @@ func New(cfg Config) (*Engine, error) {
 		stakeNeverWeighted:   true,
 		minBond:              stakeMinBond(cfg),
 		unbondingPeriod:      orUint64C(cfg.UnbondingPeriod, DefaultUnbondingPeriod),
+		bondResidency:        cfg.BondResidency,
 		targetBond:           cfg.TargetBond,
 		feeBasisPoints:       cfg.FeeBasisPoints,
 		maintainerShareBPS:   cfg.MaintainerFeeShareBasisPoints,
+		earnings:             cfg.Earnings,
 		providers:            cfg.Providers,
 		emissionPerBlock:     cfg.ProviderEmissionPerBlock,
 		emissionHalfLife:     orUint64C(cfg.ProviderEmissionHalfLife, DefaultProviderEmissionHalfLife),
@@ -659,10 +735,16 @@ func New(cfg Config) (*Engine, error) {
 		epochLength:          orUint64C(cfg.EpochLength, DefaultEpochLength),
 		membershipMode:       membershipMode,
 		participateInOpenSet: participateInOpenSet,
+		chainID:              cfg.ChainID,
+		protocolUpgrades:     upgrades,
+		now:                  time.Now,
 		approvedChanges:      make(map[string]struct{}, len(cfg.ApprovedSetChanges)),
 		mempoolSet:           make(map[string]struct{}),
 		committedNonces:      make(map[string]struct{}),
 		mempoolNonces:        make(map[string]struct{}),
+		nonceHigh:            make(map[string]uint64),
+		evmIndex:             make(map[string]TxLocation),
+		blockIndex:           make(map[string]uint64),
 		pendingMembership:    make(map[string]string),
 		bridgeLocker:         cfg.BridgeLocker,
 		burnAttestations:     make(map[string]map[string]struct{}),
@@ -828,8 +910,11 @@ func (e *Engine) Start(ctx context.Context) error {
 			return err
 		}
 		e.mu.Lock()
+		e.recordBlockHashLocked(b, h)
 		for i := range b.Txs {
 			e.committedTxs[mempoolKey(&b.Txs[i])] = struct{}{}
+			e.recordNonceHighLocked(&b.Txs[i])
+			e.recordEVMIndexLocked(&b.Txs[i], TxLocation{Height: h, Index: i})
 			if nk, checked := nonceKey(&b.Txs[i]); checked {
 				e.committedNonces[nk] = struct{}{}
 			}
@@ -945,7 +1030,10 @@ func (e *Engine) handleTx(_ context.Context, msg transport.Message) {
 }
 
 func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
-	if err := tx.Verify(); err != nil {
+	// VerifyForChain rather than Verify: an Ethereum envelope's signature proves
+	// which chain it was signed FOR, and only this node's config knows which
+	// chain this IS. Verify alone would accept another network's transaction.
+	if err := tx.VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 		return err
 	}
 	if tx.To == "" {
@@ -1204,7 +1292,7 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 	if err := json.Unmarshal(msg.Payload, &tx); err != nil || !isOpenMembershipTransaction(&tx) {
 		return
 	}
-	if err := tx.Verify(); err != nil {
+	if err := tx.VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 		return
 	}
 	// Submit may echo a newly-seen transaction once. The mempool dedup makes
@@ -1212,10 +1300,42 @@ func (e *Engine) handleMembership(_ context.Context, msg transport.Message) {
 	_ = e.Submit(&tx)
 }
 
-// mempoolKey is a stable dedup key for a transaction: sender + nonce +
-// signature hex. Two submissions of the same signed tx collapse to one.
+// mempoolKey is a stable dedup key for a transaction: sender, nonce, and
+// whatever carries its signature. Two submissions of the same signed tx collapse
+// to one; two DIFFERENT transactions must never collapse.
+//
+// The signature is what makes it an identity, and an Ethereum-enveloped
+// transaction keeps its signature INSIDE the envelope rather than in the
+// Signature field, which is empty on that path. Keying on Signature alone
+// therefore gave every transaction from one sender at one nonce the same key,
+// whatever it paid or to whom - and the consequences all pointed the same way:
+//
+//   - The second transaction was accepted as an idempotent resubmission of the
+//     first and silently dropped, so a transfer a user signed simply vanished.
+//   - The nonce-reuse rule never fired, because the early idempotent return is
+//     ahead of it.
+//   - committedTxs is the replay set, so once one committed the other could
+//     never be included in any block by anyone.
+//   - appliedTxs is keyed the same way, so a receipt for the second would report
+//     the first's outcome - a success for a transfer that never applied.
+//
+// So the envelope's own bytes are the identity when there is an envelope.
 func mempoolKey(tx *token.Transaction) string {
-	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, tx.Signature)
+	signature := tx.Signature
+	switch {
+	case tx.IsEVM():
+		signature = tx.Raw
+	case tx.SenderIsEth():
+		// Canonicalised, because an ecrecover signature is accepted in BOTH the
+		// {0,1} and {27,28} conventions - the envelope path emits one and wallets
+		// emit the other, so neither can be refused - and that gives one
+		// authorisation two byte-distinct encodings. Keyed on the raw bytes, the
+		// twin reads as a new transaction: the replay set misses, and for a
+		// reserved recipient (exempt from the nonce rule) the operation its
+		// signer authorised once applies again.
+		signature = ethsig.CanonicalSignature(tx.Signature)
+	}
+	return fmt.Sprintf("%s:%d:%x", tx.SenderID(), tx.Nonce, signature)
 }
 
 // nonceKey identifies a sender's use of one nonce, and reports whether the
@@ -1229,7 +1349,27 @@ func mempoolKey(tx *token.Transaction) string {
 // operations; each already has its own validation (verifyStakeTxLocked,
 // verifySetChangeLocked, verifyProviderChangeLocked) and its own dedup.
 func nonceKey(tx *token.Transaction) (string, bool) {
-	if IsReservedRecipient(tx.To) {
+	// A BRIDGE LOCK is nonce-checked despite being a reserved recipient.
+	//
+	// The rest of the reserved operations carry protocol state - a bond, a set
+	// change, a burn unlock a validator submits on the chain's behalf - and
+	// their own rules decide what a duplicate means, so a nonce would be a
+	// second, redundant uniqueness rule over them. A lock is not like that: it
+	// is a user signing away their own balance, and its LOCK ID is derived from
+	// this nonce.
+	//
+	// Leaving it out meant the nonce high-water mark never moved for an account
+	// that only locked, so every lock was signed at the same nonce and every one
+	// of them derived the SAME lock id. The second overwrote the first's record
+	// while its native stayed in escrow, the contract refused the duplicate
+	// mint - correctly - and reconcile then reported an escrow balance larger
+	// than anything outstanding. Found on a live chain: four locks, 500000000000
+	// escrowed against 300000000000 outstanding.
+	//
+	// CONSENSUS-AFFECTING. A node with this and a node without it disagree about
+	// whether a second lock at a spent nonce may commit, so it goes out to the
+	// whole validator set together.
+	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
@@ -1531,6 +1671,9 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		PrevBlockHash: append([]byte(nil), e.headHash...),
 		Txs:           txs,
 		ProposerID:    e.selfID,
+		Timestamp:     e.proposalTimestampLocked(),
+		Version:       e.protocolVersionAt(e.height),
+		StateRoot:     e.stateRootLocked(),
 	}
 	if err := b.Sign(e.self.PrivateKey); err != nil {
 		return nil, nil
@@ -1785,6 +1928,17 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	if err := b.VerifySignature(pub); err != nil {
 		return err
 	}
+	if err := e.verifyBlockTimestampLocked(b); err != nil {
+		return err
+	}
+	// Version before state root: a version mismatch EXPLAINS a state mismatch, so
+	// reporting it first names the cause rather than the symptom.
+	if err := e.verifyBlockVersionLocked(b); err != nil {
+		return err
+	}
+	if err := e.verifyBlockStateRootLocked(b); err != nil {
+		return err
+	}
 	// Every transaction must be individually validly signed. A single bad tx
 	// invalidates the whole block, so a malicious leader cannot smuggle a forged
 	// transfer past honest voters.
@@ -1792,7 +1946,11 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	seenNonceInBlock := make(map[string]struct{}, len(b.Txs))
 	seenMembershipIdentities := make(map[string]struct{})
 	for i := range b.Txs {
-		if err := b.Txs[i].Verify(); err != nil {
+		// Every node validating this block must reach the same verdict, so the
+		// chain check is part of block validity and not only a mempool filter. A
+		// proposer that includes another chain's transaction proposes an invalid
+		// block rather than one honest nodes merely decline to relay.
+		if err := b.Txs[i].VerifyForChain(e.chainID, ReservedRecipientFor); err != nil {
 			return fmt.Errorf("%w: tx %d: %v", ErrInvalidMessage, i, err)
 		}
 		if b.Txs[i].To == "" {
@@ -2099,7 +2257,7 @@ func (e *Engine) verifyStakeTxLocked(tx *token.Transaction, height uint64) error
 		if e.stake == nil {
 			return fmt.Errorf("%w: this network does not use bonded stake", ErrInvalidMessage)
 		}
-		at, allowed, err := e.stake.WithdrawableAt(sender, e.vset(), e.unbondingPeriod)
+		at, allowed, err := e.stake.WithdrawableAt(sender, e.vset(), e.unbondingPeriod, e.bondResidency)
 		if err != nil {
 			return err
 		}
@@ -3020,7 +3178,12 @@ func (e *Engine) maybeAnnounceHead(ctx context.Context) {
 		return
 	}
 	e.lastHeadAnnounce = time.Now()
-	ann := HeadAnnounce{Height: e.height, NodeID: e.selfID}
+	ann := HeadAnnounce{
+		Height:    e.height,
+		NodeID:    e.selfID,
+		HeadHash:  append([]byte(nil), e.headHash...),
+		StateRoot: append([]byte(nil), e.stateRootLocked()...),
+	}
 	e.mu.Unlock()
 
 	if data, err := json.Marshal(&ann); err == nil {
@@ -3146,7 +3309,16 @@ func (e *Engine) handleHeadAnnounce(ctx context.Context, msg transport.Message) 
 		e.peerHeight = ann.Height
 	}
 	ahead := ann.Height > e.height
+	disagreement := e.headDisagreementLocked(&ann)
 	e.mu.Unlock()
+
+	if disagreement != "" {
+		// Logged, not acted on. An announcement is unsigned, so acting on one
+		// would let any peer stall a node by claiming a different head. This is
+		// the early warning; the state root inside a signed block is the
+		// enforcement.
+		fmt.Print(disagreement)
+	}
 
 	if ahead {
 		e.maybeRequestSync(ctx)
@@ -3331,6 +3503,15 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	// received, which is how the provider emission is shared out.
 	var feesTaken uint64
 	credited := make(map[string]uint64, len(b.Txs))
+	// What each ordinary account was paid, and by whom, for the settled-history
+	// tally. Collected here and written AFTER the critical section: the tally is
+	// a read of the chain rather than part of it, and holding the ledger's write
+	// lock across a batch of kv reads would stall every other writer for a
+	// derived number nobody is waiting on.
+	var revenue []payment
+	// Accounts whose bond APPLIED in this block, so the residency clock starts
+	// from the height the coins moved.
+	var bonded []string
 	// emitted is what the pool actually paid out this block, for the log line.
 	var emitted uint64
 	if err := e.ledger.Atomically(func(ltx market.LedgerTx) error {
@@ -3441,6 +3622,19 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				} else {
 					credited[tx.To] += net
 				}
+				// Counted as revenue only when the recipient is an ordinary
+				// ACCOUNT. paysFee is the same question asked for the same reason:
+				// a bond reaches this branch deliberately, and an account moving
+				// its own coins into its own bond has not been paid by anyone.
+				if paysFee(tx.To) {
+					revenue = append(revenue, payment{payer: sender, payee: tx.To, amount: net})
+				} else if req, err := ParseStakeRecipient(tx.To); err == nil && req.Op == StakeOpBond {
+					// Start the residency clock, now that the coins have actually
+					// moved. Started at commit instead, a bond the sender could not
+					// afford would begin ageing without ever staking anything, and
+					// the seller could post a real one later and withdraw it at once.
+					bonded = append(bonded, req.Account)
+				}
 			}
 			if fee > 0 {
 				if err := ltx.Transfer(sender, feeAccrualAccount, fee); err != nil {
@@ -3484,6 +3678,21 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 	}); err != nil {
 		return err
 	}
+	for _, id := range bonded {
+		if err := e.stake.RecordBonded(id, b.Height); err != nil {
+			fmt.Printf("consensus: could not record the bond clock for %s: %v\n", id, err)
+		}
+	}
+	// Tally what this block paid out, now that the transfers are durable.
+	//
+	// A failure here is logged and not returned: the block is committed and
+	// applied on every node, and refusing it because a DERIVED number could not
+	// be written would fork this node off over a display figure. The tally
+	// undercounts instead, which is the safe direction for something read as a
+	// seller's track record.
+	if err := e.earnings.record(b.Height, revenue); err != nil {
+		fmt.Printf("consensus: could not record settled earnings for block %d: %v\n", b.Height, err)
+	}
 	// Return the bonds of every withdrawal the block carried. Deterministic: the
 	// whole bond moves, and the block was only valid at this height if the
 	// withdrawal was permitted at this height, which every node evaluated
@@ -3497,7 +3706,7 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 			applied[key] = false
 			continue
 		}
-		returned, err := e.stake.Withdraw(id, e.vset(), e.unbondingPeriod, b.Height)
+		returned, err := e.stake.Withdraw(id, e.vset(), e.unbondingPeriod, e.bondResidency, b.Height)
 		if err != nil {
 			// Unreachable for a block that passed verification. Record it as not
 			// applied rather than failing the commit: the block is already in the
@@ -3508,6 +3717,12 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 			continue
 		}
 		if returned > 0 {
+			// The bond is gone, so the residency clock is too. A later bond starts
+			// a fresh one; leaving this behind would let an account bond, withdraw,
+			// and bond again with a clock that expired months ago.
+			if err := e.stake.ClearBonded(id); err != nil {
+				fmt.Printf("consensus: could not clear the bond clock for %s: %v\n", id, err)
+			}
 			fmt.Printf("consensus: returned bond of %d to %s at height %d\n", returned, id, b.Height)
 		}
 	}
@@ -3606,11 +3821,14 @@ func (e *Engine) advanceHeight(committed *Block) {
 	// skipped: it is in the agreed ordered log either way, so every node marks it
 	// the same. A sender whose transfer was skipped as unaffordable signs the NEXT
 	// nonce to retry - WaitForSettlement reports applied=false, so it can tell.
+	e.recordBlockHashLocked(committed, committed.Height)
 	for i := range committed.Txs {
 		if nk, checked := nonceKey(&committed.Txs[i]); checked {
 			e.committedNonces[nk] = struct{}{}
 			delete(e.mempoolNonces, nk)
 		}
+		e.recordNonceHighLocked(&committed.Txs[i])
+		e.recordEVMIndexLocked(&committed.Txs[i], TxLocation{Height: committed.Height, Index: i})
 	}
 	kept := e.mempool[:0]
 	for i := range e.mempool {

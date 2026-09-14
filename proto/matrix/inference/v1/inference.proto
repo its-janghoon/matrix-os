@@ -94,6 +94,22 @@ message InferenceJob {
     // Token accounting reported by the provider's backend, zero until the job
     // has been fulfilled.
     TokenUsage usage = 10;
+    // The serving node's SIGNED account of this sale, as JSON, set once the
+    // payment has actually applied.
+    //
+    // It is what lets a buyer hold a seller to what it claimed: the model, the
+    // token counts and the money, over a digest of this exact prompt and
+    // completion. It does not prevent a seller serving a cheaper model than it
+    // advertised - no chain can judge that - it removes their ability to deny
+    // having claimed otherwise, to the buyer and to anyone the buyer shows it
+    // to, verifiable with nothing but the document and the text.
+    //
+    // Opaque bytes rather than a message, because a receipt is a signed
+    // structure and its bytes are what the signature covers. Re-encoding it
+    // through proto and back would be a second serialisation to keep byte-exact
+    // forever, and the first one that drifted would invalidate every receipt
+    // ever issued. Empty when the serving node holds no signing key.
+    bytes receipt = 11;
 }
 
 // SubmitInferenceJobRequest submits an inference job to a provider. Capacity is

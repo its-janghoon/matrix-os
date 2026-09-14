@@ -120,6 +120,19 @@ func (e *Engine) BondedStake(id string) (uint64, error) {
 	return e.stake.Bonded(id)
 }
 
+// BondWithdrawableAt returns the height from which an account may take its bond
+// back, and whether it may at all (a sitting validator may not, at any height).
+//
+// Exposed because the height is as much of a bond as the amount. Capital that
+// can be pulled in the next block is committed to nothing, so a buyer weighing a
+// seller's stake needs both numbers or the first one flatters.
+func (e *Engine) BondWithdrawableAt(id string) (uint64, bool, error) {
+	if e.stake == nil {
+		return 0, false, nil
+	}
+	return e.stake.WithdrawableAt(id, e.vset(), e.unbondingPeriod, e.bondResidency)
+}
+
 // MinBond is the stake required before an account may be admitted to the
 // validator set. Zero means membership costs nothing.
 func (e *Engine) MinBond() uint64 { return e.minBond }

@@ -77,8 +77,15 @@ type EthLog struct {
 type DecodedBurn struct {
 	// Burner is the Ethereum address (20 bytes) that burned the wrapped tokens.
 	Burner Address
-	// NativeRecipient is the L1 account id the unlocked native MATRIX must go to.
+	// NativeRecipient is the L1 account id the unlocked native MATRIX must go
+	// to, NORMALIZED by NormalizeNativeRecipient. Downstream code - including
+	// consensus - sees only the canonical form.
 	NativeRecipient string
+	// RawNativeRecipient is the string exactly as the contract emitted it, kept
+	// for logs and audit. It is what a reader compares against the event on a
+	// block explorer, and normalizing in place would make the node's account of
+	// itself disagree with the chain.
+	RawNativeRecipient string
 	// ERC20Amount is the burned wrapped amount in 18-decimal ERC-20 base units.
 	ERC20Amount *big.Int
 	// ID is the stable, unique replay-protection id derived from the source log
@@ -139,11 +146,69 @@ func DecodeBurnedLog(log EthLog) (*DecodedBurn, error) {
 	}
 
 	return &DecodedBurn{
-		Burner:          burner,
-		NativeRecipient: recipient,
-		ERC20Amount:     amount,
-		ID:              fmt.Sprintf("%s:%d", log.TxHash, log.LogIndex),
+		Burner:             burner,
+		NativeRecipient:    NormalizeNativeRecipient(recipient),
+		RawNativeRecipient: recipient,
+		ERC20Amount:        amount,
+		ID:                 fmt.Sprintf("%s:%d", log.TxHash, log.LogIndex),
 	}, nil
+}
+
+// nativeAccountHexLen is the width of a native account id in hex characters: a
+// 32-byte ed25519 public key. Fixed, because a variable-length id would let two
+// spellings of one account exist.
+const nativeAccountHexLen = 64
+
+// NormalizeNativeRecipient puts an on-chain burn recipient into the one spelling
+// the ledger accepts, or leaves it alone when it cannot.
+//
+// WHY THIS EXISTS. `burn(uint256, string)` takes the recipient as a STRING and
+// the contract does not validate it - it cannot, since a native account id means
+// nothing to an EVM. So whatever the burner typed is what gets emitted, the
+// tokens are destroyed either way, and it is this node that decides whether the
+// escrow is released.
+//
+// Before this, a `0x` prefix - the natural thing to write for anyone used to
+// Ethereum, and something no contract guard and no runbook line warned against -
+// was refused. The wrapped tokens were gone, the escrow stayed locked, and there
+// was no recovery. That is a bad trade for a leading `0x` on a value that is hex
+// either way.
+//
+// WHAT IT WILL AND WILL NOT DO. It strips a `0x` prefix and lowercases, because
+// those change the SPELLING of a hex value and not the value. It does not guess:
+// a recipient of the wrong length, or one carrying non-hex characters, comes
+// back unchanged and is refused downstream exactly as before. There is no
+// nearest-match, because releasing somebody's escrow to an account they did not
+// name is worse than refusing.
+//
+// WHY THE BOUNDARY AND NOT THE VALIDATOR. Consensus validation stays byte-exact
+// and canonical: two spellings of one burn reaching the ledger would split the
+// quorum, which is the reason ParseBurnUnlock is as strict as it is. Normalizing
+// HERE - where an untrusted chain string first becomes a node-internal id - means
+// every validator derives the same canonical value from the same log, and the
+// ledger still only ever sees one spelling.
+//
+// CONSENSUS-AFFECTING. Validators running this and validators without it reach
+// different verdicts on the same burn, so it has to go out to the whole set
+// together.
+func NormalizeNativeRecipient(raw string) string {
+	trimmed := strings.TrimSpace(raw)
+	trimmed = strings.TrimPrefix(trimmed, "0x")
+	trimmed = strings.TrimPrefix(trimmed, "0X")
+	lowered := strings.ToLower(trimmed)
+
+	// Only a value that is now exactly an account id is offered as one. Anything
+	// else goes back untouched, so the refusal downstream names what was actually
+	// on chain.
+	if len(lowered) != nativeAccountHexLen {
+		return raw
+	}
+	for _, c := range lowered {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return raw
+		}
+	}
+	return lowered
 }
 
 // DecodeBurnEvent is the convenience path from an on-chain log straight to the

@@ -115,11 +115,30 @@ func RecoverAddress(digest, sig []byte) (Address, error) {
 	if len(sig) != SignatureLen {
 		return zero, fmt.Errorf("%w: signature must be %d bytes, got %d", ErrInvalidSignature, SignatureLen, len(sig))
 	}
+	// The recovery byte must be one of the four values the two conventions
+	// define, and nothing else.
+	//
+	// Normalising "anything below 27" and passing everything else through looked
+	// tolerant and was malleable: dcrd's RecoverCompact accepts codes 27-34 and
+	// reads bit 2 as a COMPRESSED-PUBKEY flag, which this function then ignores
+	// because it always serialises uncompressed. So one signature had four
+	// byte-distinct encodings - v, v+4, v+27, v+31 - that all verified and all
+	// recovered the same address.
+	//
+	// That is the same class of defect as high-S below, and it matters for the
+	// same reason: anything keyed on the signature BYTES sees a malleated twin as
+	// a new signature. A replay set keyed that way admits the twin, and an
+	// operation its signer authorised once applies again - for a recipient
+	// exempt from the nonce rule, as many times as there are spare encodings.
 	v := sig[64]
-	if v < 27 {
-		// Accept both the {0,1} and {27,28} conventions for v: libraries differ,
-		// and rejecting one of them rejects half the ecosystem.
+	switch v {
+	case 0, 1:
+		// The {0,1} convention. Libraries differ and rejecting it would reject
+		// half the ecosystem, so it is accepted - but only in this exact form.
 		v += 27
+	case 27, 28:
+	default:
+		return zero, fmt.Errorf("%w: recovery byte %d is not 0, 1, 27 or 28", ErrInvalidSignature, v)
 	}
 	// Reject the upper half of the S range (EIP-2). For any valid signature
 	// (r, s) there is a second one (r, n-s) that recovers the SAME address, so
@@ -195,4 +214,30 @@ func isHighS(s []byte) bool {
 		}
 	}
 	return false // exactly the half order is allowed, matching Solidity's >
+}
+
+// CanonicalSignature returns sig with its recovery byte in the {27,28} form, so
+// one signature has one spelling.
+//
+// Both conventions have to be ACCEPTED - this package's own envelope path emits
+// {0,1} and wallets emit {27,28}, so rejecting either breaks a real caller - but
+// accepting both means one authorisation has two byte-distinct encodings. That
+// is harmless until something uses the signature as an IDENTITY: a replay set
+// keyed on the bytes admits the twin, and an operation its signer authorised
+// once applies twice.
+//
+// So verification stays permissive and identity is taken from this instead. A
+// signature whose recovery byte is neither convention is returned unchanged,
+// because RecoverAddress refuses it anyway and silently rewriting a malformed
+// signature into a well-formed one would be worse than leaving it to fail.
+func CanonicalSignature(sig []byte) []byte {
+	if len(sig) != SignatureLen {
+		return sig
+	}
+	out := make([]byte, SignatureLen)
+	copy(out, sig)
+	if out[64] == 0 || out[64] == 1 {
+		out[64] += 27
+	}
+	return out
 }

@@ -71,3 +71,19 @@ Thumbs.db
 
 # ---- TypeScript SDK (packages/sdk) ----
 packages/sdk/dist/
+
+# A node's store. It holds the consensus and libp2p PRIVATE KEYS, generated on
+# first start, so a committed one publishes a validator identity in plaintext -
+# and anyone who checks the tree out is then running as that validator.
+#
+# It lands here by accident rather than by intent: any matrixd command run
+# without -config, or with a config whose storage.path is still the default,
+# creates ./data under whatever directory it was run from.
+data/
+services/core/data/
+
+# Binaries built in place by `go build ./cmd/...`, which writes the binary into
+# the current directory rather than anywhere ignored.
+/services/core/matrixd
+/services/core/matrix
+/services/core/devnet

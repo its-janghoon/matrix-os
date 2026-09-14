@@ -65,6 +65,17 @@ type Provider struct {
 	// therefore never selected by model, which is the right reading for a
 	// compute-only provider.
 	Models []string `json:"models,omitempty"`
+	// Suspended takes the provider off the market without touching its capacity
+	// accounting, its quote, or its live reservations. It is set by whoever
+	// watches whether the thing behind the provider can actually serve - for an
+	// inference backend, the node's health check against the model server.
+	//
+	// It is a flag rather than "set Available to 0" because the two would fight:
+	// a job releasing its reservation adds its units back to Available, so a
+	// zeroed provider would quietly come back onto the market the moment an
+	// in-flight job finished. Suspension has to survive that, because the
+	// condition that caused it has not changed.
+	Suspended bool `json:"suspended,omitempty"`
 }
 
 // NormalizeModel puts a model identifier in the one form the order book stores
@@ -404,6 +415,10 @@ func (m *Market) UpdateProviderQuote(id string, quote Provider) error {
 	quote.Capacity = existing.Capacity
 	quote.Available = existing.Available
 	quote.Models = existing.Models
+	// Suspension is liveness, not pricing. A restart re-applying the config quote
+	// must not silently put a provider whose backend is down back on the market;
+	// the health check clears this when the backend answers again.
+	quote.Suspended = existing.Suspended
 	if quote.QuoteVersion <= existing.QuoteVersion {
 		if existing.QuoteVersion == ^uint64(0) {
 			return fmt.Errorf("provider %q quote version overflow: %w", id, ErrPriceOverflow)
@@ -419,6 +434,33 @@ func (m *Market) UpdateProviderQuote(id string, quote Provider) error {
 	}
 	m.providers[id] = prepared
 	return nil
+}
+
+// SetProviderSuspended takes a provider off the market, or puts it back on. It
+// reports whether the flag actually changed, so a caller polling on an interval
+// can log a transition rather than the same state every tick.
+//
+// Suspending does NOT cancel live jobs. A job already reserved against this
+// provider keeps its reservation and settles or expires on its own terms; what
+// stops is NEW reservations. Cancelling in-flight work would be the wrong call
+// from a health check, which cannot tell a backend that has died from one that
+// answered a probe slowly while finishing a real completion.
+func (m *Market) SetProviderSuspended(id string, suspended bool) (bool, error) {
+	m.providersMu.Lock()
+	defer m.providersMu.Unlock()
+	provider, ok := m.providers[id]
+	if !ok {
+		return false, fmt.Errorf("suspend provider %q: %w", id, ErrProviderNotFound)
+	}
+	if provider.Suspended == suspended {
+		return false, nil
+	}
+	provider.Suspended = suspended
+	if err := m.persistProvider(provider); err != nil {
+		return false, err
+	}
+	m.providers[id] = provider
+	return true, nil
 }
 
 // RegisterProvider validates and registers a compute provider. PricePerUnit and
@@ -576,6 +618,9 @@ func (m *Market) ReserveRemoteJob(buyer, providerID string, units, nonce uint64,
 		if !ok {
 			return fmt.Errorf("reserve remote job for provider %q: %w", providerID, ErrProviderNotFound)
 		}
+		if provider.Suspended {
+			return fmt.Errorf("provider %q is not currently serving: %w", providerID, ErrProviderSuspended)
+		}
 		if err := validateProviderQuoteForUse(provider, now); err != nil {
 			return err
 		}
@@ -675,6 +720,9 @@ func (m *Market) SubmitJob(buyer, providerID string, units uint64) (*Job, error)
 	provider, ok := m.providers[providerID]
 	if !ok {
 		return nil, fmt.Errorf("submit job for provider %q: %w", providerID, ErrProviderNotFound)
+	}
+	if provider.Suspended {
+		return nil, fmt.Errorf("provider %q is not currently serving: %w", providerID, ErrProviderSuspended)
 	}
 	if provider.Available < units {
 		return nil, fmt.Errorf("provider %q has %d units available, need %d: %w",
@@ -987,7 +1035,7 @@ func (m *Market) ProvidersForModel(model string) []Provider {
 	out := make([]Provider, 0, len(m.providers))
 	now := time.Now().UTC()
 	for _, p := range m.providers {
-		if p.Available == 0 || !p.ServesModel(model) || validateProviderQuoteForUse(p, now) != nil {
+		if p.Suspended || p.Available == 0 || !p.ServesModel(model) || validateProviderQuoteForUse(p, now) != nil {
 			continue
 		}
 		out = append(out, p)

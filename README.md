@@ -140,6 +140,41 @@ Start every node from `matrixd -init` and merge—do not run standalone—the
 The example intentionally contains unresolved deployment inputs and no real
 accounts, addresses, origins, RPC credentials, or secrets.
 
+An Ethereum wallet is a first-class client. An account can be controlled by a
+secp256k1 key, a transaction can be an ordinary EIP-155 or EIP-1559 envelope
+bound to `consensus.chain_id`, addresses carry an EIP-55 checksum, and
+`eth_rpc.addr` serves the JSON-RPC a wallet needs to add the network. The chain
+still runs no EVM: contract creation and calldata are refused rather than
+ignored, and `eth_call` says so instead of returning an empty result.
+
+A block commits to the ledger it was built on - a Merkle root over every balance -
+so a node whose apply logic differs refuses to vote and says which two roots
+differ, instead of quietly reaching different numbers from the same blocks. The
+same root makes one balance provable to someone holding nothing else, which is
+what lets anyone check that the bridge escrow actually backs the wrapped supply
+(`matrix_getAccountProof`). It also
+carries a protocol version, so the next rule change is an activation height and a
+rolling upgrade rather than a coordinated restart. Moving an existing network
+onto these formats is [the relaunch runbook](docs/runbooks/evm-relaunch.md); the
+wrapped token, its pools and its holders are not touched by it.
+
+To contribute GPU capacity to a network that is already running, the
+[GPU provider runbook](docs/runbooks/gpu-provider.md) and its
+[overlay example](services/core/configs/gpu-provider.overlay.yaml.example) cover
+the whole path: sizing a model to one card, running the model server on loopback,
+declaring it under `inference.backends`, pricing tokens against an observed cost
+basis, and which single port a buyer is actually meant to reach. A provider is
+not a validator and needs no stake, no attestor keystore, and no genesis.
+
+The buying side is the [consumer runbook](docs/runbooks/consumer.md): getting
+MATRIX into an account, and the two doors a buyer can come through. The
+OpenAI-compatible `/v1/chat/completions` is a drop-in for any OpenAI SDK and is
+custodial - that protocol carries no buyer field, so the API key is what names
+the account to charge and the node must hold its key. A buyer who is not the node
+operator wants the other door instead, where a signed `RunAuthorization` asks for
+the work and a signed transfer accepts the bill, and nobody but the buyer ever
+holds the key. Both are served on `connect.addr`.
+
 ## License
 
 Matrix OS is [MIT licensed](LICENSE).

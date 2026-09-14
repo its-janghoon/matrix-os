@@ -65,6 +65,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/token"
 )
@@ -184,8 +185,60 @@ type Block struct {
 	PrevBlockHash []byte              `json:"prev_block_hash"`
 	Txs           []token.Transaction `json:"txs"`
 	ProposerID    string              `json:"proposer_id"`
-	Signature     []byte              `json:"signature"`
+	// Timestamp is the proposer's wall clock in unix seconds when it built the
+	// block, and it is inside the signature.
+	//
+	// The chain had no time in it at all. Nothing could say when a block was
+	// produced, which leaves an explorer with nothing to show, a wallet with
+	// nothing to date a transfer by, and an exchange with no way to timestamp a
+	// deposit. Every node can only agree on what a block CARRIES, so the time has
+	// to be a signed field rather than each node's own clock at apply time.
+	//
+	// It is the proposer's claim, bounded by two rules every validator checks
+	// (see verifyBlockTimestamp): it must not go backwards from the parent, and
+	// it must be within BlockTimestampSkew of the validator's own clock. That
+	// makes it usable for ordering and display without pretending it is a trusted
+	// time source - a proposer can still choose any value inside that window.
+	Timestamp int64 `json:"timestamp"`
+	// Version is the protocol version whose rules this block was built under,
+	// and it is inside the signature.
+	//
+	// It exists so the NEXT rule change is a release rather than another
+	// coordinated restart. A node knows which version applies at which height
+	// (see Config.ProtocolUpgrades), so operators can roll a binary out over days
+	// and have every node switch rules at the same height, instead of everyone
+	// stopping and starting together at a moment agreed in a chat. Without the
+	// field there is nowhere to put that agreement, which is why adding it is
+	// worth breaking every block hash exactly once.
+	Version uint32 `json:"version"`
+	// StateRoot commits to the ledger this block was built on top of: the hash of
+	// every balance after everything up to the PARENT has been applied.
+	//
+	// The parent's state and not this block's, because a proposer would otherwise
+	// have to speculatively apply its own block before knowing whether anyone will
+	// accept it. The cost is that a disagreement is caught one block later; the
+	// benefit is that nothing is applied twice.
+	//
+	// This is the field that makes divergence loud. Consensus agrees on the ORDER
+	// of transactions and nothing else - each node applies them itself - so two
+	// nodes running different apply logic produced identical block hashes and
+	// different balances, with nothing to report it. Now a validator whose ledger
+	// disagrees refuses to vote, and says so.
+	StateRoot []byte `json:"state_root,omitempty"`
+	Signature []byte `json:"signature"`
 }
+
+// ProtocolVersionGenesis is the version a chain starts at.
+const ProtocolVersionGenesis uint32 = 1
+
+// BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
+// the validating node's own clock, in either direction.
+//
+// It has to tolerate ordinary clock drift between hosts in different regions and
+// still refuse a proposer that stamps a block a year out. Too tight and honest
+// proposals are rejected whenever NTP wanders; too loose and the timestamp stops
+// meaning anything.
+const BlockTimestampSkew = 15 * time.Minute
 
 // PolkaCertificate is a quorum of PREVOTES for one block at one (height,
 // round),
@@ -215,6 +268,8 @@ type PolkaCertificate struct {
 //	uint64(Height) | uint64(Round) |
 //	uint32(len(PrevBlockHash)) | PrevBlockHash |
 //	uint32(len(ProposerID)) | ProposerID |
+//	int64(Timestamp) | uint32(Version) |
+//	uint32(len(StateRoot)) | StateRoot |
 //	uint64(len(Txs)) | for each tx: uint32(len(txSig)) | txSig
 //
 // Each transaction is bound by its own signature bytes, which uniquely commit to
@@ -226,6 +281,9 @@ func (b *Block) signingBytes() []byte {
 	buf = appendUint64(buf, b.Round)
 	buf = appendLenPrefixed(buf, b.PrevBlockHash)
 	buf = appendLenPrefixed(buf, []byte(b.ProposerID))
+	buf = appendUint64(buf, uint64(b.Timestamp))
+	buf = appendUint64(buf, uint64(b.Version))
+	buf = appendLenPrefixed(buf, b.StateRoot)
 	buf = appendUint64(buf, uint64(len(b.Txs)))
 	for i := range b.Txs {
 		// Bind each tx by its signature; a tx with no signature contributes an
@@ -367,6 +425,22 @@ type HeadAnnounce struct {
 	Height uint64 `json:"height"`
 	// NodeID identifies the announcing node (informational).
 	NodeID string `json:"node_id,omitempty"`
+	// HeadHash is the hash of the announcing node's committed head block, and
+	// StateRoot the digest of its ledger at that head.
+	//
+	// Height alone could not tell two chains apart. Two nodes both at height 900
+	// look identical in an announcement even when they committed different blocks
+	// or reached different balances, so the one signal that arrives on an idle
+	// network said nothing about whether the network agreed - only about how far
+	// each node had got.
+	//
+	// Both are OPTIONAL and advisory. A node that disagrees says so in its log; it
+	// does not act on a peer's word, because an announcement is unsigned and
+	// acting on one would let any peer stall a node by claiming a different head.
+	// What acts on disagreement is the state root inside a block, which is signed
+	// and which a validator checks before voting.
+	HeadHash  []byte `json:"head_hash,omitempty"`
+	StateRoot []byte `json:"state_root,omitempty"`
 }
 
 // BlockSyncRequest asks peers for the committed blocks starting at Height.

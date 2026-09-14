@@ -74,6 +74,14 @@ func jobToProto(j *inference.InferenceJob) *inferencev1.InferenceJob {
 			TotalTokens:      uint32(j.Usage.TotalTokens),
 		}
 	}
+	// The receipt travels as the bytes it was signed as. Re-encoding it through
+	// proto and back would be a second serialisation to keep byte-exact forever,
+	// and the first one that drifted would invalidate every receipt ever issued.
+	if j.Receipt != nil {
+		if body, err := inference.MarshalReceipt(j.Receipt); err == nil {
+			pj.Receipt = body
+		}
+	}
 	return pj
 }
 

@@ -263,6 +263,74 @@ r = client.chat.completions.create(
                     </p>
                   </div>
 
+                  {/*
+                    The directory's caveats live HERE rather than on the
+                    marketplace page, where they were seven paragraphs under the
+                    table that nobody read. The one sentence that makes a column
+                    trustworthy is on that column's heading; this is the long
+                    form for a reader who came looking for it.
+                  */}
+                  <h2 id='reading-the-directory' className='text-3xl font-bold text-white mt-12 mb-6 scroll-mt-24'>
+                    Reading the directory
+                  </h2>
+                  <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      Every figure in the{' '}
+                      <a href='/market' className='text-blue-400 hover:text-blue-300 underline'>
+                        marketplace directory
+                      </a>{' '}
+                      is read from the chain the answering node holds, or observed by that node itself. None of it is
+                      reported by the seller: an announcement carries no uptime, no latency and no rating, because
+                      those are exactly the numbers a seller can type anything into.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>Staked</strong> is capital the seller has posted on
+                      this chain, and it cannot be pulled on demand - the chain holds a bond for a minimum number of
+                      blocks after it is posted. It does not make anyone honest and cannot be taken away for bad
+                      service: no protocol can judge whether a completion was really the model advertised. What it does
+                      is make a listing cost money, which is what stops one attacker from filling the directory with
+                      cheap fake sellers.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>Settled</strong> figures are transfers on the chain
+                      that node holds, not claims by the seller. A settlement is an ordinary transfer, so they count
+                      every payment the account received - a seller can pay itself. Payers is the harder one to
+                      inflate: it costs a funded account each.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>The badge</strong> means one checkable thing: the
+                      account this chain names as its maintainer signed a statement that it operates that node. It is
+                      an identity claim, not a rating - it does not say those sellers answer better, and a reader who
+                      does not trust that account should ignore it. It cannot be forged: the signature is checked
+                      against consensus state, which only the current maintainer&apos;s own signature can rotate, and
+                      it expires so a badge cannot outlive the arrangement it describes. It exists because a new
+                      network is mostly strangers with no settled history to tell them apart, and somebody has to go
+                      first; the honest way for the people running one to do that is to run sellers themselves and say
+                      so.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>There is no uptime column</strong> because an
+                      announcement carries no uptime. A number a seller publishes about its own reliability costs
+                      nothing to inflate, so the protocol does not carry one and the directory will not invent one.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>It is one node&apos;s view.</strong> The directory
+                      is read from a single node. That node heard these announcements and holds the chain the stake and
+                      settled history come from, so a different node may have heard others.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-4'>
+                      <strong className='font-semibold text-white'>Amounts are exact.</strong> The chain has nine
+                      decimals, and a settled total really can end in a few base units, so the directory shows what the
+                      ledger says rather than a rounded figure - the fraction is simply set quieter than the digits
+                      that carry the magnitude. Per-unit prices are quoted per million units, which is an exact shift
+                      of the decimal point.
+                    </p>
+                    <p className='text-gray-100 leading-relaxed mb-0'>
+                      None of this says the answers are any good. Judge that yourself, on a small job, before sending a
+                      large one.
+                    </p>
+                  </div>
+
                   {/* Console */}
                   <h2 className='text-3xl font-bold text-white mt-12 mb-6'>Matrix Console</h2>
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800'>
