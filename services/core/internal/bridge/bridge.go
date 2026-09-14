@@ -524,6 +524,66 @@ func (b *Bridge) Reconcile() (*Reconciliation, error) {
 	}, nil
 }
 
+// AdoptGenesisEscrow records escrow this chain was HANDED rather than locked.
+//
+// A relaunch carries the escrow over as a genesis allocation, because the
+// wrapped supply on the other side of the bridge does not know the native chain
+// restarted and still has to be backed. But the running totals this accounting
+// rests on are only ever moved by a lock, so a relaunched chain opened holding
+// collateral it had no record of receiving: Reconcile computed outstanding as
+// locked minus unlocked, got zero against a non-empty escrow, and refused to
+// report at all - and the check one line above it, that unlocked never exceeds
+// locked, then made every future unlock impossible. The escrow was present,
+// correct, and unable to move or to prove itself.
+//
+// So a chain that opens with escrow and no history of locking records that
+// balance as its opening locked total, which is what a genesis allocation to the
+// escrow account means. It runs at most once per chain by construction: any
+// chain that has ever locked has a non-zero total and is left alone, and a chain
+// with no bridge has no escrow and gets nothing.
+func (b *Bridge) AdoptGenesisEscrow() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	locked, err := b.readUint64(lockedTTLKey)
+	if err != nil {
+		return err
+	}
+	unlocked, err := b.readUint64(unlockedTTLKey)
+	if err != nil {
+		return err
+	}
+	// Any movement at all means this chain has its own history and this must not
+	// touch it. Only the untouched pair is a chain that has just opened.
+	if locked != 0 || unlocked != 0 {
+		return nil
+	}
+
+	var escrow uint64
+	if err := b.ledger.ReadOnly(func(ltx market.LedgerTx) error {
+		var err error
+		escrow, err = ltx.Balance(EscrowAccount)
+		return err
+	}); err != nil {
+		return err
+	}
+	if escrow == 0 {
+		return nil
+	}
+
+	batch := b.store.NewBatch()
+	defer batch.Close()
+	if err := batch.Set([]byte(lockedTTLKey), encodeU64(escrow), nil); err != nil {
+		return fmt.Errorf("bridge: stage opening locked total: %w", err)
+	}
+	if err := batch.Commit(nil); err != nil {
+		return fmt.Errorf("bridge: record opening locked total: %w", err)
+	}
+	fmt.Printf("Bridge: opened holding %d native base units of escrow from genesis, "+
+		"recorded as the opening locked total so reconciliation closes and unlocks can be released.\n", escrow)
+	return nil
+}
+
 // RecordLock persists a lock the CONSENSUS ENGINE has already applied.
 //
 // It is Lock's other half, split out because the two now happen in different
