@@ -108,16 +108,35 @@ func (b *OpenAIBackend) Name() string { return "openai" }
 
 // chatMessage is the wire representation of a chat message.
 //
-// ReasoningContent is what a reasoning model puts its working in, separately
-// from the answer. vLLM, SGLang and TGI all emit it under this name when started
-// with a reasoning parser, and OpenAI-compatible servers that have no reasoning
-// simply omit it.
+// A reasoning model puts its working somewhere other than the answer, and there
+// are TWO names for that somewhere. OpenAI's own o-series and vLLM's current
+// OpenAI-compatible server call it "reasoning"; DeepSeek, SGLang and vLLM
+// started with a DeepSeek-style parser call it "reasoning_content". A server
+// sends one or the other, never both.
 //
-// It is READ, not sent: a request carries an assistant turn's Content only.
+// Reading only one name loses the working SILENTLY, and that is not
+// hypothetical: a live qwen3 job reported 5284 completion tokens of which 4191
+// were reasoning, this node read the name the server was not using, and the
+// charge ceiling - which is derived from bytes the node actually holds - capped
+// the bill at the answer alone. The provider served the work and was paid for a
+// fifth of it. Both names, then, and neither is preferred on principle: take
+// whichever one arrived.
+//
+// These are READ, not sent: a request carries an assistant turn's Content only,
+// and omitempty keeps both out of the request body.
 type chatMessage struct {
 	Role             string `json:"role"`
 	Content          string `json:"content"`
+	Reasoning        string `json:"reasoning,omitempty"`
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+}
+
+// reasoningText returns the working under whichever name the server used.
+func (m chatMessage) reasoningText() string {
+	if m.Reasoning != "" {
+		return m.Reasoning
+	}
+	return m.ReasoningContent
 }
 
 // chatCompletionRequest is the OpenAI /v1/chat/completions request body.
@@ -205,7 +224,7 @@ func (b *OpenAIBackend) Infer(ctx context.Context, req InferenceRequest) (Infere
 	return InferenceResponse{
 		Model:      model,
 		Completion: parsed.Choices[0].Message.Content,
-		Reasoning:  parsed.Choices[0].Message.ReasoningContent,
+		Reasoning:  parsed.Choices[0].Message.reasoningText(),
 		Usage:      usage,
 		Units:      UnitsFor(usage),
 	}, nil

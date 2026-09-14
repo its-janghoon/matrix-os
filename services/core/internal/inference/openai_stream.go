@@ -37,6 +37,13 @@ type streamChunk struct {
 	Choices []struct {
 		Delta struct {
 			Content string `json:"content"`
+			// Both spellings, for the same reason chatMessage carries both: a
+			// server emits one or the other and reading only one loses the
+			// working. This path read NEITHER, so a streamed reasoning job
+			// delivered no working at all and was billed as if it had produced
+			// only its answer.
+			Reasoning        string `json:"reasoning"`
+			ReasoningContent string `json:"reasoning_content"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -108,6 +115,7 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 
 	var (
 		completion strings.Builder
+		reasoning  strings.Builder
 		model      = req.Model
 		usage      *Usage
 	)
@@ -147,6 +155,18 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 			}
 		}
 		for _, choice := range chunk.Choices {
+			// The working accumulates but is NOT forwarded to onChunk. onChunk is
+			// the buyer's completion stream, and interleaving reasoning into it
+			// would make the assembled text neither the answer nor the working -
+			// and that text is what the receipt's digest commits to. The working
+			// is delivered whole, on the settled job, exactly as it is on the
+			// non-streaming path.
+			if r := choice.Delta.Reasoning; r != "" {
+				reasoning.WriteString(r)
+			} else if r := choice.Delta.ReasoningContent; r != "" {
+				reasoning.WriteString(r)
+			}
+
 			delta := choice.Delta.Content
 			if delta == "" {
 				continue
@@ -162,6 +182,7 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 	}
 
 	text := completion.String()
+	working := reasoning.String()
 	if text == "" {
 		return InferenceResponse{}, ErrNoCompletion
 	}
@@ -170,8 +191,11 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 		// The vendor did not report it. Derive it, deterministically, from the
 		// text both sides hold. See the doc comment above for why this is
 		// acceptable and what it costs.
+		// The working counts: those tokens were generated and they settle. A
+		// derivation that ignored them would under-report a reasoning model by
+		// most of what it did.
 		promptTokens := countTokens(promptText(msgs))
-		completionTokens := countTokens(text)
+		completionTokens := countTokens(text) + countTokens(working)
 		usage = &Usage{
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
@@ -182,6 +206,7 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 	return InferenceResponse{
 		Model:      model,
 		Completion: text,
+		Reasoning:  working,
 		Usage:      *usage,
 		Units:      UnitsFor(*usage),
 	}, nil
