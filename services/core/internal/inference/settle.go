@@ -192,10 +192,10 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 			amount, mjob.Price, marketJobID)
 	}
 
+	nonce := s.nextNonceFor(buyer)
+
 	now := time.Now().UTC()
 	s.mu.Lock()
-	nonce := s.nonce[buyer]
-	s.nonce[buyer] = nonce + 1
 	pr := &PaymentRequest{
 		JobID:     jobID,
 		From:      buyer,
