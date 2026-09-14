@@ -18,8 +18,44 @@ import type { Message, Signer } from './signer';
 const MARKET = 'matrix.market.v1.MarketService';
 const INFERENCE = 'matrix.inference.v1.InferenceService';
 
-/** The node a page talks to. Defaults to the reader's own node. */
-export const DEFAULT_ENDPOINT = 'http://127.0.0.1:9093';
+/**
+ * A node on this machine. Offered as a choice, never assumed.
+ */
+export const LOCAL_ENDPOINT = 'http://127.0.0.1:9093';
+
+/**
+ * The node a page talks to by default.
+ *
+ * It was LOCAL_ENDPOINT, and that is the address of a node the reader does not
+ * have. Someone arriving at /market has no matrixd on their laptop, so the page
+ * asked a host that was not listening and rendered an empty table - and an empty
+ * marketplace does not read as "you are not connected to one", it reads as a
+ * marketplace with no sellers in it. The one audience who would have had a node
+ * running is the one who did not need the page.
+ *
+ * So it points at a public node. A read is answered the same way by any node -
+ * what comes back is that node's own view of the order book, which is the honest
+ * thing for a page to show and the same thing a buyer's own node would tell them
+ * - and an operator running their own can still type its address into the field.
+ *
+ * NEXT_PUBLIC_MATRIX_VALIDATOR_URLS is the same comma-separated list the bridge
+ * config reads, so there is one place to change when the public face moves
+ * (a sentry, a load balancer) rather than two that can disagree.
+ *
+ * INFERENCE IS DIFFERENT and this default does not cover it: a prompt is served
+ * by the node that OWNS the provider, not by whichever node answered the read.
+ * A page that runs inference has to use the seller's own endpoint, which arrives
+ * in the announcement and is carried on each Seller row.
+ */
+function firstPublicNode(): string {
+  const configured = (process.env.NEXT_PUBLIC_MATRIX_VALIDATOR_URLS ?? '')
+    .split(',')
+    .map((url) => url.trim())
+    .filter((url) => url !== '');
+  return configured[0] ?? 'https://validator-1.ecirlabs.com';
+}
+
+export const DEFAULT_ENDPOINT = firstPublicNode();
 
 export class NodeError extends Error {
   constructor(
