@@ -19,6 +19,8 @@ import (
 // going through consensus, so this test exercises the whole route - auth,
 // routing, the real inference Service, a real backend, real pricing - without
 // standing up an engine.
+func (directSettler) NextNonce(string, bool) uint64 { return 0 }
+
 type directSettler struct{ ledger *market.Ledger }
 
 func (d directSettler) SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error) {

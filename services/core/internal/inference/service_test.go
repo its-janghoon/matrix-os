@@ -15,8 +15,28 @@ import (
 // charge computation and settlement-confirmation semantics without a real
 // consensus engine. It records the amount it was asked to settle and lets a test
 // dictate the committed/applied outcome WaitForSettlement reports.
+// NextNonce: a fake chain has committed nothing, so the Service's own
+// issued-nonce counter governs. A test that needs a chain with history sets
+// chainNonce.
+// nonceSettled reports the nonce of the last transfer this fake was handed.
+func (f *fakeSettler) nonceSettled() uint64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastNonce
+}
+
+func (f *fakeSettler) NextNonce(sender string, _ bool) uint64 {
+	if f.chainNonce == nil {
+		return 0
+	}
+	return f.chainNonce[sender]
+}
+
 type fakeSettler struct {
-	mu sync.Mutex
+	// chainNonce lets a test say what the CHAIN has already seen for a sender,
+	// which is the case the Service used to get wrong.
+	chainNonce map[string]uint64
+	mu         sync.Mutex
 
 	lastAmount uint64
 	lastNonce  uint64
