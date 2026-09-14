@@ -104,10 +104,17 @@ cd services/core && go build -o matrixd ./cmd/matrixd && sha256sum matrixd
 
 Then, **one node at a time**:
 
-1. Stop it. The chain stops committing here - expected, see above.
+1. Stop it: `sudo systemctl stop matrixd`. The chain stops committing here -
+   expected, see above.
 2. Replace the binary. Keep the old one beside it, named, for the rollback.
-3. Start it with the attestor passphrase in the process environment:
-   `MATRIX_ATTESTOR_PASSPHRASE=... matrixd -config /etc/matrix/config.yaml`
+3. Start it: `sudo systemctl start matrixd`.
+
+   The attestor passphrase reaches the node through the unit's
+   `EnvironmentFile=-/etc/matrix/matrixd.env`, root-owned and 0600, which is
+   where `deploy/matrixd.service` says secrets belong - never in the unit and
+   never in the config, where `systemctl cat` would expose them. Do NOT start it
+   in the foreground with the variable inline: the unit sets `Restart=always`,
+   so systemd would bring up a second node against the same store.
 4. Wait for it to rejoin and for the chain to commit again before touching the
    next one. It has rejoined when its height is advancing and it reports
    `Bridge: attesting as 0x...` with the address registered in the contract.
