@@ -296,7 +296,7 @@ func TestBondedOpenBlockRejectsConflictingOperationsForOneIdentity(t *testing.T)
 	block := buildSignedBlock(t, eng, eng.self, 0, 0, genesisPrevHash, []token.Transaction{*admit, *topUp})
 	eng.mu.Lock()
 	eng.headHash = append([]byte(nil), genesisPrevHash...)
-	err = eng.verifyBlockForHeightLocked(block)
+	err = eng.verifyBlockForHeightLocked(block, blockFromProposal)
 	eng.mu.Unlock()
 	if !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("block with two membership operations for one identity = %v, want ErrInvalidMessage", err)
@@ -354,7 +354,7 @@ func TestBondedOpenProposalRespectsAggregateSetBounds(t *testing.T) {
 			eng.mu.Unlock()
 			t.Fatal("proposal builder returned no block")
 		}
-		err = eng.verifyBlockForHeightLocked(block)
+		err = eng.verifyBlockForHeightLocked(block, blockFromProposal)
 		changes := eng.setChangesInLocked(block)
 		eng.mu.Unlock()
 		if err != nil {
@@ -390,7 +390,7 @@ func TestBondedOpenProposalRespectsAggregateSetBounds(t *testing.T) {
 			eng.mu.Unlock()
 			t.Fatal("proposal builder returned no block")
 		}
-		err = eng.verifyBlockForHeightLocked(block)
+		err = eng.verifyBlockForHeightLocked(block, blockFromProposal)
 		changes := eng.setChangesInLocked(block)
 		eng.mu.Unlock()
 		if err != nil {

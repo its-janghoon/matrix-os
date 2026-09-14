@@ -72,7 +72,7 @@ func TestBlockTimestampMustBeNearTheValidatorsClock(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng.mu.Lock()
-			err := eng.verifyBlockTimestampLocked(&Block{Height: 0, Timestamp: tc.stamp})
+			err := eng.verifyBlockTimestampLocked(&Block{Height: 0, Timestamp: tc.stamp}, blockFromProposal)
 			eng.mu.Unlock()
 			if tc.wantValid && err != nil {
 				t.Fatalf("stamp %d should be accepted: %v", tc.stamp, err)
@@ -124,7 +124,7 @@ func TestAProposersClockGoingBackwardsDoesNotStallIt(t *testing.T) {
 
 	// And that stamp has to be one a validator accepts.
 	eng.mu.Lock()
-	err := eng.verifyBlockTimestampLocked(&Block{Height: 1, Timestamp: stamp})
+	err := eng.verifyBlockTimestampLocked(&Block{Height: 1, Timestamp: stamp}, blockFromProposal)
 	eng.mu.Unlock()
 	if err != nil {
 		t.Fatalf("the proposer's own stamp was rejected: %v", err)
@@ -165,7 +165,7 @@ func TestTimestampMustMoveForward(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng.mu.Lock()
-			err := eng.verifyBlockTimestampLocked(&Block{Height: 1, Timestamp: tc.stamp})
+			err := eng.verifyBlockTimestampLocked(&Block{Height: 1, Timestamp: tc.stamp}, blockFromProposal)
 			eng.mu.Unlock()
 			if tc.wantValid != (err == nil) {
 				t.Fatalf("stamp %d: err = %v, wanted valid=%v", tc.stamp, err, tc.wantValid)
@@ -194,5 +194,81 @@ func TestTheTimestampIsSigned(t *testing.T) {
 	b.Timestamp++
 	if err := b.VerifySignature(eng.self.PublicKey); err == nil {
 		t.Fatal("restamping a signed block must invalidate its signature")
+	}
+}
+
+// Joining a network older than the freshness window.
+//
+// A chain's own history is old - that is what makes it history - so holding a
+// backfilled block to a window around this node's clock rejected every block of
+// the past. A node pointed at a running network connected to its peers, asked
+// for blocks, refused all of them, and sat at height zero saying nothing. The
+// bug was found on a live provider that had been connected for two hours with a
+// completely silent log and no transfers.
+//
+// What keeps a synced block honest is not its timestamp: it arrives with the
+// precommits that committed it, each verified here against the validator set of
+// that height. The parent-order rule still applies, because that is what orders
+// the chain rather than what dates it.
+func TestABlockOlderThanTheWindowSyncsButCannotBeProposed(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	eng := blockTimeEngine(t, func() time.Time { return base })
+
+	// A week old, which any chain's early blocks are.
+	old := &Block{Height: 0, Timestamp: base.Add(-7 * 24 * time.Hour).Unix()}
+
+	eng.mu.Lock()
+	proposalErr := eng.verifyBlockTimestampLocked(old, blockFromProposal)
+	syncErr := eng.verifyBlockTimestampLocked(old, blockFromSync)
+	eng.mu.Unlock()
+
+	if !errors.Is(proposalErr, ErrInvalidMessage) {
+		t.Errorf("a PROPOSAL stamped a week ago must still be refused; got %v", proposalErr)
+	}
+	if syncErr != nil {
+		t.Errorf("committed history a week old must sync; got %v", syncErr)
+	}
+}
+
+// The window is the only rule sync relaxes. A block that is not after its parent
+// breaks the chain's order whatever served it.
+func TestSyncStillRefusesABlockNotAfterItsParent(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	eng := blockTimeEngine(t, func() time.Time { return base })
+
+	parent := &Block{
+		Height:        0,
+		PrevBlockHash: make([]byte, HashSize),
+		ProposerID:    eng.selfID,
+		Timestamp:     base.Add(-7 * 24 * time.Hour).Unix(),
+	}
+	if err := parent.Sign(eng.self.PrivateKey); err != nil {
+		t.Fatalf("sign parent: %v", err)
+	}
+	if _, err := eng.chain.Commit(parent, nil); err != nil {
+		t.Fatalf("commit parent: %v", err)
+	}
+	eng.mu.Lock()
+	eng.height = 1
+	// Stamped one second BEFORE its parent, and just as old.
+	err := eng.verifyBlockTimestampLocked(
+		&Block{Height: 1, Timestamp: parent.Timestamp - 1}, blockFromSync)
+	eng.mu.Unlock()
+
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("a synced block before its parent must still be refused; got %v", err)
+	}
+}
+
+// An unset timestamp is refused on both paths: it is not an old block, it is no
+// block, and nothing downstream can order it.
+func TestSyncStillRefusesAnUnsetTimestamp(t *testing.T) {
+	base := time.Unix(1_800_000_000, 0)
+	eng := blockTimeEngine(t, func() time.Time { return base })
+	eng.mu.Lock()
+	err := eng.verifyBlockTimestampLocked(&Block{Height: 0, Timestamp: 0}, blockFromSync)
+	eng.mu.Unlock()
+	if !errors.Is(err, ErrInvalidMessage) {
+		t.Fatalf("an unset timestamp must be refused on the sync path too; got %v", err)
 	}
 }

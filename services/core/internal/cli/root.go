@@ -8,7 +8,9 @@
 // Global flags configured on the root command:
 //   - --addr:    node market gRPC endpoint (default 127.0.0.1:9091)
 //   - --api-key: optional API key, attached as the "authorization" gRPC metadata
-//     header the node's admin.Authenticator reads when ACLs are enabled
+//     header the node's admin.Authenticator reads when ACLs are enabled. Falls
+//     back to MATRIX_ADMIN_API_KEY, which is what `matrixd -init` tells the
+//     operator to export and what keeps the key out of argv and shell history
 //   - --timeout: per-RPC timeout (default 10s)
 //   - --json:    emit machine-readable JSON instead of human tables
 //
@@ -17,11 +19,20 @@
 package cli
 
 import (
+	"os"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/version"
 	"github.com/spf13/cobra"
 )
+
+// apiKeyEnv is the environment variable `matrixd -init` tells the operator to
+// export. It said so before anything read it: the key was simply never sent,
+// the node answered Unauthenticated, and nothing connected the two.
+//
+// A flag is also the wrong place for a secret on a shared box. It lands in
+// argv, where `ps` shows it to every other user, and in shell history.
+const apiKeyEnv = "MATRIX_ADMIN_API_KEY"
 
 // globalOptions holds the values of the root command's persistent flags. A
 // single pointer is shared with every subcommand so they read a consistent
@@ -67,9 +78,27 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 
 	pf := root.PersistentFlags()
 	pf.StringVar(&opts.Addr, "addr", defaultAddr, "node market gRPC endpoint host:port")
-	pf.StringVar(&opts.APIKey, "api-key", "", "API key for nodes running with ACLs (sent as authorization metadata)")
+	pf.StringVar(&opts.APIKey, "api-key", "", "API key for nodes running with ACLs (sent as authorization metadata); defaults to $"+apiKeyEnv)
 	pf.DurationVar(&opts.Timeout, "timeout", defaultTimeout, "per-RPC timeout")
 	pf.BoolVar(&opts.JSON, "json", false, "emit machine-readable JSON output")
+
+	// An explicit --api-key wins, including an explicit empty one: an operator
+	// who passes --api-key="" is saying to send nothing, and silently
+	// substituting the environment would make that unsayable. Checking Changed
+	// rather than the value is what distinguishes the two.
+	root.PersistentPreRunE = func(*cobra.Command, []string) error {
+		if !pf.Changed("api-key") {
+			if key := os.Getenv(apiKeyEnv); key != "" {
+				// Through the flag rather than around it: the flag is bound to
+				// opts.APIKey, so this fills the same field while leaving the
+				// resolved value readable where every other setting is read.
+				if err := pf.Set("api-key", key); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
 
 	root.AddCommand(
 		newStatusCommand(opts),

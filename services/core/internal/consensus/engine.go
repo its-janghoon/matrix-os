@@ -602,6 +602,9 @@ type Engine struct {
 	// responses are broadcast rather than addressed: one response serves every
 	// lagging peer at that height, whether one asked or a thousand did.
 	lastSyncServe time.Time
+	// lastSyncRejectLog rate-limits the line that says why a served block was
+	// refused at the height this node is stuck on.
+	lastSyncRejectLog time.Time
 	// lastHeadAnnounce is when this node last announced its committed height.
 	lastHeadAnnounce time.Time
 	// lastSetChangeSubmit rate-limits re-offering the set changes this operator
@@ -1907,7 +1910,7 @@ func (e *Engine) drainFutureProposals(ctx context.Context) {
 // deliberately does NOT do is touch the lock/justification rules: those govern
 // whether this node may VOTE, which a synced block never asks it to do.
 // Callers must hold e.mu.
-func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
+func (e *Engine) verifyBlockForHeightLocked(b *Block, origin blockOrigin) error {
 	// Only consider blocks for the height we are currently trying to commit.
 	if b.Height != e.height {
 		return fmt.Errorf("%w: block height %d != current %d", ErrInvalidMessage, b.Height, e.height)
@@ -1928,7 +1931,7 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block) error {
 	if err := b.VerifySignature(pub); err != nil {
 		return err
 	}
-	if err := e.verifyBlockTimestampLocked(b); err != nil {
+	if err := e.verifyBlockTimestampLocked(b, origin); err != nil {
 		return err
 	}
 	// Version before state root: a version mismatch EXPLAINS a state mismatch, so
@@ -2644,7 +2647,7 @@ func (e *Engine) acceptProposal(b *Block, round uint64, polka *PolkaCertificate)
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if err := e.verifyBlockForHeightLocked(b); err != nil {
+	if err := e.verifyBlockForHeightLocked(b, blockFromProposal); err != nil {
 		return false, err
 	}
 
@@ -3445,11 +3448,47 @@ func (e *Engine) applySyncedBlock(ctx context.Context, cb *CommittedBlock) {
 	if err := e.acceptSyncedBlock(b); err != nil {
 		// Not for our current height (or not valid against it). If it is ahead of
 		// us, stash it so the catch-up path adopts it once we get there.
+		//
+		// A block for a height we have already passed is the ordinary case and
+		// says nothing: every node that holds the height answers a sync request,
+		// so duplicates arrive by design. A block for the height we are STUCK on
+		// is the opposite - it is the one message that explains why this node is
+		// not advancing, and swallowing it left an operator with a node that
+		// connected to its peers, logged nothing, and never left height zero.
+		e.reportSyncRejection(b, err)
 		e.stashFutureProposal(ctx, b, 0, nil, nil)
 		return
 	}
 	e.maybeCommit(ctx)
 }
+
+// reportSyncRejection says, at most once per interval, why a block this node is
+// waiting for was refused.
+//
+// Rate-limited because every node holding the height answers a sync request, so
+// one stuck height produces a steady stream of identical refusals; unbounded, it
+// would bury the line an operator needs in copies of itself.
+func (e *Engine) reportSyncRejection(b *Block, err error) {
+	e.mu.Lock()
+	if b.Height != e.height {
+		// Ahead or behind: neither is this node being stuck.
+		e.mu.Unlock()
+		return
+	}
+	if !e.lastSyncRejectLog.IsZero() && time.Since(e.lastSyncRejectLog) < syncRejectLogInterval {
+		e.mu.Unlock()
+		return
+	}
+	e.lastSyncRejectLog = time.Now()
+	height := e.height
+	e.mu.Unlock()
+
+	fmt.Printf("consensus: this node is at height %d and refused the block a peer served for it: %v\n",
+		height, err)
+}
+
+// syncRejectLogInterval bounds the line above.
+const syncRejectLogInterval = 30 * time.Second
 
 // acceptSyncedBlock verifies a block served by block sync against the current
 // height and caches its body so a quorum can commit it.
@@ -3464,7 +3503,7 @@ func (e *Engine) acceptSyncedBlock(b *Block) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if err := e.verifyBlockForHeightLocked(b); err != nil {
+	if err := e.verifyBlockForHeightLocked(b, blockFromSync); err != nil {
 		return err
 	}
 	hkey := fmt.Sprintf("%x", b.Hash())
@@ -4378,6 +4417,19 @@ const membershipGossipInterval = 2 * time.Second
 // is met.
 func (e *Engine) maybeTopUpBond() {
 	if e.stake == nil || e.self == nil || e.targetBond == 0 {
+		return
+	}
+	// A node that has said it will not join the open set has no reason to bond.
+	// A bond is what buys admission, and this node is not asking for it.
+	//
+	// Without this, a GPU provider - the one node type the docs tell operators to
+	// set participate_in_open_set: false on - tries to bond on every interval
+	// forever, because the target came from the validator config it was told to
+	// copy. On an unfunded account that is only noise. On a funded one it is
+	// worse: the funds are silently locked into a validator set the operator
+	// explicitly declined to join, and unlocking them means waiting out the
+	// unbonding period.
+	if e.membershipMode == MembershipBondedOpen && !e.participateInOpenSet {
 		return
 	}
 

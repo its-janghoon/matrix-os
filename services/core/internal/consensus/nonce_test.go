@@ -159,7 +159,7 @@ func TestAMaliciousLeaderCannotSmuggleTwoSameNonceTransfers(t *testing.T) {
 	}
 
 	nd.engine.mu.Lock()
-	err := nd.engine.verifyBlockForHeightLocked(b)
+	err := nd.engine.verifyBlockForHeightLocked(b, blockFromProposal)
 	nd.engine.mu.Unlock()
 	if err == nil {
 		t.Fatal("a block carrying two transfers at one nonce was accepted")
