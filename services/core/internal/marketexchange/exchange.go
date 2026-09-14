@@ -32,16 +32,44 @@ type Transport interface {
 	Publish(ctx context.Context, topic string, data []byte) error
 }
 
-// RemoteProvider is a provider discovered from a received announcement. The
-// embedded market.Provider preserves the complete signed quote (CostPerUnit,
+// RemoteProvider is one offer discovered from a received announcement: a serving
+// node, a payout account, and the signed quote between them. The embedded
+// market.Provider preserves the complete signed quote (CostPerUnit,
 // MarkupBasisPoints, QuoteID, QuoteVersion, ObservedAt, and ValidUntil) alongside
 // capacity and model data. ReceivedAt is local receipt time and controls gossip
 // liveness independently from the quote's ValidUntil.
+//
+// FirstSeen and Announcements are the honest half of a reputation. They are
+// measured HERE, by the node doing the reading, from messages it received - not
+// reported by the seller about itself. A seller's own uptime figure is a claim
+// and costs nothing to inflate; "this node has been announcing to me for six
+// days and I have heard 812 of its announcements" is something the reader
+// watched happen. It is still only one observer's view, and gossip can drop a
+// message for reasons that are the observer's fault, so it is evidence about a
+// node's presence rather than a service-level guarantee - which is exactly how
+// it should be presented to a buyer.
 type RemoteProvider struct {
 	market.Provider
-	PublicKey  ed25519.PublicKey
-	PeerID     string
-	ReceivedAt time.Time
+	// NodeID is the account id of the node that signed this announcement, and
+	// the counterparty a buyer connecting to Endpoint is choosing.
+	NodeID string
+	// Endpoint is the base URL the announcing node serves buyers on. Empty means
+	// it sells compute units and has no HTTP address to give.
+	Endpoint string
+	// Attestation is the maintainer's signed statement about this seller, as it
+	// arrived. Carried UNVERIFIED on purpose: verifying it needs the maintainer
+	// the reader's own chain names, which the exchange does not hold, and a
+	// registry that stored a verdict would be storing a decision taken against a
+	// maintainer that may since have rotated. The listing path checks it.
+	Attestation *OperatorAttestation
+	PublicKey   ed25519.PublicKey
+	PeerID      string
+	ReceivedAt  time.Time
+	// FirstSeen is when this node first heard from that announcer, and
+	// Announcements counts how many it has accepted since. Both are observed,
+	// never announced.
+	FirstSeen     time.Time
+	Announcements uint64
 }
 
 // Exchange is the P2P marketplace exchange. It subscribes to the gossip topics,
@@ -66,10 +94,23 @@ type RemoteProvider struct {
 // the transport closes on ctx cancellation, so cancelling the node context stops
 // the Exchange cleanly with no separate stop signal required.
 type Exchange struct {
-	transport   Transport
-	settled     *token.SettledLedger
-	localMarket *market.Market
-	peerID      string
+	transport    Transport
+	settled      *token.SettledLedger
+	localMarket  *market.Market
+	peerID       string
+	endpoint     string
+	attestations map[string]*OperatorAttestation
+
+	// selfNodeID is the account this node signs its own announcements with,
+	// learned the first time it signs one. Gossip delivers a message back to its
+	// own sender, so without this a node discovers ITSELF and its own provider
+	// appears twice in its directory: once as the local provider it is actually
+	// running, and again as a stranger it believes it heard about.
+	//
+	// It is matched on the node id rather than the peer id because a node id is
+	// bound to the key that signed the announcement, so nobody else can claim it
+	// and make this node discard their listing.
+	selfNodeID string
 
 	// providerTTL bounds how long a remote provider stays discoverable after its
 	// last announcement.
@@ -77,7 +118,12 @@ type Exchange struct {
 	// now is the clock, injectable so tests can control staleness deterministically.
 	now func() time.Time
 
-	mu        sync.RWMutex
+	mu sync.RWMutex
+	// providers is keyed by offerKey(NodeID, ProviderID). Neither id alone is
+	// unique: one node announces every backend it runs, and two nodes may settle
+	// into the same payout account (an operator running a second box). Keyed on
+	// either alone, the second announcement silently replaces the first and half
+	// the directory disappears.
 	providers map[string]RemoteProvider
 
 	wg      sync.WaitGroup
@@ -96,8 +142,20 @@ type Config struct {
 	// exact signed quote snapshot. Observer-only exchanges may leave it nil.
 	Market *market.Market
 	// PeerID is this node's libp2p peer ID string, embedded in outgoing
-	// announcements so remote buyers know where to reach the provider.
+	// announcements so remote nodes know which peer announced.
 	PeerID string
+	// Endpoint is the base URL buyers reach this node on, published in its
+	// announcements. A peer id is how NODES find each other and is not something
+	// a buyer's HTTP client can dial, which is why announcing one without the
+	// other made a directory nobody could act on.
+	//
+	// Empty means this node announces no address: it is selling compute units,
+	// or its operator has not published one yet.
+	Endpoint string
+	// Attestations are the maintainer-signed statements this node presents, by
+	// provider id. A node running first-party capacity carries them; every other
+	// node has none, which is the ordinary case.
+	Attestations map[string]*OperatorAttestation
 	// ProviderTTL overrides DefaultProviderTTL when non-zero.
 	ProviderTTL time.Duration
 	// Now overrides the wall clock when non-nil (used by tests).
@@ -113,6 +171,12 @@ func New(cfg Config) (*Exchange, error) {
 	if cfg.Settled == nil {
 		return nil, fmt.Errorf("marketexchange: settled ledger is required")
 	}
+	// Checked here so a misconfigured address fails the node at startup, where an
+	// operator is watching, rather than silently failing every announcement later
+	// with nobody reading the log.
+	if err := ValidateEndpoint(cfg.Endpoint); err != nil {
+		return nil, fmt.Errorf("marketexchange: market.endpoint: %w", err)
+	}
 	ttl := cfg.ProviderTTL
 	if ttl <= 0 {
 		ttl = DefaultProviderTTL
@@ -122,13 +186,15 @@ func New(cfg Config) (*Exchange, error) {
 		nowFn = time.Now
 	}
 	return &Exchange{
-		transport:   cfg.Transport,
-		settled:     cfg.Settled,
-		localMarket: cfg.Market,
-		peerID:      cfg.PeerID,
-		providerTTL: ttl,
-		now:         nowFn,
-		providers:   make(map[string]RemoteProvider),
+		transport:    cfg.Transport,
+		settled:      cfg.Settled,
+		localMarket:  cfg.Market,
+		peerID:       cfg.PeerID,
+		endpoint:     cfg.Endpoint,
+		attestations: cfg.Attestations,
+		providerTTL:  ttl,
+		now:          nowFn,
+		providers:    make(map[string]RemoteProvider),
 	}, nil
 }
 
@@ -209,8 +275,19 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 	if err := ann.VerifyAt(now); err != nil {
 		return
 	}
+	key := offerKey(ann.NodeID, ann.ProviderID)
+
 	e.mu.Lock()
-	if existing, ok := e.providers[ann.ProviderID]; ok {
+	if e.selfNodeID != "" && ann.NodeID == e.selfNodeID {
+		// Our own announcement, back from the topic we published it to. The
+		// provider it describes is already in the local market, and recording it
+		// here would list it a second time as something discovered.
+		e.mu.Unlock()
+		return
+	}
+	firstSeen := now
+	var heard uint64
+	if existing, ok := e.providers[key]; ok {
 		if ann.QuoteVersion < existing.QuoteVersion {
 			e.mu.Unlock()
 			return
@@ -219,8 +296,14 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 			e.mu.Unlock()
 			return
 		}
+		// Carried across the replacement, because the whole value of these two is
+		// that they accumulate. Reset on every quote refresh - which is most
+		// announcements - they would say nothing except that the seller is still
+		// there right now, which ReceivedAt already says.
+		firstSeen = existing.FirstSeen
+		heard = existing.Announcements
 	}
-	e.providers[ann.ProviderID] = RemoteProvider{
+	e.providers[key] = RemoteProvider{
 		Provider: market.Provider{
 			ID:                ann.ProviderID,
 			Capacity:          ann.Capacity,
@@ -234,11 +317,21 @@ func (e *Exchange) handleAnnouncement(msg transport.Message) {
 			Available:         ann.Available,
 			Models:            ann.Models,
 		},
-		PublicKey:  ann.PublicKey,
-		PeerID:     ann.PeerID,
-		ReceivedAt: now,
+		NodeID:        ann.NodeID,
+		Endpoint:      ann.Endpoint,
+		Attestation:   ann.Attestation,
+		PublicKey:     ann.PublicKey,
+		PeerID:        ann.PeerID,
+		ReceivedAt:    now,
+		FirstSeen:     firstSeen,
+		Announcements: heard + 1,
 	}
 	e.mu.Unlock()
+}
+
+// offerKey identifies one node's offer of one payout account.
+func offerKey(nodeID, providerID string) string {
+	return nodeID + "\x00" + providerID
 }
 
 // sameEconomicQuote reports whether an equal-version announcement preserves
@@ -326,18 +419,31 @@ func (e *Exchange) ApplySettlement(st *Settlement) (*token.Record, error) {
 	return e.settled.Settle(&tx)
 }
 
-// AnnounceProvider signs a v2 ProviderAnnouncement for acct advertising p's
-// complete economic quote and capacity, then publishes it on TopicAnnounce. The
-// announcement timestamp uses the current UTC clock; quote observation and
+// AnnounceProvider publishes one of this node's providers to the directory: the
+// node signs, naming p as the payout account and itself as the address to reach.
+//
+// The node key signs rather than the provider's because the node is what a buyer
+// is choosing - it holds the model, takes the reservation and answers at the
+// endpoint - and because a payout account may be a wallet address, which has no
+// ed25519 key to sign with at all. See ProviderAnnouncement for why those two
+// identities were separated.
+//
+// The announcement timestamp uses the current UTC clock; quote observation and
 // validity come from p and must already satisfy the market quote policy.
-func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p market.Provider) error {
-	if acct == nil {
-		return fmt.Errorf("marketexchange: account is required to announce")
+func (e *Exchange) AnnounceProvider(ctx context.Context, node *token.Account, p market.Provider) error {
+	if node == nil {
+		return fmt.Errorf("marketexchange: node account is required to announce")
+	}
+	if p.ID == "" {
+		return fmt.Errorf("marketexchange: provider id is required to announce")
 	}
 	now := e.now().UTC()
 	ann := ProviderAnnouncement{
-		ProviderID:        acct.AccountID(),
-		PublicKey:         acct.PublicKey,
+		NodeID:            node.AccountID(),
+		Endpoint:          e.endpoint,
+		Attestation:       e.attestationFor(p.ID),
+		ProviderID:        p.ID,
+		PublicKey:         node.PublicKey,
 		Capacity:          p.Capacity,
 		PricePerUnit:      p.PricePerUnit,
 		CostPerUnit:       p.CostPerUnit,
@@ -351,9 +457,12 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p 
 		PeerID:            e.peerID,
 		Timestamp:         now.UnixNano(),
 	}
-	if err := ann.Sign(acct.PrivateKey); err != nil {
+	if err := ann.Sign(node.PrivateKey); err != nil {
 		return err
 	}
+	e.mu.Lock()
+	e.selfNodeID = ann.NodeID
+	e.mu.Unlock()
 	if err := ann.VerifyAt(now); err != nil {
 		return fmt.Errorf("marketexchange: invalid provider announcement: %w", err)
 	}
@@ -365,6 +474,23 @@ func (e *Exchange) AnnounceProvider(ctx context.Context, acct *token.Account, p 
 		return fmt.Errorf("marketexchange: publish announcement: %w", err)
 	}
 	return nil
+}
+
+// SelfAttestation returns the attestation this node presents for one of its own
+// providers, and the node id it announces under.
+//
+// It hands back the raw document rather than a verdict: a node holding a signed
+// file is not entitled to badge itself, and the caller is expected to verify it
+// against the maintainer its own chain names, exactly as it would a stranger's.
+// The node id is returned because that verification is bound to it.
+//
+// An empty node id means this node has not signed an announcement yet, so there
+// is nothing to verify against.
+func (e *Exchange) SelfAttestation(providerID string) (*OperatorAttestation, string) {
+	e.mu.RLock()
+	self := e.selfNodeID
+	e.mu.RUnlock()
+	return e.attestationFor(providerID), self
 }
 
 // SubmitRemoteJob discovers one complete remote-provider snapshot, signs every
@@ -442,13 +568,13 @@ func (e *Exchange) PublishSettlement(ctx context.Context, st *Settlement) error 
 	return nil
 }
 
-// LookupRemoteProvider returns a remote provider only while both independent
-// freshness conditions hold: its announcement receipt is within providerTTL and
-// its signed economic quote remains valid.
-func (e *Exchange) LookupRemoteProvider(id string) (RemoteProvider, bool) {
+// LookupOffer returns one node's offer of one payout account, only while both
+// independent freshness conditions hold: its announcement receipt is within
+// providerTTL and its signed economic quote remains valid.
+func (e *Exchange) LookupOffer(nodeID, providerID string) (RemoteProvider, bool) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	rp, ok := e.providers[id]
+	rp, ok := e.providers[offerKey(nodeID, providerID)]
 	if !ok {
 		return RemoteProvider{}, false
 	}
@@ -456,6 +582,39 @@ func (e *Exchange) LookupRemoteProvider(id string) (RemoteProvider, bool) {
 		return RemoteProvider{}, false
 	}
 	return rp, true
+}
+
+// LookupRemoteProvider returns the cheapest fresh offer for a payout account,
+// whichever node is making it.
+//
+// It exists because a provider id no longer identifies one offer: a node
+// announces every backend it runs, and an operator with two boxes settles both
+// into the same account. Callers that name only a provider get the best price
+// on offer for it, deterministically - ties break on node id so two nodes
+// reading the same announcements make the same choice.
+//
+// A caller that means a SPECIFIC node's offer wants LookupOffer. The difference
+// matters for anything a buyer is quoted, because the two boxes behind one
+// payout account can advertise different prices and different capacity.
+func (e *Exchange) LookupRemoteProvider(providerID string) (RemoteProvider, bool) {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+
+	now := e.now().UTC()
+	var (
+		best  RemoteProvider
+		found bool
+	)
+	for _, rp := range e.providers {
+		if rp.ID != providerID || e.isUnavailableAt(rp, now) {
+			continue
+		}
+		if !found || rp.PricePerUnit < best.PricePerUnit ||
+			(rp.PricePerUnit == best.PricePerUnit && rp.NodeID < best.NodeID) {
+			best, found = rp, true
+		}
+	}
+	return best, found
 }
 
 // ListRemoteProviders returns all remotely announced providers whose receipt
@@ -468,14 +627,19 @@ func (e *Exchange) ListRemoteProviders() []RemoteProvider {
 
 	now := e.now().UTC()
 	out := make([]RemoteProvider, 0, len(e.providers))
-	for id, rp := range e.providers {
+	for key, rp := range e.providers {
 		if e.isUnavailableAt(rp, now) {
-			delete(e.providers, id)
+			delete(e.providers, key)
 			continue
 		}
 		out = append(out, rp)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].NodeID != out[j].NodeID {
+			return out[i].NodeID < out[j].NodeID
+		}
+		return out[i].ID < out[j].ID
+	})
 	return out
 }
 
@@ -486,4 +650,13 @@ func (e *Exchange) isUnavailableAt(rp RemoteProvider, now time.Time) bool {
 	receiptStale := now.Sub(rp.ReceivedAt) > e.providerTTL
 	quoteExpired := rp.ValidUntil.IsZero() || !rp.ValidUntil.After(now)
 	return receiptStale || quoteExpired
+}
+
+// attestationFor returns the maintainer's statement about one of this node's
+// providers, if it holds one.
+func (e *Exchange) attestationFor(providerID string) *OperatorAttestation {
+	if e.attestations == nil {
+		return nil
+	}
+	return e.attestations[providerID]
 }

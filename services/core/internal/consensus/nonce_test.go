@@ -3,6 +3,7 @@ package consensus
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -149,6 +150,9 @@ func TestAMaliciousLeaderCannotSmuggleTwoSameNonceTransfers(t *testing.T) {
 		PrevBlockHash: prev,
 		ProposerID:    nd.acct.AccountID(),
 		Txs:           []token.Transaction{*first, *second},
+		Timestamp:     time.Now().Unix(),
+		Version:       ProtocolVersionGenesis,
+		StateRoot:     engineStateRoot(t, nd.engine),
 	}
 	if err := b.Sign(nd.acct.PrivateKey); err != nil {
 		t.Fatalf("sign block: %v", err)
@@ -162,5 +166,62 @@ func TestAMaliciousLeaderCannotSmuggleTwoSameNonceTransfers(t *testing.T) {
 	}
 	if !errors.Is(err, ErrInvalidMessage) {
 		t.Fatalf("error = %v, want ErrInvalidMessage", err)
+	}
+}
+
+// TestReservedRecipientTransfersStillAdvanceTheNonce pins the split that made
+// two bridge locks collide.
+//
+// CommittedTransfers deliberately OMITS reserved recipients - bonds, stake
+// withdrawals, bridge locks are protocol state rather than user payments - and
+// that is correct for a transaction list somebody reads. It is wrong as the
+// basis for a nonce, which is what the CLI used it for: an account whose only
+// activity is locking into the bridge saw a count that never advanced, signed
+// everything at one nonce, and produced one lock id for every lock. The second
+// overwrote the first's record and the native it had escrowed became unmintable.
+//
+// So: the history hides them, and the nonce counts them.
+func TestReservedRecipientTransfersStillAdvanceTheNonce(t *testing.T) {
+	nodes, stop := newCluster(t, 4, nil)
+	defer stop()
+
+	sender := nodes[0].acct
+	senderID := sender.AccountID()
+	// Enough for the bridge's anti-dust floor, which a lock below is refused for.
+	mintAll(t, nodes, senderID, 500_000_000_000)
+
+	before := nodes[0].engine.NextNonce(senderID, true)
+
+	// A bridge lock: an ordinary signed transfer to a RESERVED recipient.
+	var addr [20]byte
+	addr[19] = 0x2a
+	lock := signedTransfer(t, sender, BridgeLockRecipient(addr), 100_000_000_000, before)
+	for _, nd := range nodes {
+		if err := nd.engine.Submit(lock); err != nil {
+			t.Fatalf("submit the lock: %v", err)
+		}
+	}
+	waitForOrReport(t, 10*time.Second, "the lock to advance the sender's nonce",
+		func() bool { return nodes[0].engine.NextNonce(senderID, true) > before },
+		func() string {
+			return fmt.Sprintf("nonce is still %d", nodes[0].engine.NextNonce(senderID, true))
+		})
+
+	after := nodes[0].engine.NextNonce(senderID, true)
+	if after <= before {
+		t.Fatalf("nonce did not advance across a reserved-recipient transfer: %d then %d.\n"+
+			"Every lock would derive the same id and the second would overwrite the first.", before, after)
+	}
+
+	// And the same transfer stays out of the readable history, which is the
+	// behaviour that made counting it the wrong way to get here.
+	transfers, _, err := nodes[0].engine.CommittedTransfers(0, 0)
+	if err != nil {
+		t.Fatalf("committed transfers: %v", err)
+	}
+	for _, tr := range transfers {
+		if IsReservedRecipient(tr.To) {
+			t.Fatalf("a reserved recipient leaked into the transaction history: %+v", tr)
+		}
 	}
 }

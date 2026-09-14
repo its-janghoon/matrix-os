@@ -57,11 +57,18 @@ func mustAccount(t *testing.T) *token.Account {
 	return acct
 }
 
-// validProviderAnnouncement returns a complete v2 quote at a deterministic
+// validProviderAnnouncement returns a complete v3 quote at a deterministic
 // instant. Individual tests may override fields before signing.
+//
+// The signer is the announcing NODE, and the payout account it names is a
+// separate id - here the same account, because most of these tests are about the
+// quote rather than the identities, but the two are distinct fields and the
+// signature only binds the first.
 func validProviderAnnouncement(acct *token.Account, now time.Time) ProviderAnnouncement {
 	now = now.UTC()
 	return ProviderAnnouncement{
+		NodeID:            acct.AccountID(),
+		Endpoint:          "https://provider-a.example:9093",
 		ProviderID:        acct.AccountID(),
 		PublicKey:         acct.PublicKey,
 		Capacity:          100,
@@ -177,7 +184,7 @@ func TestProviderAnnouncement_SignVerify(t *testing.T) {
 	t.Run("identity mismatch rejected", func(t *testing.T) {
 		other := mustAccount(t)
 		ann := base()
-		ann.ProviderID = other.AccountID()
+		ann.NodeID = other.AccountID()
 		if err := ann.Sign(acct.PrivateKey); err != nil {
 			t.Fatalf("sign: %v", err)
 		}
@@ -531,6 +538,7 @@ func TestExchange_Registry(t *testing.T) {
 
 	// An invalid (unsigned) announcement is dropped and does not add an entry.
 	unsigned := ProviderAnnouncement{
+		NodeID:     provider.AccountID(),
 		ProviderID: provider.AccountID(),
 		PublicKey:  provider.PublicKey,
 		Capacity:   1, PricePerUnit: 1, Available: 1, PeerID: "peer-B",
@@ -682,14 +690,15 @@ func TestExchange_AnnounceProviderQuoteRoundTrip(t *testing.T) {
 		QuoteVersion:      11,
 		ObservedAt:        now.Add(-2 * time.Minute),
 		ValidUntil:        now.Add(45 * time.Minute),
+		ID:                "eth:0x00000000000000000000000000000000000000aa",
 		Available:         21,
 		Models:            []string{"llama-3.3-70b", "qwen-2.5"},
 	}
 	if err := ex.AnnounceProvider(context.Background(), provider, want); err != nil {
 		t.Fatalf("announce provider: %v", err)
 	}
-	if TopicAnnounce != "matrix/market/announce/v2" {
-		t.Fatalf("announcement topic = %q, want explicit v2", TopicAnnounce)
+	if TopicAnnounce != "matrix/market/announce/v3" {
+		t.Fatalf("announcement topic = %q, want explicit v3", TopicAnnounce)
 	}
 	payload := ft.lastPublished(TopicAnnounce)
 	if len(payload) == 0 {
@@ -702,12 +711,31 @@ func TestExchange_AnnounceProviderQuoteRoundTrip(t *testing.T) {
 	if err := ann.VerifyAt(now); err != nil {
 		t.Fatalf("published announcement does not verify: %v", err)
 	}
-	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
-	rp, ok := ex.LookupRemoteProvider(provider.AccountID())
+	// Heard by a DIFFERENT node, because that is what discovery is. Feeding the
+	// announcement back into the exchange that published it discovers nothing: a
+	// node ignores its own announcements, or its own provider would appear in its
+	// directory twice.
+	listener, err := New(Config{
+		Transport: newFakeTransport(),
+		Settled:   settled,
+		PeerID:    "peer-listener",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new listener exchange: %v", err)
+	}
+	listener.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
+	// Looked up by the PAYOUT account, which the quote above deliberately sets to
+	// a wallet address rather than to the signing node - the case v2 could not
+	// express at all, and the one the GPU runbook tells an operator to use.
+	rp, ok := listener.LookupRemoteProvider(want.ID)
 	if !ok {
 		t.Fatal("round-tripped provider not discoverable")
 	}
-	if rp.ID != provider.AccountID() || rp.Capacity != want.Capacity || rp.PricePerUnit != want.PricePerUnit ||
+	if rp.NodeID != provider.AccountID() {
+		t.Fatalf("announcing node = %q, want the signer %q", rp.NodeID, provider.AccountID())
+	}
+	if rp.ID != want.ID || rp.Capacity != want.Capacity || rp.PricePerUnit != want.PricePerUnit ||
 		rp.CostPerUnit != want.CostPerUnit || rp.MarkupBasisPoints != want.MarkupBasisPoints ||
 		rp.QuoteID != want.QuoteID || rp.QuoteVersion != want.QuoteVersion ||
 		!rp.ObservedAt.Equal(want.ObservedAt) || !rp.ValidUntil.Equal(want.ValidUntil) ||
@@ -1063,6 +1091,7 @@ func TestExchange_TwoHostGossip(t *testing.T) {
 		QuoteVersion:      1,
 		ObservedAt:        quoteNow,
 		ValidUntil:        quoteNow.Add(time.Hour),
+		ID:                provider.AccountID(),
 		Available:         10,
 	}
 	for time.Now().Before(deadline) {
@@ -1110,4 +1139,135 @@ func TestExchange_TwoHostGossip(t *testing.T) {
 // stay concise.
 func marshalJSON(v any) ([]byte, error) {
 	return json.Marshal(v)
+}
+
+// TestExchange_IgnoresItsOwnAnnouncement pins the thing a directory page made
+// visible and no unit test had: gossip delivers a message back to its own
+// sender, so a node that records every announcement it hears records itself.
+//
+// The symptom is not an error anywhere. It is one seller listed twice - once as
+// the provider the node is actually running, and once as a stranger it believes
+// it discovered - which a buyer reads as two independent sellers agreeing on a
+// price.
+func TestExchange_IgnoresItsOwnAnnouncement(t *testing.T) {
+	settled, _ := newSettled(t)
+	ft := newFakeTransport()
+	node := mustAccount(t)
+	now := time.Date(2025, time.May, 6, 7, 8, 9, 10, time.UTC)
+	ex, err := New(Config{
+		Transport: ft,
+		Settled:   settled,
+		PeerID:    "peer-self",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+	p := market.Provider{
+		ID:           "eth:0x00000000000000000000000000000000000000aa",
+		Capacity:     10,
+		Available:    10,
+		PricePerUnit: 5,
+		QuoteID:      "quote-self",
+		QuoteVersion: 1,
+		ObservedAt:   now,
+		ValidUntil:   now.Add(time.Hour),
+		Models:       []string{"echo"},
+	}
+	if err := ex.AnnounceProvider(context.Background(), node, p); err != nil {
+		t.Fatalf("announce provider: %v", err)
+	}
+	payload := ft.lastPublished(TopicAnnounce)
+	if len(payload) == 0 {
+		t.Fatal("nothing was published")
+	}
+
+	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
+
+	if got := ex.ListRemoteProviders(); len(got) != 0 {
+		t.Fatalf("a node discovered itself: %+v", got)
+	}
+	if _, ok := ex.LookupRemoteProvider(p.ID); ok {
+		t.Fatal("own provider is listed as a remote discovery")
+	}
+
+	// The same announcement is a real discovery for anybody else, so the rule
+	// must be about WHOSE announcement it is and not about the message.
+	other, err := New(Config{
+		Transport: newFakeTransport(),
+		Settled:   settled,
+		PeerID:    "peer-other",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new listener: %v", err)
+	}
+	other.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
+	if _, ok := other.LookupRemoteProvider(p.ID); !ok {
+		t.Fatal("a different node failed to discover the announcement")
+	}
+}
+
+// TestExchange_OwnAnnouncementCannotBeClaimedByAStranger checks the rule is
+// bound to the signing key.
+//
+// Matching on the announced peer id would have been the obvious thing, and it
+// would have handed any node a censorship switch: claim a victim's peer id and
+// the victim drops your listing - or, worse, drops their own view of a rival's.
+// A node id is checked against the public key that signed the announcement, so
+// claiming one means holding that key.
+func TestExchange_OwnAnnouncementCannotBeClaimedByAStranger(t *testing.T) {
+	settled, _ := newSettled(t)
+	mine := mustAccount(t)
+	theirs := mustAccount(t)
+	now := time.Date(2025, time.May, 6, 7, 8, 9, 10, time.UTC)
+
+	// The stranger announces while claiming OUR peer id.
+	strangerTransport := newFakeTransport()
+	stranger, err := New(Config{
+		Transport: strangerTransport,
+		Settled:   settled,
+		PeerID:    "peer-mine",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new stranger: %v", err)
+	}
+	p := market.Provider{
+		ID:           "eth:0x00000000000000000000000000000000000000bb",
+		Capacity:     4,
+		Available:    4,
+		PricePerUnit: 9,
+		QuoteID:      "quote-stranger",
+		QuoteVersion: 1,
+		ObservedAt:   now,
+		ValidUntil:   now.Add(time.Hour),
+		Models:       []string{"echo"},
+	}
+	if err := stranger.AnnounceProvider(context.Background(), theirs, p); err != nil {
+		t.Fatalf("stranger announce: %v", err)
+	}
+	payload := strangerTransport.lastPublished(TopicAnnounce)
+
+	// We announce something of our own first, so we know who we are.
+	ours := newFakeTransport()
+	ex, err := New(Config{
+		Transport: ours,
+		Settled:   settled,
+		PeerID:    "peer-mine",
+		Now:       func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("new exchange: %v", err)
+	}
+	self := p
+	self.ID = "eth:0x00000000000000000000000000000000000000cc"
+	if err := ex.AnnounceProvider(context.Background(), mine, self); err != nil {
+		t.Fatalf("announce provider: %v", err)
+	}
+
+	ex.handleAnnouncement(transport.Message{Topic: TopicAnnounce, Payload: payload})
+	if _, ok := ex.LookupRemoteProvider(p.ID); !ok {
+		t.Fatal("a stranger claiming our peer id got their listing dropped")
+	}
 }

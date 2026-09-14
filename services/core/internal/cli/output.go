@@ -34,6 +34,35 @@ type providerRow struct {
 	Origin            string   `json:"origin"`
 	PeerID            string   `json:"peer_id,omitempty"`
 	Models            []string `json:"models,omitempty"`
+	// The rest describe a remote provider as the directory sees it. They are in
+	// the JSON but not the table: the order-book view is already thirteen columns
+	// wide, and a buyer choosing where to send a prompt wants a different set of
+	// facts than an operator inspecting their own listings. `provider directory`
+	// is that view.
+	NodeID             string `json:"node_id,omitempty"`
+	Endpoint           string `json:"endpoint,omitempty"`
+	FirstSeen          string `json:"first_seen,omitempty"`
+	AnnouncementsHeard uint64 `json:"announcements_heard,omitempty"`
+	// What this seller's payout account has been PAID, according to the chain
+	// this node holds. Not a claim the seller made; not a rating either - see
+	// the directory header for what it does and does not prove.
+	SettledReceived    uint64 `json:"settled_received,omitempty"`
+	SettledPayments    uint64 `json:"settled_payments,omitempty"`
+	SettledPayers      uint64 `json:"settled_payers,omitempty"`
+	SettledFirstHeight uint64 `json:"settled_first_height,omitempty"`
+	SettledLastHeight  uint64 `json:"settled_last_height,omitempty"`
+	SettledIndexedFrom uint64 `json:"settled_indexed_from,omitempty"`
+	// What the seller has STAKED, read from this node's chain. Not a promise of
+	// good service - nothing here can be - but capital a listing costs.
+	Bonded             uint64 `json:"bonded,omitempty"`
+	BondWithdrawableAt uint64 `json:"bond_withdrawable_at,omitempty"`
+	// Whether the node being ASKED verified a maintainer signature saying it
+	// operates this seller, and the operator that signature names.
+	//
+	// An identity claim and nothing more: not a rating, and worth nothing to a
+	// reader who does not trust that maintainer account.
+	OperatorAttested bool   `json:"operator_attested,omitempty"`
+	OperatorName     string `json:"operator_name,omitempty"`
 }
 
 func providerToRow(p *marketv1.Provider) providerRow {
@@ -51,6 +80,24 @@ func providerToRow(p *marketv1.Provider) providerRow {
 		Origin:            originString(p.GetOrigin()),
 		PeerID:            p.GetPeerId(),
 		Models:            p.GetModels(),
+
+		NodeID:             p.GetNodeId(),
+		Endpoint:           p.GetEndpoint(),
+		FirstSeen:          timestampString(p.GetFirstSeen()),
+		AnnouncementsHeard: p.GetAnnouncementsHeard(),
+
+		SettledReceived:    p.GetSettledReceived(),
+		SettledPayments:    p.GetSettledPayments(),
+		SettledPayers:      p.GetSettledPayers(),
+		SettledFirstHeight: p.GetSettledFirstHeight(),
+		SettledLastHeight:  p.GetSettledLastHeight(),
+		SettledIndexedFrom: p.GetSettledIndexedFrom(),
+
+		Bonded:             p.GetBonded(),
+		BondWithdrawableAt: p.GetBondWithdrawableAt(),
+
+		OperatorAttested: p.GetOperatorAttested(),
+		OperatorName:     p.GetOperatorName(),
 	}
 }
 
@@ -243,4 +290,111 @@ func printTransaction(w io.Writer, asJSON bool, t *marketv1.Transaction) error {
 	fmt.Fprintf(w, "Nonce:  %d\n", r.Nonce)
 	fmt.Fprintf(w, "Block:  %d\n", r.BlockHeight)
 	return nil
+}
+
+// printDirectory renders the buyer's view of the directory: who is selling what,
+// where to reach them, and how long this node has been hearing from them.
+//
+// A different view from `provider list` rather than more columns on it, because
+// the two answer different questions. An operator inspecting their own order
+// book wants quote identity and markup; a buyer deciding where to send a prompt
+// wants an address, a model, a price, and some reason to believe the seller will
+// still be there in a minute.
+//
+// SEEN FOR and HEARD are what this node OBSERVED, not what the seller said about
+// itself. No self-reported uptime exists to print - the announcement carries
+// none, deliberately - so a long history here means this reader watched that node
+// keep announcing, and nothing more. It is evidence of presence, not a promise of
+// service, and the header says "seen" rather than "uptime" for that reason.
+func printDirectory(w io.Writer, asJSON bool, provs []*marketv1.Provider, now time.Time) error {
+	rows := make([]providerRow, 0, len(provs))
+	for _, p := range provs {
+		rows = append(rows, providerToRow(p))
+	}
+	if asJSON {
+		return printJSON(w, rows)
+	}
+	if len(rows) == 0 {
+		fmt.Fprintln(w, "No providers announced. This node has heard nothing yet -")
+		fmt.Fprintln(w, "either none are selling, or it has no peers to hear them from.")
+		return nil
+	}
+	tw := newTabWriter(w)
+	fmt.Fprintln(tw, "ENDPOINT\tMODELS\tPRICE/UNIT\tAVAILABLE\tBONDED\tPAID\tPAYERS\tVOUCHED BY\tSEEN FOR\tHEARD")
+	for _, r := range rows {
+		endpoint := r.Endpoint
+		if endpoint == "" {
+			// Honest rather than blank: this seller published no address, so it is
+			// discoverable for compute units and cannot take an inference request.
+			endpoint = "(no address; compute only)"
+		}
+		vouched := "-"
+		if r.OperatorAttested {
+			vouched = r.OperatorName
+			if vouched == "" {
+				vouched = "attested"
+			}
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%d\n",
+			endpoint, strings.Join(r.Models, ","), r.PricePerUnit, r.Available,
+			r.Bonded, r.SettledPayments, r.SettledPayers, vouched,
+			seenFor(r.FirstSeen, now), r.AnnouncementsHeard)
+	}
+	if err := tw.Flush(); err != nil {
+		return err
+	}
+	// Said once under the table rather than in a column, because it qualifies
+	// every row and a reader who takes PAID for a rating is the failure mode
+	// this whole design is avoiding.
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "PAID and PAYERS are settled transfers on the chain this node holds, not")
+	fmt.Fprintln(w, "claims by the seller. A settlement is an ordinary transfer, so they count")
+	fmt.Fprintln(w, "every payment the account received - a seller can pay itself. PAYERS is the")
+	fmt.Fprintln(w, "harder one to inflate: it costs a funded account each. SEEN FOR and HEARD")
+	fmt.Fprintln(w, "are what this node observed, not uptime the seller reported.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "BONDED is capital the seller has staked on this chain. It does not make them")
+	fmt.Fprintln(w, "honest and cannot be slashed for bad service - no protocol can judge whether a")
+	fmt.Fprintln(w, "completion was really the model advertised. What it does is make a LISTING cost")
+	fmt.Fprintln(w, "money, which is what stops one attacker filling this table with fake sellers.")
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "VOUCHED BY means the maintainer this chain names signed that it operates that")
+	fmt.Fprintln(w, "node - checked here against consensus state, not taken from the announcement.")
+	fmt.Fprintln(w, "It is an identity claim, not a rating: it does not say those sellers answer")
+	fmt.Fprintln(w, "better, and it is worth nothing to you if you do not trust that account.")
+	return nil
+}
+
+// seenFor renders how long this node has been hearing a seller, rounded to
+// something a person reads at a glance.
+func seenFor(firstSeen string, now time.Time) string {
+	if firstSeen == "" {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339, firstSeen)
+	if err != nil {
+		return "-"
+	}
+	d := now.Sub(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
+}
+
+// shortID abbreviates an account id so a table stays readable. A 64-hex id and a
+// 42-character address both make a column nothing else fits beside, and the full
+// value is one --json away.
+func shortID(id string) string {
+	const keep = 10
+	if len(id) <= keep*2 {
+		return id
+	}
+	return id[:keep] + "..." + id[len(id)-6:]
 }

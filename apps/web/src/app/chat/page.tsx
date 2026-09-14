@@ -1,6 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
+import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
 import {
@@ -10,9 +12,11 @@ import {
   listModels,
   reportProblem,
   type ModelOffer,
+  type SellerChoice,
   type Settled,
 } from '@/lib/wallet/node';
 import type { Message } from '@/lib/wallet/signing';
+import { checkReceipt, receiptVerdict, type ReceiptCheck } from '@/lib/wallet/receipt';
 import { browserSigner } from '@/lib/wallet/browserSigner';
 import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
@@ -27,17 +31,34 @@ import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/w
  * non-extractable, and used to sign two things per message - the run
  * authorization before any work happens, and the payment after.
  *
- * It is deliberately plain about what it cannot do. There is no on-ramp, so the
- * account starts empty and the page hands over the command to fund it rather
- * than pretending. There is no streaming, because the completion is withheld
- * until the payment is signed. And the provider sees the prompt, which no amount
- * of browser-side key handling changes.
+ * Every answer comes with the seller's signed receipt, checked HERE - the bytes
+ * the node signed, against the prompt this page actually sent and the answer it
+ * got back. A receipt the seller's own node vouched for would be evidence of
+ * nothing; the point of one is that the holder can check it without asking the
+ * seller, or us, for anything.
+ *
+ * It is deliberately plain about what it cannot do. The account starts empty and
+ * the page points at the bridge rather than pretending a public on-ramp exists.
+ * There is no streaming, because the completion is withheld
+ * until the payment is signed. The provider sees the prompt, which no amount of
+ * browser-side key handling changes. And a verified receipt means the seller
+ * MADE its claim, not that the claim is true: no signature can tell a buyer that
+ * the model named is the model that ran.
  */
 
 interface Turn {
   role: 'user' | 'assistant';
   content: string;
   settled?: Settled;
+  /**
+   * What checking the seller's receipt concluded, run in this page against the
+   * prompt that was actually sent and the answer that came back.
+   *
+   * Checked here rather than shown as a badge from the node, because a receipt
+   * the seller's own node vouches for is not evidence of anything. This page
+   * holds the text and does the arithmetic itself.
+   */
+  receipt?: ReceiptCheck;
 }
 
 const CARD = 'rounded-xl border border-gray-800 bg-gray-900/50 p-6';
@@ -46,12 +67,33 @@ const FIELD =
   'outline-none focus:border-gray-500';
 
 export default function ChatPage() {
+  // useSearchParams suspends, and the whole page suspending would blank it while
+  // the query is read. The boundary keeps that to the part that needs it.
+  return (
+    <Suspense fallback={null}>
+      <Chat />
+    </Suspense>
+  );
+}
+
+function Chat() {
+  const params = useSearchParams();
+  // What the directory page handed over: WHICH seller, never where it lives. The
+  // address is read back from the directory when the purchase runs, so a link
+  // cannot point somebody's prompt at a host of the sender's choosing.
+  const [chosen, setChosen] = useState<SellerChoice | null>(() => {
+    const node = params.get('node');
+    const provider = params.get('provider');
+    return node && provider ? { nodeId: node, providerId: provider } : null;
+  });
+
   const [signer, setSigner] = useState<Signer | null>(null);
   const [checking, setChecking] = useState(true);
-  const [endpoint, setEndpoint] = useState(DEFAULT_ENDPOINT);
+  const [minBond, setMinBond] = useState('');
+  const [endpoint, setEndpoint] = useState(params.get('endpoint') ?? DEFAULT_ENDPOINT);
   const [balance, setBalance] = useState<bigint | null>(null);
   const [models, setModels] = useState<ModelOffer[]>([]);
-  const [model, setModel] = useState('');
+  const [model, setModel] = useState(params.get('model') ?? '');
   const [draft, setDraft] = useState('');
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
@@ -116,8 +158,14 @@ export default function ChatPage() {
     setProblem('');
 
     try {
-      const settled = await chat(endpoint, signer, { model, messages: history });
-      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled }]);
+      const settled = await chat(endpoint, signer, {
+        model,
+        messages: history,
+        chosen: chosen ?? undefined,
+        minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
+      });
+      const receipt = await checkReceipt(settled, history, signer.accountId);
+      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled, receipt }]);
       setBalance(await getBalance(endpoint, signer.accountId));
     } catch (err) {
       setProblem(reportProblem(err));
@@ -149,6 +197,8 @@ export default function ChatPage() {
               it, no API key is involved, and nothing you type is stored here.
             </p>
           </header>
+
+          {chosen ? <PickedSeller chosen={chosen} onClear={() => setChosen(null)} /> : null}
 
           {!signer ? <NoWallet onReady={setSigner} /> : null}
 
@@ -236,6 +286,8 @@ export default function ChatPage() {
                     ))}
                   </select>
                 )}
+
+                {chosen ? null : <AutomaticSeller minBond={minBond} setMinBond={setMinBond} />}
               </section>
 
               <Transcript turns={turns} busy={busy} bottom={bottom} />
@@ -356,15 +408,25 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
 
 function Funding({ account }: { account: string }) {
   return (
-    <div className='mt-4 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4'>
-      <p className='mb-2 text-sm text-yellow-100'>
-        This account holds nothing, so a provider will refuse the job before doing any work. MATRIX is not pegged to
-        USDC, and this page does not claim a live public on-ramp. On a node you run, fund the account yourself. If a
-        verified Base bridge is offered separately, its user pays Base gas and uses only the exact configured contract:
+    <div className='mt-4 space-y-3 rounded-lg border border-yellow-500/20 bg-yellow-500/5 p-4'>
+      <p className='text-sm text-yellow-100'>
+        This account holds nothing, so a provider will refuse the job before doing any work.
       </p>
-      <pre className='overflow-x-auto rounded bg-black/60 p-3 text-xs text-gray-200'>
-        <code>{`matrix --api-key <key> fund --account ${account} --amount 1000000`}</code>
-      </pre>
+      <p className='text-sm text-yellow-100/90'>
+        If you hold wMATRIX on Base, the{' '}
+        <a className='underline underline-offset-2' href='/bridge'>
+          bridge
+        </a>{' '}
+        is the way in: burn it there naming this account as the recipient, and the escrow is released to you here. You
+        pay Base gas, and the page uses only the configured contract.
+      </p>
+      <p className='text-sm text-yellow-100/70'>
+        Otherwise somebody sends you some. MATRIX is not pegged to anything and this page does not claim a public
+        on-ramp that does not exist. On a node you run yourself, seed the account from its genesis allocation - a reward
+        pool transfer is refused on a multi-validator network, because it is not consensus-ordered and would leave the
+        validators disagreeing about the pool.
+      </p>
+      <p className='font-mono text-xs text-yellow-100/60'>{account}</p>
     </div>
   );
 }
@@ -393,10 +455,21 @@ function Transcript({
           <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
           <p className='whitespace-pre-wrap text-gray-100'>{turn.content}</p>
           {turn.settled ? (
-            <p className='mt-3 font-mono text-xs text-gray-500'>
-              paid {turn.settled.units.toString()} base units to {turn.settled.provider} - {turn.settled.promptTokens}{' '}
-              prompt + {turn.settled.completionTokens} completion tokens
-            </p>
+            <div className='mt-3 space-y-1 font-mono text-xs'>
+              <p className='text-gray-500'>
+                paid {turn.settled.units.toString()} base units to {turn.settled.provider} -{' '}
+                {turn.settled.promptTokens} prompt + {turn.settled.completionTokens} completion tokens
+              </p>
+              <p
+                className={
+                  turn.receipt && !turn.receipt.problem && turn.receipt.boundToExchange !== false
+                    ? 'text-emerald-500/80'
+                    : 'text-amber-500/80'
+                }
+              >
+                {receiptVerdict(turn.receipt)}
+              </p>
+            </div>
           ) : null}
         </div>
       ))}
@@ -442,5 +515,68 @@ function Caveats({ kind }: { kind: Signer['kind'] }) {
         </li>
       </ul>
     </section>
+  );
+}
+
+/**
+ * Who this page will buy from.
+ *
+ * Two ways to end up here, and the page has to say which is in force. Arriving
+ * from the directory picks ONE seller, by identity - the address is read back
+ * from the directory when the purchase runs, so a link cannot route a prompt at
+ * a host of the sender's choosing. Arriving directly leaves it automatic:
+ * cheapest that can be reached, which is the right default and is also how an
+ * attacker undercutting everybody wins the traffic. The bond floor is the answer
+ * to that, and it is only meaningful while the choice IS automatic - somebody
+ * who picked a seller from a table showing its stake has already decided.
+ *
+ * The picked seller is shown ABOVE the wallet prompt, before there is a wallet
+ * at all. Arriving from the directory and being shown nothing but "choose a
+ * wallet" reads as the choice having been dropped on the way.
+ */
+function PickedSeller({ chosen, onClear }: { chosen: SellerChoice; onClear: () => void }) {
+  return (
+    <section className='rounded-xl border border-gray-800 bg-gray-900/40 p-4 text-sm'>
+      <p className='text-gray-300'>
+        Buying from the seller you picked, on node{' '}
+        <span className='font-mono text-xs text-gray-400'>{chosen.nodeId.slice(0, 12)}...</span>
+      </p>
+      <p className='mt-1 text-xs text-gray-500'>
+        Its address is read from the directory when you send, not from this link. If it has stopped announcing, the send
+        fails and says so rather than quietly going somewhere else.
+      </p>
+      <button className='mt-2 text-xs text-gray-400 underline underline-offset-2 hover:text-gray-200' onClick={onClear}>
+        Let the page pick instead
+      </button>
+    </section>
+  );
+}
+
+function AutomaticSeller({ minBond, setMinBond }: { minBond: string; setMinBond: (v: string) => void }) {
+  return (
+    <div className='mt-4 rounded-lg border border-gray-800 bg-black/40 p-3 text-sm'>
+      <p className='text-gray-400'>
+        The cheapest seller that can be reached will serve this.{' '}
+        <Link className='underline underline-offset-2 hover:text-gray-200' href='/market'>
+          Pick one yourself
+        </Link>{' '}
+        to see who they are first.
+      </p>
+      <label className='mt-3 block text-xs uppercase tracking-wide text-gray-500' htmlFor='min-bond'>
+        Refuse sellers staking less than
+      </label>
+      <input
+        id='min-bond'
+        className='mt-1 w-full rounded-lg border border-gray-700 bg-black/60 px-3 py-2 font-mono text-xs text-gray-100 outline-none focus:border-gray-500'
+        placeholder='0 - any seller, staked or not'
+        value={minBond}
+        onChange={(e) => setMinBond(e.target.value.replace(/[^0-9]/g, ''))}
+        spellCheck={false}
+      />
+      <p className='mt-1 text-xs text-gray-500'>
+        A stake does not make a seller honest - nothing can - but it makes a listing cost capital, which is what stops
+        one attacker offering ten thousand of them at a price nobody can match.
+      </p>
+    </div>
   );
 }

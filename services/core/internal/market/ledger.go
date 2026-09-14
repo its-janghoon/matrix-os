@@ -38,6 +38,12 @@ var (
 	// ErrInsufficientCapacity is returned when a provider cannot satisfy the
 	// requested compute units.
 	ErrInsufficientCapacity = errors.New("market: insufficient capacity")
+	// ErrProviderSuspended is returned when a provider is registered and quoted
+	// but is not currently able to serve, so a reservation against it would be
+	// taken only to fail. It is distinct from ErrProviderNotFound (the provider
+	// does not exist) and from ErrInsufficientCapacity (it exists and is busy):
+	// a caller that can wait should wait, and a router should pick someone else.
+	ErrProviderSuspended = errors.New("market: provider is suspended")
 	// ErrJobNotFound is returned when a referenced job does not exist.
 	ErrJobNotFound = errors.New("market: job not found")
 	// ErrInvalidProvider is returned when a provider fails validation.

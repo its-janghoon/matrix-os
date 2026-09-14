@@ -35,6 +35,9 @@ type testNode struct {
 	peerID peer.ID
 	// bus is the shared gossip bus every node in the cluster is wired to.
 	bus *memBus
+	// seeds applies this node's share of the cluster's out-of-band credits, at
+	// the log position each was filed against. See mintAll.
+	seeds *seedApplier
 }
 
 // newCluster spins up n in-process consensus nodes wired to a shared in-memory
@@ -83,6 +86,9 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		// The provider reward registry, for the same reason: a test that uses it
 		// must not reach into a running engine to install one.
 		providers := NewProviderRegistry(store)
+		// The settled-history tally, wired for every cluster for the same reason:
+		// it must record what a real commit did, not what a test told it to.
+		earnings := NewEarningsStore(store)
 		cfg := Config{
 			Transport:       bus.endpoint(peerID),
 			Validators:      vs,
@@ -96,6 +102,7 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			SelfVotes:       selfVotes,
 			Stake:           stake,
 			Providers:       providers,
+			Earnings:        earnings,
 			// Nothing is bonded in most tests, so an admission floor would refuse
 			// every set change. Tests about the floor set one.
 			ZeroMinBond:     true,
@@ -104,12 +111,27 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 		if opts != nil {
 			opts(&cfg)
 		}
+		// Set after opts, not before: a test that wired its own observer would
+		// otherwise silently take the cluster's credits with it, and the symptom
+		// - one node short of money, much later - names nothing.
+		seeds := newSeedApplier(bus, ledger)
+		prior := cfg.OnCommit
+		cfg.OnCommit = func(b *Block) {
+			// This node has committed b, so its next block is b.Height+1, and
+			// every credit filed at or before that height is now due. Running it
+			// here puts the credit inside the commit path, which is the only
+			// place every node passes through in the same order - a block this
+			// node voted for and a block it caught up on both arrive here.
+			if err := seeds.beforeBlock(b.Height + 1); err != nil {
+				panic(fmt.Sprintf("apply seeded credit after height %d: %v", b.Height, err))
+			}
+			if prior != nil {
+				prior(b)
+			}
+		}
 		eng, err := New(cfg)
 		if err != nil {
 			t.Fatalf("new engine: %v", err)
-		}
-		if err := eng.Start(ctx); err != nil {
-			t.Fatalf("start engine: %v", err)
 		}
 		nodes[i] = &testNode{
 			acct:      accts[i],
@@ -119,9 +141,20 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 			store:     store,
 			peerID:    peerID,
 			bus:       bus,
+			seeds:     seeds,
 			evidence:  evidence,
 			sets:      sets,
 			selfVotes: selfVotes,
+		}
+	}
+
+	// Started only once EVERY node exists. Starting each engine as it was built
+	// left node 0 proposing and committing while node 3 had no ledger at all, so
+	// any balance seeded afterwards landed on some nodes after a block and on
+	// others before it - a disagreement about state that no later credit undoes.
+	for _, nd := range nodes {
+		if err := nd.engine.Start(ctx); err != nil {
+			t.Fatalf("start engine: %v", err)
 		}
 	}
 
@@ -135,15 +168,140 @@ func newCluster(t *testing.T, n int, opts func(*Config)) ([]*testNode, context.C
 	return nodes, stop
 }
 
-// mint credits an account directly on every node's ledger so a signed transfer
-// from it can be afforded. In production genesis balances would be seeded once;
-// here each node's ledger starts empty, so we seed identically across nodes.
+// mintAll credits an account on every node's ledger so a signed transfer from
+// it can be afforded. In production genesis balances are seeded once, from a
+// file every node holds; here each node's ledger starts empty, so the cluster
+// seeds itself.
+//
+// It is the POSITION of the credit that this has to get right, not the amount.
+// Writing to four ledgers in a loop leaves the four holding different balances
+// until the loop ends, and a live cluster does not wait: the four disagree about
+// the state root immediately, and a block landing in that window is applied
+// against different balances on different nodes. A transfer affordable on one
+// and unaffordable on another is skipped on that one, and a skipped transfer is
+// still committed, so nothing ever retries it. The ledgers never come back
+// together.
+//
+// Worse, and harder to see: a block carries the state root AS OF ITS PARENT,
+// fixed when the proposer built it. A credit landing after that and before some
+// other node verifies the block makes it permanently unverifiable for that node
+// - not a disagreement it can vote its way out of, because block sync
+// re-verifies too. The rest of the cluster commits on a quorum it already had
+// and walks away, and the late node is stuck at that height for good. That
+// surfaces as ONE FROZEN NODE, not as four arguing, which is what made it hard
+// to read: the weighted-cluster test left node 0 at height 0 while the other
+// three reached 842 and agreed with each other perfectly.
+//
+// So the credit is given a place in the ordered log, and there are two ways to
+// put it there. The filed route is the safe one and the default: the credit is
+// filed against a height no node has reached, and every node applies it in its
+// own commit path on the way past - see the OnCommit wired in newCluster. Every
+// node's balances at every height are then identical no matter when this ran,
+// so no proposal is ever invalidated by it.
+//
+// The direct route exists because the filed one needs a block to carry it, and
+// a chain with nothing to do produces none - a quiet cluster would wait for the
+// stall-recovery timer, seconds away, for every mint. So when the cluster has
+// nothing pending at all, the credit is written to the four ledgers on the spot.
+// That case is safe precisely BECAUSE nothing is pending: no block exists for
+// this height to be invalidated, and none can be built while these locks are
+// held. All four conditions are load-bearing:
+//
+//   - same height everywhere, or a node has applied one more block than another
+//     and would take the credit at a different point in the same log;
+//   - no commit in flight, because e.mu does NOT cover the apply step -
+//     commitAndApply deliberately runs outside it, and `committing` is the flag
+//     that spans exactly that window;
+//   - no proposal held, since a proposer keeps its own and advanceHeight clears
+//     the map per height, so four empty maps means no block for this height
+//     exists to invalidate;
+//   - no mempool entry, because a leader releases e.mu after building a block
+//     and before ingesting it, and in that gap the block is nowhere to be seen.
+//     An empty mempool is what rules out a block being built at all.
+//
+// Both routes run through one exactly-once applier, so a node reached by both is
+// credited once, and a node that joins later replays the credit at the height it
+// was filed against rather than at genesis - see joinNode.
 func mintAll(t *testing.T, nodes []*testNode, account string, amount uint64) {
 	t.Helper()
+	if len(nodes) == 0 {
+		return
+	}
+	bus := nodes[0].bus
+
 	for _, nd := range nodes {
-		if err := nd.ledger.Credit(account, amount); err != nil {
+		nd.engine.mu.Lock()
+	}
+	height, idle := nodes[0].engine.height, true
+	for _, nd := range nodes {
+		e := nd.engine
+		if e.committing || e.height != height || len(e.proposals) > 0 || len(e.mempool) > 0 {
+			idle = false
+			break
+		}
+	}
+	if idle {
+		bus.fileSeed(height, account, amount)
+		var err error
+		for _, nd := range nodes {
+			if e := nd.seeds.beforeBlock(height); e != nil && err == nil {
+				err = e
+			}
+		}
+		for _, nd := range nodes {
+			nd.engine.mu.Unlock()
+		}
+		if err != nil {
 			t.Fatalf("credit: %v", err)
 		}
+		return
+	}
+
+	// Something is pending, so a block is coming: file the credit one height past
+	// the furthest node, where no node has committed yet and every one of them
+	// must therefore pass.
+	var ahead uint64
+	for _, nd := range nodes {
+		if nd.engine.height > ahead {
+			ahead = nd.engine.height
+		}
+	}
+	target := ahead + 1
+	bus.fileSeed(target, account, amount)
+	for _, nd := range nodes {
+		nd.engine.mu.Unlock()
+	}
+	waitForSeed(t, nodes, account, target)
+}
+
+// waitForSeed blocks until the credit filed against `target` has been applied,
+// so a caller that funds an account can spend from it on the next line.
+//
+// It waits on the nodes that have REACHED the height, and requires at least one
+// of them. A node still short of it has not got to the credit yet, and that is
+// not something to wait for: a test that cut the network leaves one behind
+// permanently, and the credit is correctly placed for it either way. One node
+// past the target is enough to settle the ordering for everyone, because the
+// block at that height is agreed once any node commits it - so a transfer
+// submitted after this returns cannot sort ahead of the credit.
+func waitForSeed(t *testing.T, nodes []*testNode, account string, target uint64) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		reached, applied := 0, 0
+		for _, nd := range nodes {
+			if nd.engine.Height() < target {
+				continue
+			}
+			reached++
+			if nd.seeds.appliedAt(target) {
+				applied++
+			}
+		}
+		if reached > 0 && reached == applied {
+			return
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 

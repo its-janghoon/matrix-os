@@ -69,6 +69,103 @@ message Provider {
     google.protobuf.Timestamp observed_at = 12;
     // Exclusive expiry after which this quote is ineligible for new jobs.
     google.protobuf.Timestamp valid_until = 13;
+
+    // The remaining fields describe a REMOTE provider as the directory sees it.
+    // They are empty for a local one, whose address and history the caller
+    // already has.
+
+    // Account id of the node that signed this announcement. It is the
+    // counterparty a buyer connecting to `endpoint` is choosing, and it is
+    // distinct from `id`: `id` is the payout account the node settles into and
+    // may be a wallet address, while this is the node that holds the model and
+    // answers the request.
+    string node_id = 14;
+    // Base URL a buyer's client connects to, serving both the OpenAI-compatible
+    // route and the Connect API. Empty when the announcing node published no
+    // address, which is the honest state of one selling compute units rather
+    // than inference: there is nothing for an HTTP client to reach.
+    //
+    // Signed by the announcer, so a relaying peer cannot redirect somebody
+    // else's traffic to a host of its choosing.
+    string endpoint = 15;
+    // When THIS node first heard an announcement from that announcer, and how
+    // many it has accepted since.
+    //
+    // Both are OBSERVED, never announced. A seller's own uptime figure is a
+    // claim that costs nothing to inflate, so the protocol carries none; these
+    // are what the reader watched happen. They are one observer's view - gossip
+    // drops messages for reasons that are sometimes the reader's own fault - so
+    // they are evidence of a node's presence rather than a guarantee of service,
+    // and should be shown to a buyer as exactly that.
+    google.protobuf.Timestamp first_seen = 16;
+    uint64 announcements_heard = 17;
+
+    // What this provider's payout account has actually been PAID, read from the
+    // answering node's own copy of the committed chain. The seller has no say in
+    // these numbers: a payment that did not happen leaves no block to find.
+    //
+    // What they do NOT prove, because the figure will be read as more than it
+    // is: an inference settlement is an ordinary transfer and the chain does not
+    // mark it as one, so this counts every payment the account received, not
+    // only what it earned. A seller can pay itself from an account it controls.
+    // That costs the protocol fee on each transfer plus the capital to move it,
+    // which is why `settled_payers` is the number worth weighing - inflating
+    // `settled_received` is one self-transfer, inflating the payer count means
+    // funding a fresh account for every one.
+    //
+    // Present them as history, never as a rating.
+    uint64 settled_received = 18;
+    uint64 settled_payments = 19;
+    uint64 settled_payers = 20;
+    // Heights bracketing the activity, so a seller working for months reads
+    // differently from one paid twice yesterday.
+    uint64 settled_first_height = 21;
+    uint64 settled_last_height = 22;
+    // The first height the answering node's tally covers. A node that upgraded
+    // into this counts from the upgrade, not from genesis, and a display that
+    // does not say so is claiming more than it knows.
+    uint64 settled_indexed_from = 23;
+
+    // What this provider's payout account has STAKED, read from the answering
+    // node's chain rather than from the announcement - a seller publishing its
+    // own bond is publishing a number, and the point of a bond is capital
+    // somebody actually parted with.
+    //
+    // A bond does not make a seller honest and nothing here should be presented
+    // as if it did. It cannot be slashed for bad service, because no protocol
+    // can adjudicate whether a completion was really the advertised model: a
+    // buyer-complaint slash would be a weapon competitors point at each other,
+    // and validators voting on service quality is not something consensus can
+    // do. What a bond does is make a LISTING cost capital, which is what stops
+    // one attacker from filling the directory with cheap fake sellers - and the
+    // sybil is what turns every other fraud from a scam into an industry.
+    uint64 bonded = 24;
+    // The height from which that bond may be withdrawn. As much of the bond as
+    // the amount: capital that can be pulled in the next block is committed to
+    // nothing.
+    uint64 bond_withdrawable_at = 25;
+
+    // Whether the maintainer THIS node's chain names has signed a statement that
+    // it operates this seller, checked here rather than believed from the
+    // announcement.
+    //
+    // It is an IDENTITY claim and nothing more: not a rating, not an
+    // endorsement, not a claim these sellers answer better. A reader who does
+    // not trust the maintainer account learns nothing from it, which is the
+    // correct outcome and the reason it is safe to carry at all.
+    //
+    // It exists because a new network's directory is mostly strangers with no
+    // settled history to tell them apart, and somebody has to go first. The
+    // honest way for the people running a network to do that is to run sellers
+    // themselves and say so, in a form nobody else can forge: the signature is
+    // checked against the maintainer in consensus state, which only the current
+    // maintainer's own signature can rotate.
+    bool operator_attested = 26;
+    // The human name the attestation carries, so a listing can say WHO rather
+    // than only that somebody vouched. Inside the signature, so a seller cannot
+    // relabel another operator's attestation as its own brand. Empty unless
+    // operator_attested is true.
+    string operator_name = 27;
 }
 
 // Job describes a paid compute job submitted by a buyer against a provider.
@@ -298,6 +395,22 @@ message GetBalanceResponse {
     string account = 1;
     // Current balance in credits.
     uint64 balance = 2;
+    // The nonce this account should use for its next signed transaction, which
+    // is what eth_getTransactionCount reports the successor of.
+    //
+    // It is served here because a client cannot compute it. The obvious way -
+    // counting the account's transactions in ListTransactions - is wrong for
+    // any account that has used a RESERVED recipient: bonds, stake withdrawals
+    // and bridge locks are protocol state rather than user payments, so that
+    // list deliberately omits them and the count stops advancing. A bridge lock
+    // derives its lock id from this nonce, so two locks of the same amount to
+    // the same recipient then collided, the second overwrote the first's
+    // record, and the native it escrowed became unmintable.
+    //
+    // Zero is ambiguous only in the harmless direction: a brand-new account and
+    // an old node that does not set this field both read as 0, which is the
+    // same answer counting would have given.
+    uint64 next_nonce = 3;
 }
 
 // GetTransactionRequest reads one committed transfer from the consensus

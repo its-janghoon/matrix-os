@@ -71,6 +71,10 @@ type TransferEngine interface {
 	CommittedTransfers(start uint64, limit int) ([]consensus.CommittedTransfer, uint64, error)
 	// CommittedTransferAt returns a single committed transfer by index.
 	CommittedTransferAt(index uint64) (*consensus.CommittedTransfer, error)
+	// NextNonce returns the nonce a sender should use next. It counts every
+	// committed transaction by that sender, including the reserved-recipient
+	// ones CommittedTransfers omits.
+	NextNonce(sender string, includePending bool) uint64
 }
 
 // TransferSettlementCoordinator routes external, client-signed value transfers
@@ -224,6 +228,16 @@ func (c *TransferSettlementCoordinator) History(start uint64, limit int) ([]mark
 		out = append(out, viewFromCommitted(t))
 	}
 	return out, total, nil
+}
+
+// NextNonce returns the nonce a sender should use for its next transaction.
+//
+// Straight from the engine, which counts every committed transaction by that
+// sender - including the ones to reserved recipients that History deliberately
+// hides. A client deriving a nonce from History instead was the reason two
+// bridge locks of the same amount produced the same lock id.
+func (c *TransferSettlementCoordinator) NextNonce(sender string) uint64 {
+	return c.engine.NextNonce(sender, true)
 }
 
 // TransferAt returns a single committed transfer by index for the

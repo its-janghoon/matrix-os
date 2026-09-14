@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/ecirlabs/matrix-core/internal/bridge"
 	"github.com/ecirlabs/matrix-core/internal/token"
 	"gopkg.in/yaml.v3"
 )
@@ -89,13 +90,41 @@ func ValidateProductionConfig(configPath string) (ProductionPreflight, error) {
 	}, nil
 }
 
+// validateProductionAccountID accepts the three things a genesis allocation may
+// legitimately name.
+//
+// It used to accept only the 64-hex ed25519 form, which made two allocations a
+// production network needs impossible to write:
+//
+//   - An account held in a WALLET. Those are addresses, and a chain whose users
+//     hold wallets cannot allocate to any of them at genesis.
+//   - The BRIDGE ESCROW. Wrapped supply must be backed one-for-one by native
+//     coins sitting in escrow, and a network relaunching from a new genesis while
+//     wrapped tokens already exist has to put that escrow back. Without this, the
+//     only ways to restore the backing were to redeploy the token - abandoning
+//     every holder and every pool - or to leave the mirror unbacked.
+//
+// Nothing else reserved is allowed. The reward pool has its own field, and the
+// remaining reserved namespaces are consensus operations rather than places to
+// put coins: an allocation to one would be value sent into an operation, which
+// is not a thing a genesis file should be able to express.
 func validateProductionAccountID(id string) error {
 	if id != strings.ToLower(id) {
-		return fmt.Errorf("%q must be lowercase hex", id)
+		return fmt.Errorf("%q must be lowercase", id)
+	}
+	if id == bridge.EscrowAccount {
+		return nil
+	}
+	if token.IsEthAccountID(id) {
+		if _, err := token.ParseEthAccountID(id); err != nil {
+			return fmt.Errorf("%q is not a valid ethereum account id: %w", id, err)
+		}
+		return nil
 	}
 	raw, err := hex.DecodeString(id)
 	if err != nil || len(raw) != 32 {
-		return fmt.Errorf("%q must be 32 bytes of hex", id)
+		return fmt.Errorf("%q must be 32 bytes of hex, an eth:0x... address, or %q",
+			id, bridge.EscrowAccount)
 	}
 	return nil
 }

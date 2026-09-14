@@ -216,3 +216,74 @@ func promptText(msgs []Message) string {
 	}
 	return b.String()
 }
+
+// bytesPerTokenCeiling is the divisor turning observed text into an UPPER bound
+// on the tokens it can have cost.
+//
+// One, because a byte-level BPE token encodes at least one byte, so the token
+// count of a piece of text can never exceed its length in bytes. Real English
+// runs 3-4 bytes per token, which means this bound is roughly four times looser
+// than the truth - deliberately, because it must never refuse an honest bill.
+// It does not need to be tight to work: the overcharge it exists to stop is not
+// a few percent, it is two orders of magnitude.
+const bytesPerTokenCeiling = 1
+
+// tokensPerMessageOverhead allows for what a chat template adds around the text
+// a buyer can see: role markers, turn separators, a BOS and an EOS. Every
+// template differs and none of them is knowable from here, so this is generous.
+const tokensPerMessageOverhead = 16
+
+// maxUnitsFloor is the smallest ceiling this will ever impose. A one-word
+// exchange is genuinely a handful of tokens, and a bound that tight would start
+// arguing with honest backends over rounding for no benefit.
+const maxUnitsFloor = 64
+
+// MaxUnitsFor returns an upper bound on what a completed inference can honestly
+// have cost, from the text that actually crossed the wire.
+//
+// THE HOLE THIS CLOSES. The billable token count is reported by the PROVIDER's
+// own model server, and the only thing bounding it was the buyer's reservation.
+// Reservations are generous on purpose - a request with no max_tokens reserves
+// room for a long answer that may never come - so "clamped to the reservation"
+// left a provider free to bill the entire reservation no matter what it did.
+//
+// The gap is not subtle. A buyer sends "hi" through the OpenAI-compatible route
+// with no max_tokens, the route reserves about a thousand units for a completion
+// that might be long, the provider answers "hello" and reports a thousand tokens
+// of usage. Every check passes: the report is under the reservation, the
+// reservation was affordability-checked, the transfer settles. The buyer paid
+// for roughly three hundred times the work that was done, and nothing anywhere
+// noticed, because nothing was comparing the bill to the answer.
+//
+// WHY THIS CAN BE CHECKED AT ALL. The node settling the job holds both the
+// prompt it sent and the completion it got back. It cannot know the provider's
+// tokeniser, so it cannot know the true count - but it does not need to. It
+// needs an upper bound, and the length of the text is one: no tokeniser turns
+// five characters into a thousand tokens.
+//
+// WHAT IT DOES NOT DO. It does not make the reported count honest, and a
+// provider can still round its way to the ceiling. It removes the difference
+// between a bill and the work by orders of magnitude, not by percent, and a
+// buyer who needs more than that should count the tokens themselves - the job
+// records Usage next to Units precisely so that subtraction is possible.
+func MaxUnitsFor(req InferenceRequest, completion string) uint64 {
+	var (
+		bytes    int
+		messages int
+	)
+	if msgs, err := req.EffectiveMessages(); err == nil {
+		messages = len(msgs)
+		for _, m := range msgs {
+			bytes += len(m.Role) + len(m.Content)
+		}
+	}
+	// The completion is one more message's worth of text and template.
+	messages++
+	bytes += len(completion)
+
+	ceiling := uint64(bytes/bytesPerTokenCeiling) + uint64(messages)*tokensPerMessageOverhead
+	if ceiling < maxUnitsFloor {
+		return maxUnitsFloor
+	}
+	return ceiling
+}

@@ -291,9 +291,11 @@ func TestBondedOpenBlockRejectsConflictingOperationsForOneIdentity(t *testing.T)
 	admit := signedTransfer(t, candidate, AddValidatorRecipient(candidate.PublicKey), 0, 1)
 	topUp := signedTransfer(t, candidate, BondAccount(candidate.AccountID()), 100, 2)
 
+	// Built before the lock: the builder stamps the block from the engine and
+	// takes e.mu to do it.
+	block := buildSignedBlock(t, eng, eng.self, 0, 0, genesisPrevHash, []token.Transaction{*admit, *topUp})
 	eng.mu.Lock()
 	eng.headHash = append([]byte(nil), genesisPrevHash...)
-	block := buildSignedBlock(t, eng.self, 0, 0, genesisPrevHash, []token.Transaction{*admit, *topUp})
 	err = eng.verifyBlockForHeightLocked(block)
 	eng.mu.Unlock()
 	if !errors.Is(err, ErrInvalidMessage) {

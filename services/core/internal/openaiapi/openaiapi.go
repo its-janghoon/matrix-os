@@ -114,6 +114,10 @@ type Config struct {
 	Inference Inference
 	// Router selects a provider by model. Required.
 	Router Router
+	// Idempotency, when set, deduplicates requests that carry an
+	// Idempotency-Key header so a retried POST is not a second charge. Nil
+	// disables it, which is the behaviour this endpoint had.
+	Idempotency IdempotencyStore
 	// Auth resolves the buyer from the request credential. When nil every
 	// request is refused: a route that charges an account cannot fall back to
 	// "no auth configured" and guess whose money to spend.
@@ -179,6 +183,19 @@ type chatResponse struct {
 	// network "who served this" is a marketplace fact the caller paid for and
 	// can check; an SDK ignores the extra field.
 	Provider string `json:"provider,omitempty"`
+	// Receipt is the serving node's SIGNED account of what it charged and for
+	// what: the model, the token counts, the money, over a digest of this exact
+	// prompt and completion.
+	//
+	// It is here rather than in a header because a buyer who needs it needs to
+	// keep it, and the body is what an SDK hands back. An SDK ignores the extra
+	// field, so the response stays a valid chat completion for a client that
+	// does not care - and a client that does gets evidence it can store, verify
+	// offline, and put in front of somebody.
+	//
+	// Absent when the node holds no signing key. A receipt nobody signed would be
+	// a claim with no author, which is what there was before.
+	Receipt *inference.Receipt `json:"receipt,omitempty"`
 }
 
 type chatChoice struct {
@@ -232,8 +249,17 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		msgs = append(msgs, inference.Message{Role: role, Content: m.Content})
 	}
 
+	// Resolved before a provider is chosen, so a duplicate never reserves anyone's
+	// capacity.
+	guard, ok := h.beginIdempotent(w, r, buyer,
+		requestFingerprint(req.Model, msgs, req.MaxTokens, req.Temperature))
+	if !ok {
+		return
+	}
+
 	candidates := h.cfg.Router.ProvidersForModel(req.Model)
 	if len(candidates) == 0 {
+		guard.release()
 		// 404 naming the model, which is what OpenAI answers for an unknown model
 		// and what a client library reports usefully.
 		writeError(w, http.StatusNotFound, "invalid_request_error",
@@ -245,7 +271,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if req.Stream {
 		// From here the response is server-sent events, and a failure after the
 		// first frame cannot be an HTTP status. See stream.go.
-		h.streamChatCompletions(w, r, buyer, req, msgs, provider.ID)
+		h.streamChatCompletions(w, r, buyer, req, msgs, provider.ID, guard)
 		return
 	}
 
@@ -256,6 +282,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Temperature: req.Temperature,
 	}, estimateUnits(msgs, req.MaxTokens))
 	if err != nil {
+		guard.release()
 		status, kind := classify(err)
 		writeError(w, status, kind, err.Error())
 		return
@@ -263,10 +290,15 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 
 	done, err := h.cfg.Inference.FulfillJob(r.Context(), job.ID)
 	if err != nil {
+		// A failed job charged nobody, so the key is released and a retry under it
+		// is what the buyer wants. Keeping it would turn one transport error into
+		// a permanently unusable key.
+		guard.release()
 		status, kind := classify(err)
 		writeError(w, status, kind, err.Error())
 		return
 	}
+	guard.complete(done.ID)
 
 	model := done.Model
 	if model == "" {
@@ -288,6 +320,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 			TotalTokens:      done.Usage.TotalTokens,
 		},
 		Provider: done.Provider,
+		Receipt:  done.Receipt,
 	})
 }
 

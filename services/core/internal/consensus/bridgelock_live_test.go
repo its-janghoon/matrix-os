@@ -44,11 +44,7 @@ func lockCommitsOn(t *testing.T, size int) {
 	if err != nil {
 		t.Fatalf("GenerateAccount: %v", err)
 	}
-	for _, nd := range nodes {
-		if err := nd.ledger.Credit(payer.AccountID(), 2*token.MinBridgeLockAmount); err != nil {
-			t.Fatalf("credit: %v", err)
-		}
-	}
+	mintAll(t, nodes, payer.AccountID(), 2*token.MinBridgeLockAmount)
 
 	var addr [20]byte
 	for i := range addr {

@@ -70,6 +70,10 @@ type Service struct {
 	// market on its own), SubmitSignedTransfer falls back to the per-node
 	// token.SettledLedger path and the history RPCs read the token.Chain.
 	transferSettler TransferSettler
+	// earnings, when non-nil, backs the settled-history figures on a directory
+	// listing. Nil leaves them zero, which reads as "not known" rather than as
+	// "this seller has never been paid" - the listing says which.
+	earnings EarningsReader
 	// reconciler, when non-nil, backs GetBridgeReconciliation with the node's
 	// lock-and-mint bridge. When nil (no bridge configured, the default), the RPC
 	// returns codes.FailedPrecondition rather than panicking.
@@ -199,6 +203,50 @@ type TransferSettler interface {
 	// TransferAt returns a single committed transfer by index for
 	// GetTransaction.
 	TransferAt(index uint64) (*TransferView, error)
+	// NextNonce returns the nonce this sender should use next, counting every
+	// committed transaction rather than only the ones History shows.
+	//
+	// The distinction is the whole point. History omits reserved recipients -
+	// bonds, withdrawals, bridge locks - because they are protocol state and not
+	// user payments, so a client counting that list to pick a nonce gets a value
+	// that never advances for an account doing exactly those things. A bridge
+	// lock derives its lock id from the nonce, so that client produced colliding
+	// lock ids and escrowed native that could never be minted.
+	NextNonce(sender string) uint64
+}
+
+// EarningsReader reads what an account has actually been paid, from THIS node's
+// own copy of the committed chain.
+//
+// Declared on the consumer side so the market API does not import
+// internal/consensus, matching TransferSettler above.
+//
+// The direction matters more than the shape. A buyer asking their own node what
+// a seller has earned is reading a chain their node validated, so the seller has
+// no say in the answer - which is the whole reason to put settled history in
+// front of a buyer rather than a number the seller published about itself.
+type EarningsReader interface {
+	// Earnings returns an account's settled payment history and the height the
+	// tally begins at, so a caller can say what window the figures cover instead
+	// of implying they run from genesis.
+	Earnings(account string) (received, payments, payers, firstHeight, lastHeight, indexedFrom uint64, err error)
+	// Bonded returns what an account currently has staked, and the height from
+	// which it could withdraw it.
+	//
+	// Read here rather than taken from the announcement for the same reason the
+	// earnings are: a seller publishing its own bond is publishing a number, and
+	// the point of a bond is that it is capital somebody actually parted with.
+	// Every node holds the chain that says so.
+	Bonded(account string) (amount, withdrawableAt uint64, err error)
+	// Maintainer returns the account this node's chain currently names as the
+	// network's maintainer, or "" when it names none.
+	//
+	// It is the anchor an operator attestation is checked against, and it has to
+	// come from consensus rather than from config for the same reason the
+	// balances do: it is rotatable by a committed transaction, and a listing that
+	// trusted a startup value would keep vouching for a key the chain has moved
+	// on from.
+	Maintainer() string
 }
 
 // BridgeSnapshot is the marketapi-facing shape of a bridge reconciliation
@@ -324,6 +372,9 @@ func (s *Service) SetJobSettler(settler JobSettler) { s.settler = settler }
 // behind it.
 func (s *Service) SetTransferSettler(settler TransferSettler) { s.transferSettler = settler }
 
+// SetEarningsReader installs the settled-history source for directory listings.
+func (s *Service) SetEarningsReader(r EarningsReader) { s.earnings = r }
+
 // SetReconciler installs the bridge reconciliation source for
 // GetBridgeReconciliation. It is called once during construction, before the
 // server serves, so no locking is needed. With no reconciler installed (no
@@ -400,6 +451,9 @@ type Config struct {
 	// chain. A node with a consensus engine must set it; see the TransferSettler
 	// doc.
 	TransferSettler TransferSettler
+	// Earnings backs the settled-history figures on a directory listing. Nil
+	// turns them off.
+	Earnings EarningsReader
 	// Reconciler, when non-nil, backs GetBridgeReconciliation with the node's
 	// lock-and-mint bridge. When nil (no bridge configured), that RPC returns
 	// FailedPrecondition. See the Reconciler doc.
@@ -425,6 +479,7 @@ func NewServer(cfg Config) (*Server, error) {
 	svc.SetAuthEnforced(cfg.Auth != nil)
 	svc.SetJobSettler(cfg.Settler)
 	svc.SetTransferSettler(cfg.TransferSettler)
+	svc.SetEarningsReader(cfg.Earnings)
 	svc.SetReconciler(cfg.Reconciler)
 	svc.SetBridgeReadinessSigner(cfg.ReadinessSigner)
 	svc.SetLockAttestor(cfg.LockAttestor)

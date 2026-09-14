@@ -538,7 +538,7 @@ func TestSetChangeFromANonValidatorMakesTheBlockInvalid(t *testing.T) {
 	}, 0, 0)
 
 	tx := signedTransfer(t, outsider, AddValidatorRecipient(newcomer.PublicKey), 0, 0)
-	block := buildSignedBlock(t, leader, 0, 0, head, []token.Transaction{*tx})
+	block := buildSignedBlock(t, eng, leader, 0, 0, head, []token.Transaction{*tx})
 
 	if _, err := eng.acceptProposal(block, 0, nil); !errors.Is(err, ErrNotValidator) {
 		t.Fatalf("accepting a set change from a non-validator = %v, want ErrNotValidator", err)
