@@ -110,6 +110,16 @@ message InferenceJob {
     // forever, and the first one that drifted would invalidate every receipt
     // ever issued. Empty when the serving node holds no signing key.
     bytes receipt = 11;
+    // A reasoning model's working, reported by the model server separately from
+    // the answer and empty for a model that has none.
+    //
+    // It is DELIVERED because it is BILLED. Such a model spends most of its
+    // tokens here - one live sale produced 843 completion tokens for a single
+    // sentence of answer - and the overbilling ceiling bounds a charge by the
+    // text that reached the buyer. Discarding it meant the provider could not be
+    // paid for the work; charging for it without handing it over would be a bill
+    // the buyer has no way to check.
+    string reasoning = 12;
 }
 
 // SubmitInferenceJobRequest submits an inference job to a provider. Capacity is

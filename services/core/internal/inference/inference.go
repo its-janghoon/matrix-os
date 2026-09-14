@@ -116,6 +116,18 @@ type InferenceResponse struct {
 	Model string `json:"model"`
 	// Completion is the generated assistant text.
 	Completion string `json:"completion"`
+	// Reasoning is a reasoning model's working, which the model server reports
+	// separately from the answer.
+	//
+	// It is BILLABLE and therefore DELIVERED. A reasoning model spends most of its
+	// tokens here - one live sale produced 21 prompt and 843 completion tokens for
+	// a single sentence of answer - and the overbilling ceiling bounds a charge by
+	// the text that crossed the wire, so reasoning that is discarded is work the
+	// provider cannot be paid for. Handing it to the buyer is what makes charging
+	// for it checkable: a buyer can count what they received.
+	//
+	// Empty for a model with no reasoning, which is most of them.
+	Reasoning string `json:"reasoning,omitempty"`
 	// Usage is the token accounting for the inference.
 	Usage Usage `json:"usage"`
 	// Units is the billable marketplace quantity for this inference. It is the
@@ -266,7 +278,14 @@ const maxUnitsFloor = 64
 // between a bill and the work by orders of magnitude, not by percent, and a
 // buyer who needs more than that should count the tokens themselves - the job
 // records Usage next to Units precisely so that subtraction is possible.
-func MaxUnitsFor(req InferenceRequest, completion string) uint64 {
+// MaxUnitsFor bounds a charge by the text that actually crossed the wire.
+//
+// reasoning is a reasoning model's working, counted because it is delivered to
+// the buyer alongside the answer. It is most of what such a model produces, and
+// leaving it out billed one live sale 241 units for 864 tokens of real work -
+// the ceiling was not protecting the buyer there, it was underpaying the seller
+// for tokens the buyer received.
+func MaxUnitsFor(req InferenceRequest, completion, reasoning string) uint64 {
 	var (
 		bytes    int
 		messages int
@@ -279,7 +298,7 @@ func MaxUnitsFor(req InferenceRequest, completion string) uint64 {
 	}
 	// The completion is one more message's worth of text and template.
 	messages++
-	bytes += len(completion)
+	bytes += len(completion) + len(reasoning)
 
 	ceiling := uint64(bytes/bytesPerTokenCeiling) + uint64(messages)*tokensPerMessageOverhead
 	if ceiling < maxUnitsFloor {

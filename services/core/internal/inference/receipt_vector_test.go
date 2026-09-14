@@ -35,8 +35,12 @@ type receiptVector struct {
 	SigningDigest string `json:"signing_digest"`
 	// ExchangeDigest pins the other hash a client computes: the one binding a
 	// receipt to a prompt and a completion.
-	Prompt         string `json:"prompt"`
-	Completion     string `json:"completion"`
+	Prompt     string `json:"prompt"`
+	Completion string `json:"completion"`
+	// Reasoning is a reasoning model's working. It is hashed like the other two
+	// even when empty, so every vector here pins that a client appends the field
+	// rather than omitting it for a model that did not reason.
+	Reasoning      string `json:"reasoning"`
 	ExchangeDigest string `json:"exchange_digest"`
 }
 
@@ -55,6 +59,7 @@ func TestWriteReceiptVectors(t *testing.T) {
 		receipt    Receipt
 		prompt     string
 		completion string
+		reasoning  string
 	}{
 		{
 			name: "ordinary",
@@ -94,13 +99,28 @@ func TestWriteReceiptVectors(t *testing.T) {
 			},
 			prompt: "x", completion: "y",
 		},
+		{
+			// A reasoning model, which is the case a client gets wrong by
+			// hashing only what it was shown. The working is billed, so it is
+			// delivered and it is bound: a seller cannot charge for one body of
+			// reasoning and hand over another.
+			name: "a model that reasoned",
+			receipt: Receipt{
+				JobID: "job-r", Buyer: "buyer-1", Provider: "eth:0x00000000000000000000000000000000000000aa",
+				Model: "deepseek-r1", PromptTokens: 7, CompletionTokens: 240, TotalTokens: 247,
+				Units: 247, PricePerUnit: 4, Total: 988, IssuedAt: 1789000000000000001,
+			},
+			prompt:     "is 8191 prime",
+			completion: "Yes, 8191 is prime.",
+			reasoning:  "8191 = 2^13 - 1. Trial division to 90: 2,3,5,7,...,89 all fail. So it is prime.",
+		},
 	}
 
 	vectors := make([]receiptVector, 0, len(cases))
 	for _, tc := range cases {
 		r := tc.receipt
 		req := InferenceRequest{Prompt: tc.prompt}
-		r.ExchangeDigest = ExchangeDigest(req, tc.completion)
+		r.ExchangeDigest = ExchangeDigest(req, tc.completion, tc.reasoning)
 		if err := r.Sign(acct); err != nil {
 			t.Fatalf("%s: Sign: %v", tc.name, err)
 		}
@@ -113,6 +133,7 @@ func TestWriteReceiptVectors(t *testing.T) {
 			SigningDigest:  hex.EncodeToString(r.SigningBytes()),
 			Prompt:         tc.prompt,
 			Completion:     tc.completion,
+			Reasoning:      tc.reasoning,
 			ExchangeDigest: hex.EncodeToString(r.ExchangeDigest),
 		})
 	}

@@ -103,13 +103,18 @@ type Receipt struct {
 	Signature []byte            `json:"signature"`
 }
 
-// ExchangeDigest hashes the request and the completion into the value a receipt
-// commits to.
+// ExchangeDigest hashes the request, the completion and any reasoning into the
+// value a receipt commits to.
+//
+// Reasoning is in here because it is BILLED. The overbilling ceiling counts it,
+// so a receipt that did not cover it would let a seller charge for one body of
+// working and hand over another, with the signature still verifying. What the
+// buyer pays for and what the receipt binds have to be the same text.
 //
 // Length-prefixed throughout, so no two distinct exchanges serialise the same
 // way - without it a prompt ending in text the completion begins with could be
 // re-split into a different pair with an identical digest.
-func ExchangeDigest(req InferenceRequest, completion string) []byte {
+func ExchangeDigest(req InferenceRequest, completion, reasoning string) []byte {
 	h := sha256.New()
 	writeLenPrefixed(h, []byte(receiptDomain))
 
@@ -125,6 +130,7 @@ func ExchangeDigest(req InferenceRequest, completion string) []byte {
 		writeLenPrefixed(h, []byte(m.Content))
 	}
 	writeLenPrefixed(h, []byte(completion))
+	writeLenPrefixed(h, []byte(reasoning))
 	return h.Sum(nil)
 }
 
@@ -213,20 +219,20 @@ func (r *Receipt) Verify() error {
 // signed statement about some unnamed request proves nothing; one that can only
 // belong to the prompt the buyer sent and the completion they got is a document
 // they can put in front of anyone.
-func (r *Receipt) VerifyFor(buyer string, req InferenceRequest, completion string) error {
+func (r *Receipt) VerifyFor(buyer string, req InferenceRequest, completion, reasoning string) error {
 	if err := r.Verify(); err != nil {
 		return err
 	}
 	if buyer != "" && r.Buyer != buyer {
 		return fmt.Errorf("%w: receipt is for buyer %s, not %s", ErrInvalidReceipt, r.Buyer, buyer)
 	}
-	want := ExchangeDigest(req, completion)
+	want := ExchangeDigest(req, completion, reasoning)
 	if len(want) != len(r.ExchangeDigest) {
 		return fmt.Errorf("%w: exchange digest length differs", ErrInvalidReceipt)
 	}
 	for i := range want {
 		if want[i] != r.ExchangeDigest[i] {
-			return fmt.Errorf("%w: this receipt is for a different prompt or completion", ErrInvalidReceipt)
+			return fmt.Errorf("%w: this receipt is for a different prompt, completion or reasoning", ErrInvalidReceipt)
 		}
 	}
 	return nil
@@ -266,7 +272,7 @@ func (s *Service) issueReceipt(job *InferenceJob, usage Usage, units, pricePerUn
 		Units:            units,
 		PricePerUnit:     pricePerUnit,
 		Total:            total,
-		ExchangeDigest:   ExchangeDigest(job.Request, job.Completion),
+		ExchangeDigest:   ExchangeDigest(job.Request, job.Completion, job.Reasoning),
 		IssuedAt:         time.Now().UTC().UnixNano(),
 	}
 	if err := r.Sign(s.node); err != nil {

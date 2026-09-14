@@ -297,6 +297,10 @@ type inferenceJobRow struct {
 	Status     string `json:"status"`
 	Units      uint64 `json:"units"`
 	Completion string `json:"completion"`
+	// Reasoning is a reasoning model's working, empty for a model with none. It
+	// is billed and therefore delivered; `matrix receipt verify --reasoning`
+	// reads it back into the digest.
+	Reasoning string `json:"reasoning,omitempty"`
 	// Receipt is the serving node's signed account of what it charged, as the
 	// exact bytes it signed. Carried verbatim because re-encoding it would
 	// invalidate the signature, and because the buyer keeping those bytes is the
@@ -333,6 +337,7 @@ func printInferenceJob(w io.Writer, asJSON bool, j *inferencev1.InferenceJob) er
 		Status:     inferenceStatusString(j.GetStatus()),
 		Units:      j.GetUnits(),
 		Completion: j.GetCompletion(),
+		Reasoning:  j.GetReasoning(),
 		Receipt:    j.GetReceipt(),
 	}
 	if asJSON {
@@ -344,6 +349,12 @@ func printInferenceJob(w io.Writer, asJSON bool, j *inferencev1.InferenceJob) er
 	fmt.Fprintf(w, "model:      %s\n", r.Model)
 	fmt.Fprintf(w, "status:     %s\n", r.Status)
 	fmt.Fprintf(w, "units:      %d\n", r.Units)
+	if r.Reasoning != "" {
+		// Before the completion, which is the order it was produced in and the
+		// order a reader wants it: the working, then the answer. It is printed
+		// because it is billed - see the proto field's note.
+		fmt.Fprintf(w, "reasoning:  %s\n", r.Reasoning)
+	}
 	fmt.Fprintf(w, "completion: %s\n", r.Completion)
 	if len(r.Receipt) > 0 {
 		// Printed in full rather than summarised: it is a signed document, and

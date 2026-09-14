@@ -30,10 +30,11 @@ func newReceiptCommand(opts *globalOptions) *cobra.Command {
 
 func newReceiptVerifyCommand(opts *globalOptions) *cobra.Command {
 	var (
-		path       string
-		promptPath string
-		outputPath string
-		buyer      string
+		path          string
+		promptPath    string
+		outputPath    string
+		reasoningPath string
+		buyer         string
 	)
 	cmd := &cobra.Command{
 		Use:   "verify",
@@ -93,8 +94,20 @@ need in order to take it anywhere.`,
 				if err != nil {
 					return fmt.Errorf("read completion: %w", err)
 				}
+				// Reasoning is optional because most models have none, and a
+				// receipt for one of those commits to an empty string. A model
+				// that DID reason and whose working is not supplied fails the
+				// digest, which is the honest answer: the receipt covers text the
+				// verifier has not shown it.
+				var reasoning []byte
+				if reasoningPath != "" {
+					reasoning, err = os.ReadFile(reasoningPath)
+					if err != nil {
+						return fmt.Errorf("read reasoning: %w", err)
+					}
+				}
 				req := inference.InferenceRequest{Prompt: string(prompt), Model: receipt.Model}
-				if err := receipt.VerifyFor(buyer, req, string(completion)); err != nil {
+				if err := receipt.VerifyFor(buyer, req, string(completion), string(reasoning)); err != nil {
 					return err
 				}
 				boundToExchange = true
@@ -137,6 +150,7 @@ need in order to take it anywhere.`,
 	cmd.Flags().StringVar(&path, "receipt", "", "path to the receipt JSON (required)")
 	cmd.Flags().StringVar(&promptPath, "prompt", "", "file holding the prompt that was sent")
 	cmd.Flags().StringVar(&outputPath, "completion", "", "file holding the completion that came back")
+	cmd.Flags().StringVar(&reasoningPath, "reasoning", "", "file holding the reasoning that came back, for a model that produced any")
 	cmd.Flags().StringVar(&buyer, "buyer", "", "account the receipt must name as the buyer")
 	return cmd
 }

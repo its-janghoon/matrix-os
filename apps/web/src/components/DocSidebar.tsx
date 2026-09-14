@@ -38,6 +38,7 @@ const navigation = [
     items: [
       { name: 'Agent Development', href: '/docs/guides/agent-development' },
       { name: 'Network Setup', href: '/docs/guides/network-setup' },
+      { name: 'Selling a GPU', href: '/docs/guides/gpu-provider' },
     ],
   },
 ];

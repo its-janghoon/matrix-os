@@ -454,6 +454,22 @@ function Transcript({
         >
           <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
           <p className='whitespace-pre-wrap text-gray-100'>{turn.content}</p>
+          {/*
+            A reasoning model's working, shown because it was BILLED. Most of a
+            reasoning model's tokens go here, they settle, and the receipt's
+            digest covers them - so withholding it would be charging for text
+            the buyer is not allowed to read, and would leave them unable to
+            check the receipt at all. Collapsed because it is long and it is not
+            the answer; present because it is paid for.
+          */}
+          {turn.settled?.reasoning ? (
+            <details className='mt-3 rounded-lg border border-gray-800 bg-black/40 p-3'>
+              <summary className='cursor-pointer text-xs uppercase tracking-wide text-gray-500'>
+                reasoning - you paid for these tokens
+              </summary>
+              <p className='mt-2 whitespace-pre-wrap text-sm text-gray-400'>{turn.settled.reasoning}</p>
+            </details>
+          ) : null}
           {turn.settled ? (
             <div className='mt-3 space-y-1 font-mono text-xs'>
               <p className='text-gray-500'>

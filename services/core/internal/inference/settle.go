@@ -178,7 +178,7 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 	if billableUnits > mjob.Units {
 		billableUnits = mjob.Units
 	}
-	if ceiling := MaxUnitsFor(request, resp.Completion); billableUnits > ceiling {
+	if ceiling := MaxUnitsFor(request, resp.Completion, resp.Reasoning); billableUnits > ceiling {
 		billableUnits = ceiling
 	}
 	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
@@ -210,6 +210,7 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 	// The completion is held on the job and deliberately not in the payment
 	// request: the buyer gets it from SettleSigned, after paying.
 	job.Completion = resp.Completion
+	job.Reasoning = resp.Reasoning
 	job.Units = amount
 	job.Usage = resp.Usage
 	job.Model = resp.Model

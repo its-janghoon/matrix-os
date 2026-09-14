@@ -106,6 +106,15 @@ export interface Seller {
 /** What a completed exchange cost, so a UI can show the bill it just paid. */
 export interface Settled {
   completion: string;
+  /**
+   * A reasoning model's working, empty for a model that produced none.
+   *
+   * The buyer paid for these tokens - a reasoning model spends most of them
+   * here - and the receipt's digest covers them, so a page that drops this
+   * field bills for text it never shows and then cannot verify the receipt it
+   * was handed.
+   */
+  reasoning: string;
   units: bigint;
   provider: string;
   model: string;
@@ -574,6 +583,7 @@ export async function chat(
   const usage = obj(job.usage);
   return {
     completion: str(job.completion),
+    reasoning: str(job.reasoning),
     units: big(job.units),
     provider: str(job.provider),
     model: str(job.model) || input.model,
