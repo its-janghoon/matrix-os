@@ -26,6 +26,7 @@ interface Vector {
   signing_digest: string;
   prompt: string;
   completion: string;
+  reasoning: string;
   exchange_digest: string;
 }
 
@@ -54,13 +55,16 @@ describe('the receipt layout matches the node byte for byte', () => {
     });
 
     it(`hashes the same exchange: ${v.name}`, async () => {
-      expect(hex(await exchangeDigest(messagesFor(v.prompt), v.completion))).toBe(v.exchange_digest);
+      expect(hex(await exchangeDigest(messagesFor(v.prompt), v.completion, v.reasoning))).toBe(
+        v.exchange_digest,
+      );
     });
 
     it(`verifies a receipt the node signed: ${v.name}`, async () => {
       const check = await verifyReceipt(v.receipt, {
         messages: messagesFor(v.prompt),
         completion: v.completion,
+        reasoning: v.reasoning,
         buyer: v.receipt.buyer,
       });
       expect(check.problem).toBeUndefined();
@@ -78,6 +82,7 @@ describe('what a receipt refuses', () => {
     const check = await verifyReceipt(v.receipt, {
       messages: messagesFor('a different question entirely'),
       completion: v.completion,
+      reasoning: v.reasoning,
     });
     expect(check.signatureValid).toBe(true);
     expect(check.boundToExchange).toBe(false);
@@ -103,10 +108,37 @@ describe('what a receipt refuses', () => {
     const check = await verifyReceipt(v.receipt, {
       messages: messagesFor(v.prompt),
       completion: v.completion,
+      reasoning: v.reasoning,
       buyer: 'somebody-else',
     });
     expect(check.boundToExchange).toBe(false);
     expect(check.problem).toContain('not somebody-else');
+  });
+
+  it('refuses a reasoning model receipt whose working was not shown', async () => {
+    const reasoned = cases.find((c) => c.name === 'a model that reasoned');
+    expect(reasoned).toBeDefined();
+    // The seller billed for the working. A verifier handed only the answer is
+    // being asked to check a bill it has not been shown, and says so.
+    const check = await verifyReceipt(reasoned!.receipt, {
+      messages: messagesFor(reasoned!.prompt),
+      completion: reasoned!.completion,
+      reasoning: '',
+    });
+    expect(check.signatureValid).toBe(true);
+    expect(check.boundToExchange).toBe(false);
+  });
+
+  it('refuses a reasoning model receipt whose working was swapped', async () => {
+    const reasoned = cases.find((c) => c.name === 'a model that reasoned');
+    const check = await verifyReceipt(reasoned!.receipt, {
+      messages: messagesFor(reasoned!.prompt),
+      completion: reasoned!.completion,
+      reasoning: 'I just knew.',
+    });
+    expect(check.signatureValid).toBe(true);
+    expect(check.boundToExchange).toBe(false);
+    expect(check.problem).toContain('reasoning');
   });
 
   it('reads amounts as BigInt, so a value above 2^53 is exact', async () => {

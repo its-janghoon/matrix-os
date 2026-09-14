@@ -32,7 +32,12 @@ export async function checkReceipt(
   } catch {
     return { signatureValid: false, arithmeticValid: false, problem: 'the receipt is not readable' };
   }
-  return verifyReceipt(receipt, { messages, completion: settled.completion, buyer });
+  return verifyReceipt(receipt, {
+    messages,
+    completion: settled.completion,
+    reasoning: settled.reasoning,
+    buyer,
+  });
 }
 
 /** The one-line verdict to put in front of a reader. */

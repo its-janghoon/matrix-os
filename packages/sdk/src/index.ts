@@ -533,6 +533,15 @@ export interface InferenceJob {
   model: string;
   status: InferenceJobStatus;
   completion: string;
+  /**
+   * A reasoning model's working, empty for a model that produced none.
+   *
+   * It is here because it is BILLED. A reasoning model spends most of its
+   * tokens before it writes an answer, those tokens settle, and the receipt's
+   * digest covers them - so a client that drops this field is paying for text
+   * it cannot show anyone, and cannot check the receipt it was handed.
+   */
+  reasoning: string;
   units: bigint;
   createdAt: string;
   updatedAt: string;
@@ -672,6 +681,7 @@ function decodeInferenceJob(raw: Record<string, unknown>): InferenceJob {
     model: str(raw.model),
     status: (str(raw.status) || 'INFERENCE_JOB_STATUS_UNSPECIFIED') as InferenceJobStatus,
     completion: str(raw.completion),
+    reasoning: str(raw.reasoning),
     units: big(raw.units),
     createdAt: str(raw.createdAt),
     updatedAt: str(raw.updatedAt),
