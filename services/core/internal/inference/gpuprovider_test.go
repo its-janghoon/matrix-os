@@ -23,6 +23,8 @@ import (
 // money moved rather than that a call was made. The fake settler used elsewhere
 // records intent; this one is the difference between "the node tried to pay the
 // provider" and "the provider has the money".
+func (s *ledgerSettler) NextNonce(string, bool) uint64 { return 0 }
+
 type ledgerSettler struct {
 	mu     sync.Mutex
 	ledger *market.Ledger

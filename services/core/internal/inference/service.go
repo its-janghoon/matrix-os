@@ -38,6 +38,12 @@ var (
 // call to succeed; it reads settled balances back from the market ledger.
 type Settler interface {
 	SubmitAccountTransfer(from *token.Account, recipient string, amount, nonce uint64) (*token.Transaction, error)
+	// NextNonce reports the nonce this sender should use next, counting what is
+	// already in the mempool as well as what has committed. *consensus.Engine has
+	// always had it - it is what eth_getTransactionCount answers with - and it is
+	// named here because settlement used to invent nonces from a counter of its
+	// own instead of asking.
+	NextNonce(sender string, includePending bool) uint64
 	// Submit submits an ALREADY-SIGNED transfer, for the client-signed path where
 	// the node holds no key for the payer. *consensus.Engine has satisfied this
 	// all along; it is named in the interface so the Service can settle without
@@ -163,9 +169,42 @@ type Service struct {
 	// replayed into a second run of free work.
 	runAuth *runAuthSeen
 
-	mu    sync.Mutex
-	jobs  map[string]*InferenceJob
+	mu   sync.Mutex
+	jobs map[string]*InferenceJob
+	// nonce is the next nonce this Service has HANDED OUT per buyer, which is not
+	// the same question as what the chain has seen. It covers the window between
+	// issuing an invoice and that transfer reaching a mempool: several jobs for
+	// one buyer in that window would otherwise all be told the same nonce. The
+	// chain's own answer is the floor; this only ever raises it.
 	nonce map[string]uint64
+}
+
+// nextNonceFor picks the nonce a settlement uses, for both the path where this
+// node signs and the path where the buyer does.
+//
+// ASK THE CHAIN, do not count. A nonce is a uniquifier checked against the set
+// this sender has already committed, and settlement used to take it from a map
+// that starts empty on every node start. A buyer who had ever made a transfer
+// therefore could not buy inference at all: their first invoice was always nonce
+// zero, the chain had seen zero, and the job failed AFTER the model had produced
+// the answer.
+//
+// The local counter still exists, and only raises the floor. It covers the
+// window between issuing an invoice and that transfer reaching a mempool, which
+// the chain cannot see and where two concurrent jobs for one buyer would
+// otherwise be told the same nonce.
+func (s *Service) nextNonceFor(buyer string) uint64 {
+	// Read before taking the lock: it reaches into consensus, and reconciling
+	// against the issued counter below is what makes a stale answer safe.
+	next := s.settler.NextNonce(buyer, true)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if issued := s.nonce[buyer]; issued > next {
+		next = issued
+	}
+	s.nonce[buyer] = next + 1
+	return next
 }
 
 // snapshot returns a copy of the job safe to hand to a caller. It drops the
@@ -410,10 +449,7 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 		return nil, fmt.Errorf("inference: no signing account for buyer %q", buyer)
 	}
 
-	s.mu.Lock()
-	nonce := s.nonce[buyer]
-	s.nonce[buyer] = nonce + 1
-	s.mu.Unlock()
+	nonce := s.nextNonceFor(buyer)
 
 	tx, err := s.settler.SubmitAccountTransfer(buyerAcct, provider, amount, nonce)
 	if err != nil {
