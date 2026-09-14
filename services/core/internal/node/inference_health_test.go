@@ -45,7 +45,7 @@ func TestHealthCheckTakesADeadBackendOffTheMarketAndBringsItBack(t *testing.T) {
 
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID:                  "gpu-box-1",
+			ID:                  "eth:0x00000000000000000000000000000000000000b1",
 			Kind:                "local-http",
 			BaseURL:             srv.URL,
 			HealthCheckInterval: 10 * time.Millisecond,
@@ -72,7 +72,7 @@ func TestHealthCheckTakesADeadBackendOffTheMarketAndBringsItBack(t *testing.T) {
 	healthy.Store(false)
 	waitFor(t, "a dead backend to be taken off the market", func() bool { return !routable() })
 
-	p, ok := n.market.GetProvider("gpu-box-1")
+	p, ok := n.market.GetProvider("eth:0x00000000000000000000000000000000000000b1")
 	if !ok || !p.Suspended {
 		t.Fatalf("provider = %+v, ok=%v; want suspended", p, ok)
 	}
@@ -121,7 +121,7 @@ func TestDisabledHealthCheckStartsNoSupervisor(t *testing.T) {
 	off := false
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID:           "resold-credits",
+			ID:           "eth:0x00000000000000000000000000000000000000d1",
 			Kind:         "local-http",
 			BaseURL:      "http://127.0.0.1:11434",
 			HealthCheck:  &off,

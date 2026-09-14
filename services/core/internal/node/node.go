@@ -2517,6 +2517,20 @@ func (n *Node) registerConfiguredInferenceBackends(registry *inference.Registry)
 				"(or collides with inference.echo_provider)", i, b.ID)
 		}
 		seen[b.ID] = struct{}{}
+		// THE ID IS THE PAYOUT ACCOUNT. inference.settle builds the settlement
+		// transfer with To: <provider id>, and nothing downstream checks that
+		// anyone can sign for it: Transaction.Verify authenticates the SENDER
+		// and a block only refuses an EMPTY recipient. So a typo here is not a
+		// startup error, it is a live provider whose every sale credits an
+		// account no key can ever spend from - discovered, at the earliest, when
+		// the operator goes looking for revenue that arrived somewhere else.
+		//
+		// Both spendable forms are accepted: eth:0x<40 hex> for a wallet-held
+		// account and 64 hex for an ed25519 one.
+		if err := validateProductionAccountID(b.ID); err != nil {
+			return fmt.Errorf("inference.backends[%d]: id is the account this provider is PAID INTO, "+
+				"and nothing can sign for this one: %w", i, err)
+		}
 		if b.Capacity == 0 {
 			return fmt.Errorf("inference.backends[%d] (%s): capacity must be > 0", i, b.ID)
 		}
