@@ -107,9 +107,17 @@ func NewOpenAIBackend(cfg OpenAIConfig) (*OpenAIBackend, error) {
 func (b *OpenAIBackend) Name() string { return "openai" }
 
 // chatMessage is the wire representation of a chat message.
+//
+// ReasoningContent is what a reasoning model puts its working in, separately
+// from the answer. vLLM, SGLang and TGI all emit it under this name when started
+// with a reasoning parser, and OpenAI-compatible servers that have no reasoning
+// simply omit it.
+//
+// It is READ, not sent: a request carries an assistant turn's Content only.
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role             string `json:"role"`
+	Content          string `json:"content"`
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 // chatCompletionRequest is the OpenAI /v1/chat/completions request body.
@@ -197,6 +205,7 @@ func (b *OpenAIBackend) Infer(ctx context.Context, req InferenceRequest) (Infere
 	return InferenceResponse{
 		Model:      model,
 		Completion: parsed.Choices[0].Message.Content,
+		Reasoning:  parsed.Choices[0].Message.ReasoningContent,
 		Usage:      usage,
 		Units:      UnitsFor(usage),
 	}, nil

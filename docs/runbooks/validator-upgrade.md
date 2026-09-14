@@ -99,14 +99,34 @@ Build once and ship the same binary to all three. Do not build per host: three
 binaries from three checkouts is three chances to ship a different one.
 
 ```sh
-cd services/core && go build -o matrixd ./cmd/matrixd && sha256sum matrixd
+cd services/core && go build -o matrixd ./cmd/matrixd && go build -o matrix ./cmd/matrix && sha256sum matrixd matrix
 ```
+
+**BOTH binaries.** `matrixd` is the daemon and `matrix` is the operations tool,
+and they ship together for a reason: the CLI is how an operator reads what the
+daemon is doing. Replacing only the daemon leaves a working node that its
+operator cannot inspect, and the gap is invisible until a command that exists in
+the new release is missing from the old CLI.
+
+That is not hypothetical. Two upgrades in a row replaced `matrixd` and not
+`matrix`, so a validator ran a v0.3.1 daemon beside a v0.2.1 CLI, and
+`matrix provider directory` - the command the provider runbook tells operators to
+run - printed a cobra help screen instead. It reads like a typo in the command
+rather than a stale binary, and the CLI version is the last thing anyone checks.
+
+A release archive contains both; taking one file out of it is the mistake.
 
 Then, **one node at a time**:
 
 1. Stop it: `sudo systemctl stop matrixd`. The chain stops committing here -
    expected, see above.
-2. Replace the binary. Keep the old one beside it, named, for the rollback.
+2. Replace BOTH binaries. Keep the old ones beside them, named, for the rollback:
+
+   ```sh
+   sudo mv /usr/local/bin/matrixd /usr/local/bin/matrixd.<old version>
+   sudo install -m 0755 <new>/matrixd /usr/local/bin/matrixd
+   sudo install -m 0755 <new>/matrix  /usr/local/bin/matrix
+   ```
 3. Start it: `sudo systemctl start matrixd`.
 
    The attestor passphrase reaches the node through the unit's
@@ -115,7 +135,20 @@ Then, **one node at a time**:
    never in the config, where `systemctl cat` would expose them. Do NOT start it
    in the foreground with the variable inline: the unit sets `Restart=always`,
    so systemd would bring up a second node against the same store.
-4. Wait for it to rejoin and for the chain to commit again before touching the
+4. Check that BOTH binaries are the new version before going on:
+
+   ```sh
+   matrixd -version && matrix --version
+   ```
+
+   Two dashes on one and one on the other, because `matrixd` uses the standard
+   `flag` package and `matrix` is a cobra command. `matrix -version` fails with
+   `unknown shorthand flag: 'e' in -ersion`, which looks like a broken binary and
+   is not.
+
+   If they disagree, the CLI was left behind and step 2 was done by hand on one
+   file.
+5. Wait for it to rejoin and for the chain to commit again before touching the
    next one. It has rejoined when its height is advancing and it reports
    `Bridge: attesting as 0x...` with the address registered in the contract.
 

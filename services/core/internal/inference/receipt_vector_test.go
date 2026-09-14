@@ -100,7 +100,7 @@ func TestWriteReceiptVectors(t *testing.T) {
 	for _, tc := range cases {
 		r := tc.receipt
 		req := InferenceRequest{Prompt: tc.prompt}
-		r.ExchangeDigest = ExchangeDigest(req, tc.completion)
+		r.ExchangeDigest = ExchangeDigest(req, tc.completion, "")
 		if err := r.Sign(acct); err != nil {
 			t.Fatalf("%s: Sign: %v", tc.name, err)
 		}

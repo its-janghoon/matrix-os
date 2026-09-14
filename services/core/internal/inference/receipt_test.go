@@ -47,7 +47,7 @@ func TestAReceiptIsEvidenceAboutOneExchange(t *testing.T) {
 	settled, node := settledWithReceipt(t, req, 40)
 	r := settled.Receipt
 
-	if err := r.VerifyFor(settled.Buyer, req, settled.Completion); err != nil {
+	if err := r.VerifyFor(settled.Buyer, req, settled.Completion, settled.Reasoning); err != nil {
 		t.Fatalf("the buyer's own receipt does not verify for their own exchange: %v", err)
 	}
 	if r.NodeID != node.AccountID() {
@@ -56,11 +56,11 @@ func TestAReceiptIsEvidenceAboutOneExchange(t *testing.T) {
 
 	// The same receipt, shown for a different question, is refused.
 	other := InferenceRequest{Prompt: "what is the capital of spain", Model: "llama-3.3-70b"}
-	if err := r.VerifyFor(settled.Buyer, other, settled.Completion); !errors.Is(err, ErrInvalidReceipt) {
+	if err := r.VerifyFor(settled.Buyer, other, settled.Completion, settled.Reasoning); !errors.Is(err, ErrInvalidReceipt) {
 		t.Fatalf("a receipt verified for a prompt it was not issued over: %v", err)
 	}
 	// And for a different answer to the same question.
-	if err := r.VerifyFor(settled.Buyer, req, "a different completion"); !errors.Is(err, ErrInvalidReceipt) {
+	if err := r.VerifyFor(settled.Buyer, req, "a different completion", ""); !errors.Is(err, ErrInvalidReceipt) {
 		t.Fatalf("a receipt verified for a completion it was not issued over: %v", err)
 	}
 }
@@ -148,7 +148,7 @@ func TestAReceiptsArithmeticIsCheckedNotTrusted(t *testing.T) {
 	r := &Receipt{
 		JobID: "j", Buyer: "b", Provider: "p",
 		Units: 10, PricePerUnit: 5, Total: 500, // 10 * 5 is 50
-		ExchangeDigest: ExchangeDigest(InferenceRequest{Prompt: "x"}, "y"),
+		ExchangeDigest: ExchangeDigest(InferenceRequest{Prompt: "x"}, "y", ""),
 	}
 	if err := r.Sign(node); err != nil {
 		t.Fatalf("Sign: %v", err)
@@ -173,7 +173,7 @@ func TestAReceiptSurvivesBeingWrittenDownAndReadBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseReceipt: %v", err)
 	}
-	if err := back.VerifyFor(settled.Buyer, req, settled.Completion); err != nil {
+	if err := back.VerifyFor(settled.Buyer, req, settled.Completion, settled.Reasoning); err != nil {
 		t.Fatalf("a receipt that went through JSON no longer verifies: %v", err)
 	}
 }

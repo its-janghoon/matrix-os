@@ -107,6 +107,11 @@ type InferenceJob struct {
 	Status InferenceJobStatus
 	// Completion is the generated text, set once fulfilled.
 	Completion string
+	// Reasoning is a reasoning model's working, set once fulfilled and empty for
+	// a model that has none. It is billed, so it is delivered: the overbilling
+	// ceiling counts the text that reached the buyer, and a charge for tokens the
+	// buyer never saw is one they cannot check.
+	Reasoning string
 	// Units is the billed units (== settled token amount), set once fulfilled.
 	Units uint64
 	// Usage is the token accounting the backend reported, set once fulfilled. It
@@ -427,7 +432,7 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 	// can. Not the true token count - it does not know the provider's tokeniser -
 	// but an upper bound, which is all that is needed to stop a bill two orders
 	// of magnitude past the work.
-	if ceiling := MaxUnitsFor(job.Request, resp.Completion); billableUnits > ceiling {
+	if ceiling := MaxUnitsFor(job.Request, resp.Completion, resp.Reasoning); billableUnits > ceiling {
 		billableUnits = ceiling
 	}
 	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
@@ -465,6 +470,7 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 	s.mu.Lock()
 	job.Status = InferenceJobSettling
 	job.Completion = resp.Completion
+	job.Reasoning = resp.Reasoning
 	job.Units = amount
 	job.Usage = resp.Usage
 	job.Model = resp.Model

@@ -13,15 +13,15 @@
       "units": "15",
       "price_per_unit": "5",
       "total": "75",
-      "exchange_digest": "CGQzhzlpBMRp478LBDJoUx7CY/VCDNhLKMy9V9YgwTQ=",
+      "exchange_digest": "Hur/pdwQlPMAaMnAV+MXvUZ8cHacpUlAnLxzU7KhZjw=",
       "issued_at": "1789000000000000000",
       "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
-      "signature": "b7GIza/uwLxf+9UT5gO5o/Uq7Z0cbWoyWxXjqF2PToRZVJVf/+4bhxiwzcj6sBTt0PpHjUA8qvQxqLfYHvmQCQ=="
+      "signature": "knlw/n8v+pxHIYmZlZ8wcHEid+b1X0mY1DROzMTc//gcgv1fmP9KEntR4Acs1zmS5HxpOfniHrIedOQyjGFQDA=="
     },
-    "signing_digest": "13d88cd379cd20d6f4f535db36e5f7eac64b519eeaa7c9e895fd66406649154e",
+    "signing_digest": "58b004ebedf5e3dcb6c09652893da7283f0a9ab6c354d9e1c4f3d14d79d8165b",
     "prompt": "what is the capital of france",
     "completion": "paris",
-    "exchange_digest": "08643387396904c469e3bf0b043268531ec263f5420cd84b28ccbd57d620c134"
+    "exchange_digest": "1eeaffa5dc1094f30068c9c057e317bd467c70769ca549409cbc7353b2a1663c"
   },
   {
     "name": "empty strings and zeros",
@@ -37,15 +37,15 @@
       "units": "0",
       "price_per_unit": "0",
       "total": "0",
-      "exchange_digest": "05/7Py1KF9w9sxQfhGRPvE9D+ziMY/P9XJgF9oaSpVc=",
+      "exchange_digest": "U1OHC5Tu7noIg9dL4Bnob0S6T46zkHUG4n+5ew4RwQw=",
       "issued_at": "0",
       "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
-      "signature": "DJ++GaJ8YgZK29nOeUetqr1ZDOMG/vaeH/P0x8FoO+vKW2Ex8LdUIBXcxJwltH1WdUOR791CExlINM3SiNdJAw=="
+      "signature": "+5dJaZpju8iHN54MqLAyCQcVvMOTdYVupJoP9Pkmb0H82bPksxnu+tn4MioD2qvQEeUY7k0G5SpiK5hgxTCJDg=="
     },
-    "signing_digest": "2685d33f276ad603f85bbd9b87dc9e18eae7b79c595b2978dc84595ad226058a",
+    "signing_digest": "5fc8f0ae38e5697c2ac24d731211ce6cf8d34912ae8465208b6ea5b6d7589ab1",
     "prompt": "",
     "completion": "",
-    "exchange_digest": "d39ffb3f2d4a17dc3db3141f84644fbc4f43fb388c63f3fd5c9805f68692a557"
+    "exchange_digest": "5353870b94eeee7a0883d74be019e86f44ba4f8eb3907506e27fb97b0e11c10c"
   },
   {
     "name": "multi-byte text",
@@ -61,15 +61,15 @@
       "units": "7",
       "price_per_unit": "3",
       "total": "21",
-      "exchange_digest": "qp0JuC7161ohwljZxcaLR/Fkj5qiarwjHhKxSwBNQL8=",
+      "exchange_digest": "2jVKtY/ErK9MA0Hot3yWcFmaqVegzfyacX+L/qXeAqo=",
       "issued_at": "1",
       "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
-      "signature": "5Fe93LBajap+k9prjGxESquSniSy1se8Wqx/413wc1WJOG9w3U0HcxBUsKbsRNL7s9MkiYtobW9h3g6B7UdaDA=="
+      "signature": "oKzjLzhixVN4ZfowjOTry5qVVdX/0NlAVS9FeGkghUW5wYUlJEJa4LWK5/AHwsQHmdVhRHEFm6xkX63yzGpjCw=="
     },
-    "signing_digest": "cd060e1f36222d795992e1d58bcb5b22050f9566a7ca9613cf823829853892ec",
+    "signing_digest": "e415a85a1b92e20f84d407bd86fa99b3efc6906678a5fab2f2ed5282dc68d410",
     "prompt": "안녕하세요 🙂",
     "completion": "반갑습니다 🙃",
-    "exchange_digest": "aa9d09b82ef5eb5a21c258d9c5c68b47f1648f9aa26abc231e12b14b004d40bf"
+    "exchange_digest": "da354ab58fc4acaf4c0341e8b77c9670599aa957a0cdfc9a717f8bfea5de02aa"
   },
   {
     "name": "values a double cannot hold",
@@ -85,14 +85,14 @@
       "units": "9007199254740993",
       "price_per_unit": "1",
       "total": "9007199254740993",
-      "exchange_digest": "mf5ZhyurK9LAEpRYyLTTyqIkHqe9Hj4XggAfHMFO9cU=",
+      "exchange_digest": "/hXeYckVU0r/qPHUcWuSWHirWGETGtnHg2Co/ro3bik=",
       "issued_at": "9223372036854775807",
       "public_key": "ebVWLo/mVPlAeLES6KmLp5AfhTrmlb7X4OORC60ElmQ=",
-      "signature": "VQMmp9VXpnGxAac/fmpumYrB860psC+Qv0AEywuyCgMOnSvwQJfo0WAAPht1k6GM4nzXA7eZgnusK/L2yhnTCA=="
+      "signature": "4uFbHue/FjxSpJZ2umlmxIIZBcnIyMeuIqfiLjdvbxTjVW4l6Dweg9bQUPmz0l4YMRxqtmTIuw8NumocLe0vDg=="
     },
-    "signing_digest": "79833b6d71093f7307e670af9f37fd05d15674e4b360afa7b3fcf3e46327fd7c",
+    "signing_digest": "a52d40f122d678727a78398e659ab4fef8947f0fa3f47309c527479fc1755c94",
     "prompt": "x",
     "completion": "y",
-    "exchange_digest": "99fe59872bab2bd2c0129458c8b4d3caa2241ea7bd1e3e1782001f1cc14ef5c5"
+    "exchange_digest": "fe15de61c915534affa8f1d4716b925878ab5861131ad9c78360a8feba376e29"
   }
 ]
