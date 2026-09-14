@@ -44,6 +44,7 @@ const ROUTES = [
   '/docs/soul-protocol',
   '/docs/guides/agent-development',
   '/docs/guides/network-setup',
+  '/docs/guides/gpu-provider',
 ];
 
 const VIEWPORTS = [

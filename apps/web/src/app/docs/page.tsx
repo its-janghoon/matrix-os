@@ -105,6 +105,11 @@ const sections: { section: string; blurb: string; items: Entry[] }[] = [
         href: '/docs/guides/network-setup',
         blurb: 'Two nodes on one ledger: what must match, and how the validator set changes while the network runs.',
       },
+      {
+        name: 'Selling a GPU',
+        href: '/docs/guides/gpu-provider',
+        blurb: 'Turning one GPU host into a paid provider, and the preflight that catches what is cheap now and expensive after the first start.',
+      },
     ],
   },
 ];
