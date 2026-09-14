@@ -47,7 +47,7 @@ inference:
 func TestConfiguredRequestTimeoutReachesTheBackend(t *testing.T) {
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID:             "gpu-box-1",
+			ID:             "eth:0x00000000000000000000000000000000000000b1",
 			Kind:           "local-http",
 			BaseURL:        "http://127.0.0.1:11434",
 			RequestTimeout: 9 * time.Minute,
@@ -59,7 +59,7 @@ func TestConfiguredRequestTimeoutReachesTheBackend(t *testing.T) {
 	if err := n.registerConfiguredInferenceBackends(registry); err != nil {
 		t.Fatalf("registerConfiguredInferenceBackends: %v", err)
 	}
-	if _, err := registry.Backend("gpu-box-1"); err != nil {
+	if _, err := registry.Backend("eth:0x00000000000000000000000000000000000000b1"); err != nil {
 		t.Fatalf("backend not registered: %v", err)
 	}
 }

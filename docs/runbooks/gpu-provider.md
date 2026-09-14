@@ -56,6 +56,7 @@ Turning on `signed_writes` also makes `RunInferenceJob` require that signature. 
   ```
 
 - The peer id and reachable address of at least one node already on the network, for `bootstrap_peers`.
+- That node's `consensus` and `genesis` config sections, verbatim. They are not yours to choose: see step 3. Ask for them before you provision anything, because without them the box cannot join and every other step is wasted.
 - An account for this provider to be paid into. Use the Ethereum address you hold in MetaMask: the order-book id a provider registers under IS the account it is paid into, so listing under `eth:0x...` means the proceeds land somewhere you can already see and spend from. There is no wallet file to manage and the node never holds your key.
 - Outbound TCP to your bootstrap peers, and inbound TCP on the P2P port (default 9000) from them.
 
@@ -106,9 +107,51 @@ A `usage` object with nonzero counts is what settlement will be computed from. I
 matrixd -init -config /etc/matrix/gpu-provider.yaml
 ```
 
+`-init` writes a secure baseline, not a launch profile, and it is a baseline for a node standing on its own. Three of its defaults are wrong for a provider joining a network, and one of them is a security problem:
+
+| Generated | Change it to | Why |
+| --- | --- | --- |
+| `admin.addr: 0.0.0.0:9090` | `127.0.0.1:9090` | The admin API's key can move funds. On a wildcard the only thing between it and the internet is a security-group rule. Reach it over an SSH tunnel. |
+| `network.listen_addr: /ip4/127.0.0.1/tcp/9000` | `/ip4/0.0.0.0/tcp/9000` | Bound to loopback, no peer can reach this node at all. |
+| `inference.echo_provider: demo-inference-provider` | `""` | A GPU-free echo backend that answers paying prompts with a stub. |
+
 Then merge the leaf values from [`gpu-provider.overlay.yaml.example`](../../services/core/configs/gpu-provider.overlay.yaml.example) into the generated file. The generated API keys, storage paths, and identity are yours to keep; do not overwrite them.
 
-Start the node once before completing the config: it prints the peer id and the multiaddrs other nodes should be given, and labels every address that is loopback, private, or a wildcard. On a cloud instance it will report that none of its bound addresses is reachable from another host, which is expected: the public or Elastic IP belongs to the NAT, not to an interface on the machine. Bind the wildcard and publish `/ip4/<public-ip>/tcp/9000/p2p/<printed-peer-id>`.
+### Copy `consensus` and `genesis`; do not fill them in
+
+This is the step that looks optional and is not.
+
+A provider does not validate, but it is a full node: it replays the chain from height zero, and `verifyBlockForHeightLocked` checks each block's state root against this node's own ledger on the **block-sync** path exactly as it does on a live proposal. The ledger state root is a fold over every balance, and `ApplyGenesis` is what puts the first balances there - in this node's own store, on its first start.
+
+So a provider that starts with an empty or invented genesis computes a different root at height zero and refuses every block the network sends it. What you see is a node that connects to its peers and never advances, reporting that two nodes "reached different balances" - several layers away from the config line that caused it.
+
+The same applies to `consensus.validators`, and with a twist: it has to be the **genesis** set, not the set validating today. Each replayed block is checked against the validator set as it stood at that height. Handed the current set, the node rejects early history and never catches up.
+
+Copy both sections off a node already on the network:
+
+```sh
+awk '/^[a-z_]+:/{sec=$1} sec=="consensus:"||sec=="genesis:"' /path/to/their/config.yaml
+```
+
+Neither holds a secret: validator ids are public keys and genesis allocations are public chain data. `participate_in_open_set: false` is the only line in either section a provider sets differently.
+
+### Gate the first start
+
+Genesis is applied once and the fact is recorded, so a node started on the wrong one cannot be corrected in place - the store has to be deleted and the node started again. Check before starting, not after:
+
+```sh
+matrixd -preflight-production -config /etc/matrix/gpu-provider.yaml
+```
+
+It refuses a config whose `genesis.allocations` plus `reward_pool` do not sum to the native supply cap exactly, whose validator list is short or has duplicates, or whose `round_timeout` and `epoch_length` are left to defaults. A non-zero exit here is cheap; the same mistake found after the first start costs a resync.
+
+To get this node's peer id for other operators' `bootstrap_peers`, use the flag that does not touch genesis:
+
+```sh
+matrixd -init-identities -config /etc/matrix/gpu-provider.yaml
+```
+
+It prints `consensus_id` and `peer_id` as JSON and applies nothing. Publish `/ip4/<this host's public IP>/tcp/9000/p2p/<peer_id>`. On a cloud instance the public or Elastic IP belongs to the NAT rather than to an interface on the machine, so bind the wildcard and advertise the public address; the node's own startup report will correctly say that none of its bound addresses is reachable from another host.
 
 ## 4. Declare the backend
 

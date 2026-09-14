@@ -32,7 +32,7 @@ func backendTestNode(t *testing.T, cfg InferenceConfig) (*Node, *inference.Regis
 func TestConfiguredBackendJoinsBothTheRegistryAndTheOrderBook(t *testing.T) {
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID:           "my-gpu-box",
+			ID:           "eth:0x00000000000000000000000000000000000000e1",
 			Kind:         "local-http",
 			BaseURL:      "http://127.0.0.1:8000",
 			Models:       []string{"Llama-3.3-70B", "qwen-2.5-72b"},
@@ -48,10 +48,10 @@ func TestConfiguredBackendJoinsBothTheRegistryAndTheOrderBook(t *testing.T) {
 	// Both registrations are required. A backend with no order-book entry is the
 	// mistake the demo provider made once: submit failed with "provider not
 	// found" even though the backend was installed.
-	if _, err := registry.Backend("my-gpu-box"); err != nil {
+	if _, err := registry.Backend("eth:0x00000000000000000000000000000000000000e1"); err != nil {
 		t.Fatalf("backend not in the inference registry: %v", err)
 	}
-	prov, ok := n.market.GetProvider("my-gpu-box")
+	prov, ok := n.market.GetProvider("eth:0x00000000000000000000000000000000000000e1")
 	if !ok {
 		t.Fatal("provider not on the order book")
 	}
@@ -61,7 +61,7 @@ func TestConfiguredBackendJoinsBothTheRegistryAndTheOrderBook(t *testing.T) {
 
 	// And it is routable by model, which is the whole point of declaring them.
 	routed := n.market.ProvidersForModel("llama-3.3-70b")
-	if len(routed) != 1 || routed[0].ID != "my-gpu-box" {
+	if len(routed) != 1 || routed[0].ID != "eth:0x00000000000000000000000000000000000000e1" {
 		t.Fatalf("ProvidersForModel = %+v, want the configured backend", routed)
 	}
 }
@@ -69,7 +69,7 @@ func TestConfiguredBackendJoinsBothTheRegistryAndTheOrderBook(t *testing.T) {
 func TestConfiguredBackendGrossesUpManualMatrixCost(t *testing.T) {
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID: "costed", Kind: "echo", Capacity: 5,
+			ID: "eth:0x00000000000000000000000000000000000000c0", Kind: "echo", Capacity: 5,
 			CostPerUnit: 10_000, MarkupBasisPoints: 1_000,
 		}},
 	})
@@ -78,7 +78,7 @@ func TestConfiguredBackendGrossesUpManualMatrixCost(t *testing.T) {
 	if err := n.registerConfiguredInferenceBackends(registry); err != nil {
 		t.Fatalf("registerConfiguredInferenceBackends: %v", err)
 	}
-	prov, ok := n.market.GetProvider("costed")
+	prov, ok := n.market.GetProvider("eth:0x00000000000000000000000000000000000000c0")
 	if !ok {
 		t.Fatal("cost-backed provider not on the order book")
 	}
@@ -96,7 +96,7 @@ func TestConfiguredBackendGrossesUpManualMatrixCost(t *testing.T) {
 func TestAConfiguredBackendIsNotReRegisteredOverPendingReservations(t *testing.T) {
 	cfg := InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID: "gpu", Kind: "echo", Models: []string{"m"}, Capacity: 10, PricePerUnit: 1,
+			ID: "eth:0x00000000000000000000000000000000000000a1", Kind: "echo", Models: []string{"m"}, Capacity: 10, PricePerUnit: 1,
 		}},
 	}
 	n, registry := backendTestNode(t, cfg)
@@ -107,7 +107,7 @@ func TestAConfiguredBackendIsNotReRegisteredOverPendingReservations(t *testing.T
 	if err := n.market.Ledger().Credit("buyer", 1_000); err != nil {
 		t.Fatalf("credit: %v", err)
 	}
-	if _, err := n.market.SubmitJob("buyer", "gpu", 4); err != nil {
+	if _, err := n.market.SubmitJob("buyer", "eth:0x00000000000000000000000000000000000000a1", 4); err != nil {
 		t.Fatalf("submit: %v", err)
 	}
 
@@ -117,7 +117,7 @@ func TestAConfiguredBackendIsNotReRegisteredOverPendingReservations(t *testing.T
 	if err := n.registerConfiguredInferenceBackends(inference.NewRegistry()); err != nil {
 		t.Fatalf("second registration: %v", err)
 	}
-	prov, _ := n.market.GetProvider("gpu")
+	prov, _ := n.market.GetProvider("eth:0x00000000000000000000000000000000000000a1")
 	if prov.Available != 6 {
 		t.Fatalf("Available = %d after a restart, want 6 (the reservation survives)", prov.Available)
 	}
@@ -136,22 +136,22 @@ func TestConfiguredBackendRejectsBadDeclarations(t *testing.T) {
 		},
 		{
 			name:    "no capacity",
-			backend: InferenceBackendConfig{ID: "a", Kind: "echo", PricePerUnit: 1},
+			backend: InferenceBackendConfig{ID: "eth:0x00000000000000000000000000000000000000aa", Kind: "echo", PricePerUnit: 1},
 			wantIn:  "capacity must be > 0",
 		},
 		{
 			name:    "no price",
-			backend: InferenceBackendConfig{ID: "a", Kind: "echo", Capacity: 1},
+			backend: InferenceBackendConfig{ID: "eth:0x00000000000000000000000000000000000000aa", Kind: "echo", Capacity: 1},
 			wantIn:  "set price_per_unit or cost_per_unit",
 		},
 		{
 			name:    "both final price and cost",
-			backend: InferenceBackendConfig{ID: "a", Kind: "echo", Capacity: 1, PricePerUnit: 2, CostPerUnit: 1},
+			backend: InferenceBackendConfig{ID: "eth:0x00000000000000000000000000000000000000aa", Kind: "echo", Capacity: 1, PricePerUnit: 2, CostPerUnit: 1},
 			wantIn:  "mutually exclusive",
 		},
 		{
 			name:    "unknown kind",
-			backend: InferenceBackendConfig{ID: "a", Kind: "telepathy", Capacity: 1, PricePerUnit: 1},
+			backend: InferenceBackendConfig{ID: "eth:0x00000000000000000000000000000000000000aa", Kind: "telepathy", Capacity: 1, PricePerUnit: 1},
 			wantIn:  "unknown kind",
 		},
 	}
@@ -175,8 +175,8 @@ func TestConfiguredBackendRejectsADuplicateProviderID(t *testing.T) {
 	n, registry := backendTestNode(t, InferenceConfig{
 		EchoProvider: "demo",
 		Backends: []InferenceBackendConfig{
-			{ID: "gpu", Kind: "echo", Capacity: 1, PricePerUnit: 1},
-			{ID: "gpu", Kind: "echo", Capacity: 2, PricePerUnit: 2},
+			{ID: "eth:0x00000000000000000000000000000000000000a1", Kind: "echo", Capacity: 1, PricePerUnit: 1},
+			{ID: "eth:0x00000000000000000000000000000000000000a1", Kind: "echo", Capacity: 2, PricePerUnit: 2},
 		},
 	})
 
@@ -208,7 +208,7 @@ func TestConfiguredBackendRejectsCollidingWithTheEchoProvider(t *testing.T) {
 func TestABackendMayDeclareNoModelAndStaysReachableByID(t *testing.T) {
 	n, registry := backendTestNode(t, InferenceConfig{
 		Backends: []InferenceBackendConfig{{
-			ID: "unlisted", Kind: "echo", Capacity: 5, PricePerUnit: 2,
+			ID: "eth:0x00000000000000000000000000000000000000f0", Kind: "echo", Capacity: 5, PricePerUnit: 2,
 		}},
 	})
 
@@ -216,7 +216,7 @@ func TestABackendMayDeclareNoModelAndStaysReachableByID(t *testing.T) {
 		t.Fatalf("registerConfiguredInferenceBackends: %v", err)
 	}
 
-	if _, ok := n.market.GetProvider("unlisted"); !ok {
+	if _, ok := n.market.GetProvider("eth:0x00000000000000000000000000000000000000f0"); !ok {
 		t.Fatal("a backend with no declared model should still be on the order book")
 	}
 	if got := n.market.ProvidersForModel("anything"); len(got) != 0 {

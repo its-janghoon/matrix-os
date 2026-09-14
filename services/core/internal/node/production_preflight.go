@@ -45,8 +45,19 @@ func ValidateProductionConfig(configPath string) (ProductionPreflight, error) {
 	if cfg.Consensus.EpochLength == 0 {
 		return ProductionPreflight{}, fmt.Errorf("consensus.epoch_length must be explicit and positive for production")
 	}
-	if !cfg.Consensus.Stake.Enabled || cfg.Consensus.Stake.Bond == 0 || effectiveMinBond(cfg.Consensus.Stake) == 0 {
-		return ProductionPreflight{}, fmt.Errorf("consensus.stake must be enabled with positive min_bond and bond for production")
+	// min_bond is a NETWORK rule - it decides who is admitted - so every node
+	// needs the same value whether or not it validates.
+	if !cfg.Consensus.Stake.Enabled || effectiveMinBond(cfg.Consensus.Stake) == 0 {
+		return ProductionPreflight{}, fmt.Errorf("consensus.stake must be enabled with a positive min_bond for production")
+	}
+	// bond is this node's own intent, and only a node that means to validate has
+	// any. Requiring it of every node pushed the one case the docs tell operators
+	// to set participate_in_open_set: false on - a GPU provider - into carrying a
+	// bond target it should not have, which the engine then tries to fill
+	// forever.
+	participates := cfg.Consensus.ParticipateInOpenSet == nil || *cfg.Consensus.ParticipateInOpenSet
+	if participates && cfg.Consensus.Stake.Bond == 0 {
+		return ProductionPreflight{}, fmt.Errorf("consensus.stake.bond must be positive for a node that participates in the validator set; set participate_in_open_set: false if this node only sells compute")
 	}
 
 	validators := make(map[string]struct{}, len(cfg.Consensus.Validators))
