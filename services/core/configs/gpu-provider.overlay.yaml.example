@@ -23,6 +23,20 @@ network:
     # generated on that node's first start.
     - "/ip4/<an-existing-node-public-ip>/tcp/9000/p2p/<its-printed-peer-id>"
 
+# EVERY VALUE IN THIS SECTION IS COPIED, NOT CHOSEN.
+#
+# A provider is not a validator, but it is a full node: it replays the chain from
+# height ZERO and checks the state root of every block it is handed, on the
+# block-sync path as much as on a live proposal. So all of `consensus` and all of
+# `genesis` have to be byte-identical to what the rest of the network runs.
+# `participate_in_open_set` is the only line here a provider sets differently.
+#
+# Copy them off a node already on the network rather than filling them in:
+#
+#   awk '/^[a-z_]+:/{sec=$1} sec=="consensus:"||sec=="genesis:"' <their config>
+#
+# Neither section holds a secret. Validator ids are public keys and genesis
+# allocations are public chain data.
 consensus:
   # This chain's EIP-155 id, inside the signature of every wallet-signed
   # transaction. It is what stops a transaction signed for another network from
@@ -30,6 +44,30 @@ consensus:
   # chain: a different value reaches a different verdict on the same block, and a
   # change invalidates every signature already made for the old one.
   chain_id: <this-network's-chain-id>
+
+  # The GENESIS validator set, as hex account ids - not the set validating today.
+  # This node replays from height zero and checks, at each height, that the
+  # proposer led that round against the set as it stood THEN. Handed the current
+  # set it rejects early history and never catches up.
+  validators:
+    - "<genesis-validator-account-id>"
+
+  # Identical on every node, all of them. A validator-set change takes effect at
+  # the next height that is a multiple of epoch_length, so a node with a
+  # different value applies it at a different height and its leader schedule
+  # parts company with everyone else's.
+  epoch_length: <the-network's-epoch-length>
+  membership_mode: <the-network's-membership-mode>
+
+  # Copied even though this node never bonds. `-preflight-production` requires
+  # the block, and a provider that quietly disagrees about min_bond disagrees
+  # about who is admitted to the validator set, which is a state-root difference.
+  stake:
+    enabled: <the-network's-stake-enabled>
+    min_bond: <the-network's-min-bond>
+    unbonding_period: <the-network's-unbonding-period>
+    bond: <the-network's-bond>
+    bond_residency: <the-network's-bond-residency>
   # A provider is NOT a validator. It sells compute; it does not order blocks.
   # Leaving this false is what keeps the GPU box out of the validator set, so it
   # needs no bonded stake and no attestor keystore.
@@ -217,6 +255,29 @@ inference:
       # keeps live reservations, so a scheduled restart is a legitimate refresh.
       quote_ttl: 24h
 
-# Genesis, bridge and rewards are deliberately omitted. A provider joining an
-# existing network applies neither: it syncs the chain it joins. Do not paste a
-# genesis block or an attestor keystore onto a GPU box.
+# GENESIS IS NOT OPTIONAL, and this is the trap that costs a day.
+#
+# `ApplyGenesis` writes balances into THIS node's own store on first start, the
+# ledger state root is a fold over every balance, and a block's state root is
+# checked against this node's ledger on the block-sync path as well as on a live
+# proposal. A provider that starts with an empty or invented genesis therefore
+# computes a different root at height zero and REFUSES EVERY BLOCK the network
+# sends it - reporting that two nodes "reached different balances", several
+# layers away from the config line that caused it.
+#
+# It is also not recoverable in place: genesis is applied once and recorded, so
+# a node started on the wrong one has to have its store deleted and be started
+# again. Run `matrixd -preflight-production -config <this file>` BEFORE the first
+# start; it refuses a genesis whose allocations plus reward pool do not sum to
+# the native supply cap exactly.
+#
+# Copy both leaves verbatim from a node already on the network.
+genesis:
+  allocations:
+    - account: "<copied-verbatim>"
+      amount: <copied-verbatim>
+  reward_pool: <copied-verbatim>
+
+# The bridge and an attestor keystore are a different matter and genuinely do not
+# belong here: leave `bridge` off and do not put an attestor keystore on a GPU
+# box. Rewards stay at the network's values, which at launch are zero.
