@@ -96,7 +96,7 @@ and terminating TLS.
 vouching for itself proves nothing:
 
 ```sh
-matrix provider directory --remote --endpoint <another node's connect addr>
+matrix provider directory --addr <another node's market addr, default port 9091>
 ```
 
 **Diary the expiry.** The protocol refuses an attestation dated more than 30
