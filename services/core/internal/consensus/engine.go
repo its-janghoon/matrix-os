@@ -4380,6 +4380,19 @@ func (e *Engine) maybeTopUpBond() {
 	if e.stake == nil || e.self == nil || e.targetBond == 0 {
 		return
 	}
+	// A node that has said it will not join the open set has no reason to bond.
+	// A bond is what buys admission, and this node is not asking for it.
+	//
+	// Without this, a GPU provider - the one node type the docs tell operators to
+	// set participate_in_open_set: false on - tries to bond on every interval
+	// forever, because the target came from the validator config it was told to
+	// copy. On an unfunded account that is only noise. On a funded one it is
+	// worse: the funds are silently locked into a validator set the operator
+	// explicitly declined to join, and unlocking them means waiting out the
+	// unbonding period.
+	if e.membershipMode == MembershipBondedOpen && !e.participateInOpenSet {
+		return
+	}
 
 	e.mu.Lock()
 	if !e.lastBondTop.IsZero() && time.Since(e.lastBondTop) < bondTopUpInterval {
