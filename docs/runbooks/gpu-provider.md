@@ -1,6 +1,6 @@
 # Joining spare GPU capacity as an inference provider
 
-This runbook turns one GPU host into a paid inference provider on an already-launched Matrix OS network. It assumes the network exists: genesis applied, validators running, the bridge and any DEX listing already handled. Nothing here touches consensus, genesis, or the bridge.
+This runbook turns one GPU host into a paid inference provider on an already-launched Matrix OS network. There is a shorter version of it on the website at [`/docs/guides/gpu-provider`](../../apps/web/src/app/docs/guides/gpu-provider/page.tsx), and one command that checks a box against it: [`scripts/gpu-provider-preflight.sh`](../../scripts/gpu-provider-preflight.sh). It assumes the network exists: genesis applied, validators running, the bridge and any DEX listing already handled. Nothing here touches consensus, genesis, or the bridge.
 
 The end state is one box that runs two processes:
 
@@ -14,6 +14,8 @@ A provider is not a validator. The GPU box does not need to bond stake, does not
 One unit is one token. `inference.UnitsFor` sums the prompt and completion token counts the backend reported, and that number multiplies your per-unit price. There is no separate per-request or per-second charge.
 
 `price_per_unit` is denominated in native MATRIX base units at 9 decimals, so `1000000000` is one whole MATRIX per token, which would be absurd. Real quotes on this scale are small integers.
+
+A reasoning model bills for its working as well as its answer. The tokens a model spends in `reasoning_content` are real GPU time, they are in the `completion_tokens` the server reports, and they settle - so the buyer is given that working alongside the completion, and the receipt digest commits to both. A seller cannot charge for one body of reasoning and deliver another. What this changes for you is the ceiling rather than the price: the charge is bounded by the bytes that actually crossed the wire, and before reasoning counted toward that bound the cap could clip a charge for work the GPU had already done.
 
 `capacity` is a concurrency budget measured in those same token units, not a lifetime quota. Each job reserves its estimated units up front and the reservation is returned on completion or expiry (`market.ReleaseAsCompleted`). Size it to how many tokens you are willing to have in flight at once, not to how many you intend to sell this month.
 
@@ -140,10 +142,20 @@ Neither holds a secret: validator ids are public keys and genesis allocations ar
 Genesis is applied once and the fact is recorded, so a node started on the wrong one cannot be corrected in place - the store has to be deleted and the node started again. Check before starting, not after:
 
 ```sh
+scripts/gpu-provider-preflight.sh /etc/matrix/gpu-provider.yaml
+```
+
+That is the whole of this runbook that a machine can check, run from the GPU box itself. It reads the config the way the node reads it, sends one real prompt to the model server and reads the `usage` counts back, looks at what this box is listening on and whether it can reach its bootstrap peers, and hands the config to the node's own production preflight rather than keeping a second copy of those rules:
+
+```sh
 matrixd -preflight-production -config /etc/matrix/gpu-provider.yaml
 ```
 
-It refuses a config whose `genesis.allocations` plus `reward_pool` do not sum to the native supply cap exactly, whose validator list is short or has duplicates, or whose `round_timeout` and `epoch_length` are left to defaults. A non-zero exit here is cheap; the same mistake found after the first start costs a resync.
+which refuses a config whose `genesis.allocations` plus `reward_pool` do not sum to the native supply cap exactly, whose validator list is short or has duplicates, or whose `round_timeout` and `epoch_length` are left to defaults.
+
+A `FAIL` is a mistake. A `warn` is a decision - selling at cost, validating as well as selling, reselling a vendor's API rather than your own weights - listed so it is made deliberately rather than inherited from a generated file. A non-zero exit here is cheap; the same mistake found after the first start costs a resync.
+
+The one thing it cannot answer is whether other hosts can reach your P2P port. No box can answer that about itself, so it prints the command to run from somewhere else.
 
 To get this node's peer id for other operators' `bootstrap_peers`, use the flag that does not touch genesis:
 

@@ -65,13 +65,26 @@ async function sha256(bytes: Uint8Array): Promise<Uint8Array> {
 }
 
 /**
- * Hashes the request and completion into the value a receipt commits to.
+ * Hashes the request, the completion, and the model's working into the value a
+ * receipt commits to.
  *
  * Length-prefixed throughout, so no two distinct exchanges serialise the same
  * way: without it a prompt ending in text the completion begins with could be
  * re-split into a different pair with an identical digest.
+ *
+ * `reasoning` is REQUIRED, and it is a required empty string for a model that
+ * produced none rather than an optional parameter. A reasoning model spends most
+ * of its tokens there, they are billed, and binding them is what stops a seller
+ * charging for one body of working and handing over another. An optional
+ * parameter would let a caller omit it and get a digest that is wrong only for
+ * reasoning models - which surfaces as "invalid signature" on exactly the
+ * expensive jobs, and as nothing at all in a test suite that never sends one.
  */
-export async function exchangeDigest(messages: Message[], completion: string): Promise<Uint8Array> {
+export async function exchangeDigest(
+  messages: Message[],
+  completion: string,
+  reasoning: string,
+): Promise<Uint8Array> {
   return sha256(
     concat([
       lp(utf8(RECEIPT_DOMAIN)),
@@ -79,6 +92,7 @@ export async function exchangeDigest(messages: Message[], completion: string): P
       u64(BigInt(messages.length)),
       ...messages.flatMap((m) => [lp(utf8(m.role)), lp(utf8(m.content))]),
       lp(utf8(completion)),
+      lp(utf8(reasoning)),
     ]),
   );
 }
@@ -140,7 +154,7 @@ export interface ReceiptCheck {
  */
 export async function verifyReceipt(
   receipt: Receipt,
-  exchange?: { messages: Message[]; completion: string; buyer?: string },
+  exchange?: { messages: Message[]; completion: string; reasoning: string; buyer?: string },
 ): Promise<ReceiptCheck> {
   const publicKey = fromBase64(receipt.public_key);
   const signature = fromBase64(receipt.signature);
@@ -193,7 +207,7 @@ export async function verifyReceipt(
     };
   }
 
-  const want = await exchangeDigest(exchange.messages, exchange.completion);
+  const want = await exchangeDigest(exchange.messages, exchange.completion, exchange.reasoning);
   const got = fromBase64(receipt.exchange_digest);
   const boundToExchange =
     want.length === got.length && want.every((b, i) => b === got[i]);
@@ -207,7 +221,7 @@ export async function verifyReceipt(
       signatureValid,
       arithmeticValid,
       boundToExchange,
-      problem: 'this receipt was issued over a different prompt or completion',
+      problem: 'this receipt was issued over a different prompt, completion, or reasoning',
     };
   }
   return { signatureValid, arithmeticValid, boundToExchange };

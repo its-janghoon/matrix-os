@@ -155,7 +155,7 @@ func TestTheCeilingIsAnUpperBoundNotAnEstimate(t *testing.T) {
 		{"emoji, four bytes a character", InferenceRequest{Prompt: strings.Repeat("🙂", 200)}, strings.Repeat("🙃", 200)},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			ceiling := MaxUnitsFor(tc.req, tc.out)
+			ceiling := MaxUnitsFor(tc.req, tc.out, "")
 			// The strictest real tokeniser still needs at least one token per
 			// byte-pair; one token per BYTE is above anything achievable.
 			bytes := len(tc.req.Prompt) + len(tc.out)
@@ -168,7 +168,7 @@ func TestTheCeilingIsAnUpperBoundNotAnEstimate(t *testing.T) {
 
 	// And a tiny exchange gets the floor rather than a bound so tight it argues
 	// with a backend over template overhead.
-	if got := MaxUnitsFor(InferenceRequest{Prompt: "hi"}, "yo"); got != maxUnitsFloor {
+	if got := MaxUnitsFor(InferenceRequest{Prompt: "hi"}, "yo", ""); got != maxUnitsFloor {
 		t.Fatalf("MaxUnitsFor on a tiny exchange = %d, want the floor %d", got, maxUnitsFloor)
 	}
 }

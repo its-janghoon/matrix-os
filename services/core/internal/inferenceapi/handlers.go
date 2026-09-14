@@ -54,6 +54,7 @@ func jobToProto(j *inference.InferenceJob) *inferencev1.InferenceJob {
 		Model:      j.Model,
 		Status:     statusToProto(j.Status),
 		Completion: j.Completion,
+		Reasoning:  j.Reasoning,
 		Units:      j.Units,
 	}
 	if pj.Model == "" {
