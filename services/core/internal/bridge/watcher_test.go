@@ -3,9 +3,12 @@ package bridge
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -450,5 +453,101 @@ func TestWatcher_CursorWriteFailureDoesNotStopRelay(t *testing.T) {
 	// In-memory cursor still advanced, so this process does not re-scan.
 	if w.Cursor() != 5 {
 		t.Fatalf("cursor = %d, want 5 (in-memory advance survives a failed write)", w.Cursor())
+	}
+}
+
+// timeoutEthClient fails FilterBurnedLogs the way a real RPC client does when a
+// single request outruns its own deadline: an error wrapping
+// context.DeadlineExceeded, while the caller's context is perfectly healthy.
+// After `failures` calls it starts succeeding again.
+type timeoutEthClient struct {
+	mu       sync.Mutex
+	head     uint64
+	failures int
+	calls    int
+}
+
+func (f *timeoutEthClient) BlockNumber(_ context.Context) (uint64, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.head, nil
+}
+
+func (f *timeoutEthClient) FilterBurnedLogs(_ context.Context, _ Address, _, _ uint64) ([]EthLog, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls++
+	if f.calls <= f.failures {
+		// The shape net/http produces for a Client.Timeout, wrapped the way the
+		// watcher wraps it.
+		return nil, fmt.Errorf("bridge: watcher getLogs [1,2]: bridge: eth_getLogs request: %w",
+			fmt.Errorf("Post \"https://rpc.example/v2/key\": %w", context.DeadlineExceeded))
+	}
+	return nil, nil
+}
+
+func (f *timeoutEthClient) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+// A single slow RPC request must not stop the watcher.
+//
+// This is the defect that cost a production node its watcher for 22 hours: Run
+// matched context.DeadlineExceeded on the ERROR and returned, even though
+// nothing had asked it to stop. A watcher that is not watching looks exactly
+// like a chain with no burns on it, so nothing surfaced it - and with a
+// three-validator quorum needing all three attestations, one dead watcher
+// freezes every unlock.
+func TestWatcherSurvivesARequestTimeout(t *testing.T) {
+	br, _ := newWatcherTestBridge(t, 0)
+	client := &timeoutEthClient{head: 100, failures: 3}
+
+	var reported int32
+	w, err := NewWatcher(WatcherConfig{
+		Client:       client,
+		Bridge:       br,
+		PollInterval: 5 * time.Millisecond,
+		OnError:      func(error) { atomic.AddInt32(&reported, 1) },
+	})
+	if err != nil {
+		t.Fatalf("NewWatcher: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+
+	// Give it enough ticks to fail three times and then succeed.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && client.callCount() <= client.failures {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	select {
+	case err := <-done:
+		t.Fatalf("the watcher stopped on a request timeout: %v", err)
+	default:
+	}
+	if client.callCount() <= client.failures {
+		t.Fatalf("watcher made %d calls, want more than the %d that failed - it stopped polling",
+			client.callCount(), client.failures)
+	}
+	if atomic.LoadInt32(&reported) == 0 {
+		t.Fatal("the timeouts were swallowed; an operator would never see a persistently broken endpoint")
+	}
+
+	// And it still exits when its OWN context is cancelled.
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run returned %v on cancel, want context.Canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the watcher did not stop when its context was cancelled")
 	}
 }

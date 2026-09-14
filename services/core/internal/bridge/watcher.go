@@ -241,7 +241,7 @@ func (w *Watcher) Run(ctx context.Context) error {
 
 	// Do an immediate first pass so a caught-up chain is processed without
 	// waiting a full interval (important for the test's determinism).
-	if _, err := w.Poll(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	if _, err := w.Poll(ctx); err != nil && ctx.Err() == nil {
 		w.reportError(err)
 	}
 
@@ -251,8 +251,20 @@ func (w *Watcher) Run(ctx context.Context) error {
 			return ctx.Err()
 		case <-ticker.C:
 			if _, err := w.Poll(ctx); err != nil {
-				if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-					return err
+				// Ask OUR context whether we were stopped, rather than asking the
+				// error what it is. An RPC client sets a per-request deadline, so a
+				// single slow eth_getLogs surfaces as context.DeadlineExceeded even
+				// though nothing asked this watcher to stop - and matching on the
+				// error's identity cannot tell the two apart.
+				//
+				// It cost a production node its watcher for 22 hours: one Alchemy
+				// request timed out, the error matched, Run returned, and nothing
+				// restarted it. Nobody noticed, because a watcher that is not
+				// watching looks exactly like a chain with no burns on it. With a
+				// three-validator quorum that needs all three attestations, one
+				// silently dead watcher is enough to freeze every unlock.
+				if ctx.Err() != nil {
+					return ctx.Err()
 				}
 				w.reportError(err)
 			}
