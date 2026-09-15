@@ -4,8 +4,10 @@ import (
 	"crypto/ed25519"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/ecirlabs/matrix-core/internal/token"
@@ -21,6 +23,21 @@ import (
 //     ed25519 public key matches the requested account id yields that account's
 //     signing key.
 //
+// A wallet file comes in two shapes and BOTH are read, because `matrix wallet`
+// writes the second and this resolver used to read only the first. The result
+// was a node that ignored the wallet its own CLI had just written, reported
+// "no signing account for buyer", and pointed at nothing: an unparseable file is
+// indistinguishable here from a file for a different account.
+//
+//   - plaintext {public_key, private_key}, the older shape
+//   - an encrypted token.Keystore, which `matrix wallet create` and `import`
+//     write, unlocked with the passphrase in WalletPassphraseEnv
+//
+// A keystore carries its public key in the CLEAR, so the account id is matched
+// before anything is decrypted. That is not a micro-optimisation: the KDF is
+// scrypt and deliberately expensive, so decrypting every wallet in the directory
+// on every lookup would put that cost in front of every settlement.
+//
 // This models the single-operator/dev deployment the quickstart uses: a node
 // fulfilling inference on behalf of buyers whose keys it legitimately holds. It
 // never fabricates custody, it can only resolve keys that already exist as an
@@ -28,6 +45,16 @@ import (
 // deployment substitutes its own custodial resolver via the inference Service.
 //
 // It is safe for concurrent use.
+// WalletPassphraseEnv is where the passphrase for an encrypted wallet keystore
+// is read from. Env-only and never a config field, exactly as the attestor's
+// MATRIX_ATTESTOR_PASSPHRASE is handled: a secret in the file is a secret in
+// every backup of the file.
+//
+// A node with no wallet keystore never needs it, so an empty value is not an
+// error here - it is only reported when a keystore was found whose id matched
+// and could not be opened, which is the moment it is actually missing.
+const WalletPassphraseEnv = "MATRIX_WALLET_PASSPHRASE"
+
 type walletAccounts struct {
 	// dir is the wallet directory scanned for *.json wallet files. Empty defaults
 	// to ~/.matrix.
@@ -104,7 +131,7 @@ func (w *walletAccounts) Account(id string) (*token.Account, bool) {
 		if e.IsDir() || filepath.Ext(e.Name()) != ".json" {
 			continue
 		}
-		found, ok := loadWalletAccount(filepath.Join(w.dir, e.Name()))
+		found, ok := walletFileAccount(filepath.Join(w.dir, e.Name()), id)
 		if !ok {
 			continue
 		}
@@ -119,8 +146,65 @@ func (w *walletAccounts) Account(id string) (*token.Account, bool) {
 	return nil, false
 }
 
-// loadWalletAccount reads a wallet file and reconstructs its token.Account,
-// reporting whether it parsed into a well-formed ed25519 keypair.
+// walletFileAccount reads a wallet file in either shape and reconstructs its
+// token.Account, reporting whether it yielded a well-formed ed25519 keypair.
+//
+// wantID is the account being looked for. It is used ONLY to decide whether an
+// encrypted keystore is worth unlocking; the caller still checks the resulting
+// account id, so a file that lies about its public key resolves to nothing.
+func walletFileAccount(path, wantID string) (*token.Account, bool) {
+	if acct, ok := loadWalletAccount(path); ok {
+		return acct, true
+	}
+	return loadKeystoreAccount(path, wantID)
+}
+
+// loadKeystoreAccount unlocks an encrypted wallet keystore, but only when its
+// clear-text public key is the account being asked for.
+//
+// Failures are silent, matching the plaintext reader: this runs over every file
+// in a directory that may hold wallets for other accounts, an attestor keystore
+// (which DecryptKeystore refuses by key type rather than mangling), and files
+// that are not wallets at all. A missing passphrase is the one failure worth
+// naming, and it is named where it becomes true - a keystore whose id matched
+// and could not be opened.
+func loadKeystoreAccount(path, wantID string) (*token.Account, bool) {
+	if wantID == "" {
+		return nil, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	var ks token.Keystore
+	if err := json.Unmarshal(data, &ks); err != nil {
+		return nil, false
+	}
+	// Matched in the clear, before scrypt runs. An account id IS the hex public
+	// key, so either field answers it; both are checked because a keystore
+	// written by an older build may carry only one.
+	if !strings.EqualFold(ks.PublicKey, wantID) && !strings.EqualFold(ks.AccountID, wantID) {
+		return nil, false
+	}
+
+	pass := os.Getenv(WalletPassphraseEnv)
+	if pass == "" {
+		fmt.Printf("Inference: %s holds the wallet for %s, but %s is empty, so this node "+
+			"cannot sign for that buyer. The passphrase is read from the environment so it "+
+			"is not in the config file or its backups.\n", path, wantID, WalletPassphraseEnv)
+		return nil, false
+	}
+	acct, err := token.DecryptKeystore(&ks, pass)
+	if err != nil {
+		fmt.Printf("Inference: %s holds the wallet for %s but did not unlock: %v\n",
+			path, wantID, err)
+		return nil, false
+	}
+	return acct, true
+}
+
+// loadWalletAccount reads a PLAINTEXT wallet file and reconstructs its
+// token.Account, reporting whether it parsed into a well-formed ed25519 keypair.
 func loadWalletAccount(path string) (*token.Account, bool) {
 	data, err := os.ReadFile(path)
 	if err != nil {

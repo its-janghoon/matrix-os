@@ -15,6 +15,7 @@
         "FulfillInferenceJob",
         "GetInferenceJob",
         "RunInferenceJob",
+        "RunInferenceJobProgress",
         "SettleInferenceJob",
         "StreamInferenceJob",
         "SubmitInferenceJob"

@@ -94,6 +94,14 @@ type PaymentRequest struct {
 	// ExpiresAt is when an unsigned request stops being settleable and its
 	// reservation is released.
 	ExpiresAt time.Time
+	// StreamedOneShot is true when progress was asked for but the provider's
+	// backend could not stream, so the whole run arrived at once and the only
+	// progress message was the one it could send.
+	//
+	// Reported rather than hidden: a client that showed a lively counter here
+	// would be inventing one, and the honest thing to tell a buyer who waited in
+	// silence is that the wait was opaque, not that something was watching it.
+	StreamedOneShot bool
 }
 
 // Transaction returns the unsigned token.Transaction this request describes.
@@ -122,17 +130,85 @@ func (s *Service) RunUnsettled(
 	req InferenceRequest,
 	unitsEstimate uint64,
 ) (*PaymentRequest, error) {
+	return s.RunUnsettledProgress(ctx, buyer, providerID, req, unitsEstimate, nil)
+}
+
+// ProgressFunc receives the provider's running count of completion tokens while
+// a client-signed job is in flight. It receives NO text.
+//
+// Returning an error aborts the run, which is how a transport reports that its
+// client hung up: the provider then stops generating tokens nobody will read.
+type ProgressFunc func(tokensSoFar uint64) error
+
+// RunUnsettledProgress is RunUnsettled with the wait made visible.
+//
+// The silence it removes is real: PrepareSettlement reserves, runs the whole
+// model, and computes the charge before it returns anything at all, so a
+// reasoning model spending a minute on its working looks exactly like a node
+// that has died. Nothing else about the path changes - no text leaves, and the
+// completion is still withheld until the buyer signs.
+func (s *Service) RunUnsettledProgress(
+	ctx context.Context,
+	buyer, providerID string,
+	req InferenceRequest,
+	unitsEstimate uint64,
+	onProgress ProgressFunc,
+) (*PaymentRequest, error) {
 	job, err := s.SubmitInferenceJob(buyer, providerID, req, unitsEstimate)
 	if err != nil {
 		return nil, err
 	}
-	return s.PrepareSettlement(ctx, job.ID)
+	return s.PrepareSettlementProgress(ctx, job.ID, onProgress)
 }
 
 // PrepareSettlement runs a PENDING job's inference and parks it awaiting
 // payment. It is separate from RunUnsettled so a caller that already submitted a
 // job (through the existing RPC) can move it onto the client-signed path.
 func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*PaymentRequest, error) {
+	return s.PrepareSettlementProgress(ctx, jobID, nil)
+}
+
+// runReportingProgress runs the backend, reporting how far it has got when a
+// caller asked to be told, and reports whether that progress was real.
+//
+// THE DELTAS ARE COUNTED AND DISCARDED. Forwarding one would hand over the
+// completion this whole path exists to withhold, and it would do it before the
+// buyer had signed anything - so the text goes nowhere and only its size
+// travels. With no callback this is the plain one-shot Infer, unchanged.
+func runReportingProgress(
+	ctx context.Context,
+	backend Backend,
+	req InferenceRequest,
+	onProgress ProgressFunc,
+) (InferenceResponse, bool, error) {
+	if onProgress == nil {
+		resp, err := backend.Infer(ctx, req)
+		return resp, false, err
+	}
+
+	var produced uint64
+	result, err := streamBackend(ctx, backend, req, func(delta string) error {
+		// Summed per delta rather than measured over the whole text, because the
+		// whole text is exactly what is not available yet. It is a progress
+		// signal and never the bill: what settles is computed below from the
+		// usage the backend reports, clamped twice.
+		produced += uint64(countTokens(delta))
+		return onProgress(produced)
+	})
+	if err != nil {
+		return InferenceResponse{}, false, err
+	}
+	return result.Response, result.StreamedOneShot, nil
+}
+
+// PrepareSettlementProgress is PrepareSettlement with a progress signal. A nil
+// onProgress is the plain one-shot run, so there is a single implementation
+// rather than two that can disagree about the charge.
+func (s *Service) PrepareSettlementProgress(
+	ctx context.Context,
+	jobID string,
+	onProgress ProgressFunc,
+) (*PaymentRequest, error) {
 	s.mu.Lock()
 	job, ok := s.jobs[jobID]
 	if !ok {
@@ -154,7 +230,7 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 		s.failJob(jobID)
 		return nil, fmt.Errorf("%w: %v", ErrNoBackend, err)
 	}
-	resp, err := backend.Infer(ctx, request)
+	resp, oneShot, err := runReportingProgress(ctx, backend, request, onProgress)
 	if err != nil {
 		s.failJob(jobID)
 		return nil, fmt.Errorf("inference: backend for provider %q failed: %w", provider, err)
@@ -206,6 +282,8 @@ func (s *Service) PrepareSettlement(ctx context.Context, jobID string) (*Payment
 		Usage:     resp.Usage,
 		Model:     resp.Model,
 		ExpiresAt: now.Add(s.unpaidTTL()),
+
+		StreamedOneShot: oneShot,
 	}
 	// The completion is held on the job and deliberately not in the payment
 	// request: the buyer gets it from SettleSigned, after paying.
