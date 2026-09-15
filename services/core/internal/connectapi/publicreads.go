@@ -51,15 +51,23 @@ func isReadMethod(method string) bool {
 //	                      free against someone else's account. The node ties the
 //	                      two settings together so it cannot be opened without
 //	                      the authorization being required.
+//	RunInferenceJobProgress
+//	                      the same run and the same authorization, checked by the
+//	                      same code, differing only in reporting how far it has
+//	                      got. Leaving it out would open the run and close the
+//	                      one that says it is alive, so a browser - the caller
+//	                      this list exists for - would be back to staring at a
+//	                      minute of silence.
 //
 // Nothing else belongs here. FundAccount moves money from the reward pool on the
 // operator's authority alone, RegisterProvider and SubmitJob commit a provider's
 // capacity, and CompleteJob and CancelJob decide a job's outcome - none of them
 // carries a signature that could stand in for a credential.
 var signatureAuthorisedWrites = map[string]struct{}{
-	"SubmitSignedTransfer": {},
-	"SettleInferenceJob":   {},
-	"RunInferenceJob":      {},
+	"SubmitSignedTransfer":    {},
+	"SettleInferenceJob":      {},
+	"RunInferenceJob":         {},
+	"RunInferenceJobProgress": {},
 }
 
 // isSignatureAuthorisedWrite reports whether a method's authority is a client

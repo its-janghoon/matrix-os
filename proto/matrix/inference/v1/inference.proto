@@ -328,6 +328,43 @@ message StreamInferenceJobResponse {
     bool streamed_one_shot = 4;
 }
 
+// RunInferenceJobProgressRequest asks for a client-signed run with its progress
+// made visible.
+message RunInferenceJobProgressRequest {
+    // The run to perform, identical to RunInferenceJob's input.
+    //
+    // Carried rather than copied. Streaming progress changes how the answer is
+    // delivered and never what is asked for, so a second list of the same eight
+    // fields would be two things that must stay in step - and the next field
+    // added to one of them is the defect.
+    RunInferenceJobRequest run = 1;
+}
+
+// RunInferenceJobProgressResponse is one message of a client-signed run in
+// flight. Every message reports progress; the last one carries the payment.
+message RunInferenceJobProgressResponse {
+    // The job ID, on every message so a client can correlate from the first one
+    // rather than waiting for the end.
+    string job_id = 1;
+    // Completion tokens the provider has produced so far.
+    //
+    // A PROGRESS SIGNAL AND NOT A BILL. It is counted from the deltas this node
+    // received, which is an approximation of somebody else's tokeniser, and it
+    // is deliberately not what settles: the charge is in the payment request
+    // below, clamped to the reservation and to what the text can honestly have
+    // cost. A client that displayed this as an amount owed would be showing a
+    // number nothing is bound to.
+    uint64 tokens_so_far = 2;
+    // Set on the final message only: the payment to sign, exactly as
+    // RunInferenceJob returns it.
+    RunInferenceJobResponse result = 3;
+    // Set on the final message only. True when the provider's backend could not
+    // stream, so the whole run arrived at once and every earlier message was
+    // the one frame it could send. Reported so a client can say the wait was
+    // opaque rather than imply it was watching something.
+    bool streamed_one_shot = 4;
+}
+
 // GetInferenceJobRequest looks up a single inference job by ID.
 message GetInferenceJobRequest {
     // Inference job ID to fetch.
@@ -387,6 +424,21 @@ service InferenceService {
     // generating tokens nobody will read; the job is then failed and its
     // reservation released rather than billed.
     rpc StreamInferenceJob(StreamInferenceJobRequest) returns (stream StreamInferenceJobResponse) {}
+
+    // RunInferenceJobProgress is RunInferenceJob with the wait made visible.
+    // Input: the same request. Output: a stream whose messages report how far
+    // the work has got, the last of which carries the payment to sign. Side
+    // effects: identical to RunInferenceJob - reserves capacity, checks
+    // affordability, runs the model, moves no token.
+    //
+    // It carries NO completion text, and that is the point rather than an
+    // omission. On this path the node withholds the completion until the buyer
+    // signs, and withholding is the only enforcement there because the provider
+    // has already done the work. So what streams is the SHAPE of the work and
+    // not its product: a reasoning model can spend a minute before its first
+    // visible word, and a caller staring at silence cannot tell that from a
+    // node that has died.
+    rpc RunInferenceJobProgress(RunInferenceJobProgressRequest) returns (stream RunInferenceJobProgressResponse) {}
 
     // SettleInferenceJob submits the buyer's signed transfer for a job awaiting
     // payment and returns the completion. Input: the job ID and the signed

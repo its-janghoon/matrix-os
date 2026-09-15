@@ -10,6 +10,8 @@ import (
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/ecirlabs/matrix-core/internal/inference"
 	"github.com/ecirlabs/matrix-core/internal/token"
@@ -67,6 +69,7 @@ func newInferenceSubmitCommand(opts *globalOptions, inferenceAddr *string) *cobr
 		fulfill      bool
 		clientSigned bool
 		walletPath   string
+		progress     bool
 	)
 	cmd := &cobra.Command{
 		Use:   "submit",
@@ -105,7 +108,8 @@ make its operator a custodian of your balance.`,
 
 			if clientSigned {
 				job, err := runClientSigned(ctx, ic, *inferenceAddr, clientSignedInput{
-					buyer: buyer, provider: provider, model: model, prompt: prompt,
+					progress: progress,
+					buyer:    buyer, provider: provider, model: model, prompt: prompt,
 					units: units, walletPath: walletPath,
 				})
 				if err != nil {
@@ -144,6 +148,8 @@ make its operator a custodian of your balance.`,
 	cmd.Flags().StringVar(&model, "model", "", "optional model identifier")
 	cmd.Flags().Uint64Var(&units, "units", 0, "upfront compute units to reserve (0 defaults to 1)")
 	cmd.Flags().BoolVar(&fulfill, "fulfill", true, "run and settle the job immediately after reserving it")
+	cmd.Flags().BoolVar(&progress, "progress", true,
+		"report how far the run has got while it works (client-signed only; no completion text travels)")
 	cmd.Flags().BoolVar(&clientSigned, "client-signed", false,
 		"pay with the local wallet's key instead of letting the node sign for you")
 	cmd.Flags().StringVar(&walletPath, "wallet", "",
@@ -157,6 +163,11 @@ type clientSignedInput struct {
 	buyer, provider, model, prompt string
 	units                          uint64
 	walletPath                     string
+	// progress asks the node to report how far the run has got while it works.
+	// No completion text comes back on that stream - the node withholds it until
+	// the payment is signed - so this changes what the wait LOOKS like and
+	// nothing about what is delivered or charged.
+	progress bool
 }
 
 // runClientSigned drives the path where the node holds no key: run, sign the
@@ -207,7 +218,7 @@ func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in cli
 		return nil, fmt.Errorf("sign the run authorization: %w", err)
 	}
 
-	runResp, err := ic.inference.RunInferenceJob(ctx, &inferencev1.RunInferenceJobRequest{
+	run := &inferencev1.RunInferenceJobRequest{
 		Buyer:         in.buyer,
 		Provider:      in.provider,
 		Model:         in.model,
@@ -218,13 +229,11 @@ func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in cli
 			Timestamp: auth.Timestamp,
 			Signature: auth.Signature,
 		},
-	})
-	if err != nil {
-		return nil, mapErr(addr, err)
 	}
-	pay := runResp.GetPayment()
-	if pay == nil {
-		return nil, fmt.Errorf("the node ran the job but returned no payment request")
+
+	pay, err := runShowingProgress(ctx, ic, addr, run, in.progress)
+	if err != nil {
+		return nil, err
 	}
 
 	// Sign exactly what was invoiced. Any drift in these fields is refused by the
@@ -256,6 +265,87 @@ func runClientSigned(ctx context.Context, ic *inferenceConn, addr string, in cli
 		return nil, mapErr(addr, err)
 	}
 	return settled.GetJob(), nil
+}
+
+// runShowingProgress performs the run, reporting how far it has got when asked.
+//
+// THE WAIT IS THE PROBLEM IT SOLVES, and the wait is real: the node reserves
+// capacity, runs the whole model, and computes the charge before it returns
+// anything at all. A reasoning model can spend a minute on working nobody is
+// allowed to see yet, and from here that is indistinguishable from a node that
+// has died - so the honest thing is to say how far it has got.
+//
+// No completion text arrives on this stream, by construction rather than by
+// omission: the node withholds it until the payment is signed, and that
+// withholding is the only enforcement on this path.
+//
+// Falling back is deliberate. A node too old to serve the progress stream still
+// serves the plain run, and a buyer should get their answer from it rather than
+// an error about a nicety.
+func runShowingProgress(
+	ctx context.Context,
+	ic *inferenceConn,
+	addr string,
+	run *inferencev1.RunInferenceJobRequest,
+	show bool,
+) (*inferencev1.PaymentRequest, error) {
+	if show {
+		pay, err := streamRunProgress(ctx, ic, run)
+		if err == nil {
+			return pay, nil
+		}
+		if status.Code(err) != codes.Unimplemented {
+			return nil, mapErr(addr, err)
+		}
+		fmt.Fprintln(os.Stderr, "  (this node does not report progress; waiting)")
+	}
+
+	runResp, err := ic.inference.RunInferenceJob(ctx, run)
+	if err != nil {
+		return nil, mapErr(addr, err)
+	}
+	pay := runResp.GetPayment()
+	if pay == nil {
+		return nil, fmt.Errorf("the node ran the job but returned no payment request")
+	}
+	return pay, nil
+}
+
+// streamRunProgress consumes the progress stream, redrawing one line, and
+// returns the payment the final message carries.
+func streamRunProgress(
+	ctx context.Context,
+	ic *inferenceConn,
+	run *inferencev1.RunInferenceJobRequest,
+) (*inferencev1.PaymentRequest, error) {
+	stream, err := ic.inference.RunInferenceJobProgress(ctx,
+		&inferencev1.RunInferenceJobProgressRequest{Run: run})
+	if err != nil {
+		return nil, err
+	}
+
+	// Progress goes to stderr, so piping stdout to a file still gets exactly the
+	// job and nothing else.
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			return nil, err
+		}
+		if result := msg.GetResult(); result != nil {
+			if msg.GetStreamedOneShot() {
+				fmt.Fprintf(os.Stderr, "\r  this provider cannot report progress, so the wait was opaque\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "\r  %d tokens produced\n", msg.GetTokensSoFar())
+			}
+			pay := result.GetPayment()
+			if pay == nil {
+				return nil, fmt.Errorf("the node ran the job but returned no payment request")
+			}
+			return pay, nil
+		}
+		// \r and no newline: one line that counts up rather than a wall of them.
+		fmt.Fprintf(os.Stderr, "\r  %d tokens...", msg.GetTokensSoFar())
+	}
 }
 
 func newInferenceGetCommand(opts *globalOptions, inferenceAddr *string) *cobra.Command {

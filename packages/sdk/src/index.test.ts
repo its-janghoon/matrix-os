@@ -357,6 +357,7 @@ describe('coverage against the served surface', () => {
       'FulfillInferenceJob',
       'GetInferenceJob',
       'RunInferenceJob',
+      'RunInferenceJobProgress',
       'SettleInferenceJob',
       'StreamInferenceJob',
     ],

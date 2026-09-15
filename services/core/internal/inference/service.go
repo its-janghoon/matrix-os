@@ -557,5 +557,27 @@ func (s *Service) GetJob(jobID string) (*InferenceJob, bool) {
 		return nil, false
 	}
 	cp := job.snapshot()
+	// WITHHELD HERE, not by each caller, and that placement is the fix.
+	//
+	// It used to be each caller. RunInferenceJob blanked the completion by hand;
+	// GetInferenceJob did not - and a Get is PUBLIC when connect.public_reads is
+	// on, which a self-custody page requires because a browser cannot hold an
+	// API key. So a buyer could run a job, take the id it was handed back, ask
+	// for the job instead of signing for it, and read the completion it never
+	// paid for. Withholding is the whole of the enforcement on the client-signed
+	// path, because the provider has already done the work by then.
+	//
+	// It also survived a field added later. When a reasoning model's working
+	// became part of a job, the caller that stripped Completion knew nothing of
+	// Reasoning, so the working went out before payment - most of what is billed,
+	// and for some models the answer worked out in full. A strip repeated per
+	// caller is a list that grows wrong; one at the source cannot.
+	//
+	// Internal callers read s.jobs directly and are unaffected: settling needs
+	// the text to compute the digest it charges for.
+	if cp.Status == InferenceJobAwaitingPayment {
+		cp.Completion = ""
+		cp.Reasoning = ""
+	}
 	return &cp, true
 }

@@ -547,6 +547,31 @@ export interface InferenceJob {
   updatedAt: string;
 }
 
+/**
+ * One frame of a client-signed run in flight.
+ *
+ * `payment` and `job` appear on the final frame only. Until then a frame says
+ * how far the work has got and nothing else: the completion is withheld until
+ * the payment is signed, so the job on the final frame carries no text either.
+ */
+export interface RunProgress {
+  jobId: string;
+  /**
+   * Completion tokens produced so far.
+   *
+   * A PROGRESS SIGNAL AND NOT A BILL. It is counted from what the serving node
+   * received, which approximates somebody else's tokeniser, and nothing is bound
+   * to it. What settles is `payment.amount` on the final frame.
+   */
+  tokensSoFar: bigint;
+  /** True on the final frame when the provider could not stream at all. */
+  streamedOneShot: boolean;
+  /** The payment to sign. Final frame only. */
+  payment?: PaymentRequest;
+  /** The run's job, without its completion. Final frame only. */
+  job?: InferenceJob;
+}
+
 /** A deployed WebAssembly agent and the outcome of its most recent run. */
 export interface Agent {
   id: string;
@@ -1474,6 +1499,80 @@ export class MatrixClient {
         jobId: str(raw.jobId),
         streamedOneShot: raw.streamedOneShot === true,
         ...(hasJob ? { job: decodeInferenceJob(record(raw.job)) } : {}),
+      };
+    }
+  }
+
+  /**
+   * Runs an inference on the client-signed path, reporting how far it has got,
+   * and ends with the payment to sign.
+   *
+   * WHY THIS EXISTS. `runInferenceJob` returns nothing until the node has
+   * reserved capacity, run the whole model and computed the charge. A reasoning
+   * model can spend a minute on working nobody is allowed to see yet, and from
+   * a caller's side that is indistinguishable from a node that has died.
+   *
+   * NO COMPLETION TEXT ARRIVES HERE, and that is the design rather than a gap:
+   * the node withholds the completion until the payment is signed, because on
+   * this path the provider has already done the work and withholding it is the
+   * only enforcement there is. What streams is the size of the work, not the
+   * work. Settle with `settleInferenceJob` to receive it.
+   *
+   * ```ts
+   * for await (const frame of client.runInferenceJobProgress({ ... })) {
+   *   if (frame.payment) sign(frame.payment);
+   *   else console.log(`${frame.tokensSoFar} tokens...`);
+   * }
+   * ```
+   *
+   * `streamedOneShot` on the final frame means the provider's backend could not
+   * stream, so the wait was opaque and every earlier frame was the one it could
+   * send. Reported so a caller can say that rather than imply it was watching.
+   */
+  async *runInferenceJobProgress(input: {
+    buyer: string;
+    provider: string;
+    model: string;
+    prompt?: string;
+    messages?: ChatMessage[];
+    maxTokens?: number;
+    temperature?: number;
+    unitsEstimate?: bigint | number;
+    authorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
+  }): AsyncGenerator<RunProgress, void, undefined> {
+    const frames = this.callStreaming(INFERENCE, 'RunInferenceJobProgress', {
+      run: {
+        buyer: input.buyer,
+        provider: input.provider,
+        model: input.model,
+        prompt: input.prompt ?? '',
+        messages: input.messages ?? [],
+        maxTokens: input.maxTokens ?? 0,
+        temperature: input.temperature ?? 0,
+        unitsEstimate: String(input.unitsEstimate ?? 0),
+        ...(input.authorization
+          ? {
+              authorization: {
+                publicKey: toBase64(input.authorization.publicKey),
+                timestamp: String(input.authorization.timestamp),
+                signature: toBase64(input.authorization.signature),
+              },
+            }
+          : {}),
+      },
+    });
+    for await (const raw of frames) {
+      const result = raw.result === undefined || raw.result === null ? null : record(raw.result);
+      yield {
+        jobId: str(raw.jobId),
+        tokensSoFar: big(raw.tokensSoFar),
+        streamedOneShot: raw.streamedOneShot === true,
+        ...(result
+          ? {
+              payment: decodePaymentRequest(record(result.payment)),
+              job: decodeInferenceJob(record(result.job)),
+            }
+          : {}),
       };
     }
   }
