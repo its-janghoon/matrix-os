@@ -136,22 +136,8 @@ func (s *Service) RunInferenceJob(ctx context.Context, req *inferencev1.RunInfer
 	}
 	request := runRequestToInternal(req)
 
-	// Verify the buyer's authorization BEFORE anything reserves capacity or runs
-	// a model, so an unauthorized caller costs a provider nothing.
-	if auth := req.GetAuthorization(); auth != nil {
-		if err := s.inf.VerifyRunAuthorization(req.GetBuyer(), request, &inference.RunAuthorization{
-			PublicKey: auth.GetPublicKey(),
-			Provider:  req.GetProvider(),
-			Model:     req.GetModel(),
-			Timestamp: auth.GetTimestamp(),
-			Signature: auth.GetSignature(),
-		}); err != nil {
-			return nil, mapInferenceError(err)
-		}
-	} else if s.requireRunAuth {
-		return nil, status.Error(codes.Unauthenticated,
-			"this node serves RunInferenceJob without an api key, so it requires the buyer's "+
-				"signed authorization: set `authorization` on the request")
+	if err := s.authorizeRun(req, request); err != nil {
+		return nil, err
 	}
 
 	payment, err := s.inf.RunUnsettled(ctx, req.GetBuyer(), req.GetProvider(),
@@ -163,14 +149,98 @@ func (s *Service) RunInferenceJob(ctx context.Context, req *inferencev1.RunInfer
 	if !ok {
 		return nil, status.Errorf(codes.Internal, "inference job %q vanished after running", payment.JobID)
 	}
-	// The completion is withheld until the payment is signed: it is the whole
-	// enforcement, so it is stripped here rather than relied on being absent.
-	withheld := *job
-	withheld.Completion = ""
+	// The completion and the working are withheld by GetJob while the job is
+	// awaiting payment, so there is nothing to strip here. Doing it per caller
+	// is what let GetInferenceJob hand out both, and what let Reasoning slip
+	// past the caller that only knew about Completion.
 	return &inferencev1.RunInferenceJobResponse{
 		Payment: paymentToProto(payment),
-		Job:     jobToProto(&withheld),
+		Job:     jobToProto(job),
 	}, nil
+}
+
+// authorizeRun verifies the buyer's authorization BEFORE anything reserves
+// capacity or runs a model, so an unauthorized caller costs a provider nothing.
+//
+// Shared by both client-signed entry points rather than copied into each. Two
+// transcriptions of an authorization check is one that eventually stops
+// matching, and the half that drifts is the half nobody tested.
+func (s *Service) authorizeRun(req *inferencev1.RunInferenceJobRequest, request inference.InferenceRequest) error {
+	if auth := req.GetAuthorization(); auth != nil {
+		if err := s.inf.VerifyRunAuthorization(req.GetBuyer(), request, &inference.RunAuthorization{
+			PublicKey: auth.GetPublicKey(),
+			Provider:  req.GetProvider(),
+			Model:     req.GetModel(),
+			Timestamp: auth.GetTimestamp(),
+			Signature: auth.GetSignature(),
+		}); err != nil {
+			return mapInferenceError(err)
+		}
+		return nil
+	}
+	if s.requireRunAuth {
+		return status.Error(codes.Unauthenticated,
+			"this node serves RunInferenceJob without an api key, so it requires the buyer's "+
+				"signed authorization: set `authorization` on the request")
+	}
+	return nil
+}
+
+// RunInferenceJobProgress is RunInferenceJob with the wait made visible: the
+// same run, reporting how far it has got, ending with the payment to sign.
+//
+// NO COMPLETION TEXT TRAVELS. The withholding is the only enforcement on this
+// path, so the final job is stripped here exactly as RunInferenceJob strips it,
+// and the messages before it carry a count and nothing else.
+//
+// The job is submitted here rather than inside RunUnsettled so its id is known
+// before the model starts: a client that can correlate from the first message
+// does not have to hold unattributed progress until the end.
+func (s *Service) RunInferenceJobProgress(
+	req *inferencev1.RunInferenceJobProgressRequest,
+	stream grpc.ServerStreamingServer[inferencev1.RunInferenceJobProgressResponse],
+) error {
+	run := req.GetRun()
+	if run == nil {
+		return status.Error(codes.InvalidArgument, "run is required")
+	}
+	request := runRequestToInternal(run)
+	if err := s.authorizeRun(run, request); err != nil {
+		return err
+	}
+
+	job, err := s.inf.SubmitInferenceJob(run.GetBuyer(), run.GetProvider(),
+		request, run.GetUnitsEstimate())
+	if err != nil {
+		return mapInferenceError(err)
+	}
+
+	// Send returns its error into the callback, so a client that hangs up aborts
+	// the run instead of the provider generating tokens nobody will read.
+	onProgress := func(tokensSoFar uint64) error {
+		return stream.Send(&inferencev1.RunInferenceJobProgressResponse{
+			JobId:       job.ID,
+			TokensSoFar: tokensSoFar,
+		})
+	}
+
+	payment, err := s.inf.PrepareSettlementProgress(stream.Context(), job.ID, onProgress)
+	if err != nil {
+		return mapInferenceError(err)
+	}
+	ran, ok := s.inf.GetJob(payment.JobID)
+	if !ok {
+		return status.Errorf(codes.Internal, "inference job %q vanished after running", payment.JobID)
+	}
+
+	return stream.Send(&inferencev1.RunInferenceJobProgressResponse{
+		JobId: job.ID,
+		Result: &inferencev1.RunInferenceJobResponse{
+			Payment: paymentToProto(payment),
+			Job:     jobToProto(ran),
+		},
+		StreamedOneShot: payment.StreamedOneShot,
+	})
 }
 
 // SettleInferenceJob submits the buyer's signed transfer and returns the
