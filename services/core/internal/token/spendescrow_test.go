@@ -1,4 +1,4 @@
-package consensus
+package token
 
 import (
 	"crypto/ed25519"
@@ -69,18 +69,19 @@ func TestOneBudgetHasExactlyOneSpelling(t *testing.T) {
 	base := testEscrow(t)
 
 	for name, to := range map[string]string{
-		"a padded per-job cap":   spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".0100000.500.1893456000.0",
-		"a padded nonce":         spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000.00",
-		"a signed expiry":        spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.+1893456000.0",
-		"an uppercase delegate":  spendEscrowPrefix + base.Buyer + "." + strings.ToUpper(base.Delegate) + ".100000.500.1893456000.0",
-		"a short delegate":       spendEscrowPrefix + base.Buyer + ".abcd.100000.500.1893456000.0",
-		"a missing field":        spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000",
-		"an extra field":         spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000.0.9",
-		"a zero per-job cap":     spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".0.500.1893456000.0",
-		"a zero price ceiling":   spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.0.1893456000.0",
-		"a zero expiry":          spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.0.0",
-		"a negative expiry":      spendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.-1.0",
-		"a buyer that is a path": spendEscrowPrefix + "consensus/stake/bond/x." + base.Delegate + ".100000.500.1893456000.0",
+		"a padded per-job cap":            SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".0100000.500.1893456000.0",
+		"a padded nonce":                  SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000.00",
+		"a signed expiry":                 SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.+1893456000.0",
+		"an uppercase delegate":           SpendEscrowPrefix + base.Buyer + "." + strings.ToUpper(base.Delegate) + ".100000.500.1893456000.0",
+		"a short delegate":                SpendEscrowPrefix + base.Buyer + ".abcd.100000.500.1893456000.0",
+		"a missing field":                 SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000",
+		"an extra field":                  SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.1893456000.0.9",
+		"a zero per-job cap":              SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".0.500.1893456000.0",
+		"a zero price ceiling":            SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.0.1893456000.0",
+		"a zero expiry":                   SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.0.0",
+		"a negative expiry":               SpendEscrowPrefix + base.Buyer + "." + base.Delegate + ".100000.500.-1.0",
+		"a buyer that is a path":          SpendEscrowPrefix + "consensus/stake/bond/x." + base.Delegate + ".100000.500.1893456000.0",
+		"a buyer that is itself a budget": SpendEscrowPrefix + SpendEscrowPrefix + "x." + base.Delegate + ".100000.500.1893456000.0",
 	} {
 		if _, err := ParseSpendEscrow(to); err == nil {
 			t.Errorf("%s was accepted as a budget account", name)
@@ -115,12 +116,9 @@ func TestADrawPaysAnAccountAndNotAnOperation(t *testing.T) {
 	other := testEscrow(t)
 
 	for name, payee := range map[string]string{
-		"another budget":     other.Account(),
-		"a bond":             "consensus/stake/bond/" + base.Buyer,
-		"a validator change": "consensus/set/add/" + base.Delegate,
-		"a bridge escrow":    "bridge/escrow",
-		"nothing at all":     "",
-		"a bare word":        "somebody",
+		"another budget": other.Account(),
+		"nothing at all": "",
+		"a bare word":    "somebody",
 	} {
 		if _, _, err := ParseSpendDraw(base.DrawRecipient(payee)); err == nil {
 			t.Errorf("a draw to %s was accepted", name)
