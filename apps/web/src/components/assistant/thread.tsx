@@ -25,7 +25,7 @@ export function Thread() {
       <ThreadPrimitive.Viewport className='flex-1 space-y-3 overflow-y-auto'>
         <ThreadPrimitive.Empty>
           <p className='rounded-xl border border-gray-800 bg-gray-900/50 p-6 text-sm text-gray-400'>
-            Nothing yet. Each message costs a signature and some {SYMBOL}.
+            Nothing yet. Every message is signed by your own key and paid for in {SYMBOL}.
           </p>
         </ThreadPrimitive.Empty>
 
@@ -129,7 +129,7 @@ function Composer() {
         placeholder={running ? 'waiting for the model...' : 'Say something'}
         rows={1}
         autoFocus
-        submitOnEnter
+        submitMode='enter'
       />
       <ComposerPrimitive.Send
         className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:opacity-40'

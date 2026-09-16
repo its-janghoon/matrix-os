@@ -341,6 +341,12 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
           This is the account that survives: it works anywhere MetaMask is installed, and clearing this site&apos;s
           data does not touch it.
         </p>
+        <p className='mb-3 text-sm text-yellow-200/80'>
+          <strong>Sending costs two confirmations, every message.</strong> One authorises the run before the seller
+          spends GPU time on it; one pays for it once the tokens have been counted, which is the first moment the
+          amount is known. Neither can be dropped while the key is yours - a seller will not work unpaid, and the
+          chain will not move money without your signature on the amount.
+        </p>
         <button
           className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black'
           onClick={async () => {
@@ -370,6 +376,12 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
             <p className='mb-3 text-sm text-gray-400'>
               There is no backup, and there cannot be - a key that could be written down would not be
               non-extractable. Clear this site&apos;s data and the account is gone with whatever it held.
+            </p>
+            <p className='mb-3 text-sm text-gray-300'>
+              <strong>Nothing pops up when you send.</strong> This key signs in the page, so a message costs one
+              Enter and no confirmations. That is the whole difference in feel - and it is the same fact as the
+              risk: a key that signs without asking is a key that signs without asking. Fund it with what you are
+              willing to lose to a cleared browser.
             </p>
             <button
               className='rounded-lg border border-gray-600 px-5 py-2 text-sm font-semibold text-gray-100'
@@ -417,7 +429,39 @@ function Funding({ account }: { account: string }) {
         pool transfer is refused on a multi-validator network, because it is not consensus-ordered and would leave the
         validators disagreeing about the pool.
       </p>
-      <p className='font-mono text-xs text-yellow-100/60'>{account}</p>
+      <CopyableAccount account={account} />
+    </div>
+  );
+}
+
+/**
+ * The account id, with a way to take it that does not involve selecting 64
+ * characters of monospace by hand.
+ *
+ * Funding an account means getting this string somewhere else exactly - into a
+ * wallet's recipient field, or a `matrix wallet transfer --to`. One character
+ * wrong is not a failed transfer, it is a successful transfer to an account
+ * nobody holds the key for.
+ */
+function CopyableAccount({ account }: { account: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <div className='flex flex-wrap items-center gap-3'>
+      <p className='break-all font-mono text-xs text-yellow-100/60'>{account}</p>
+      <button
+        className='shrink-0 text-xs text-yellow-100/80 underline underline-offset-2 hover:text-yellow-100'
+        onClick={() => {
+          // Clipboard access is denied outside a secure context and can be
+          // refused inside one. Saying nothing happened is better than a
+          // "copied" that did not.
+          void navigator.clipboard
+            ?.writeText(account)
+            .then(() => setCopied(true))
+            .catch(() => setCopied(false));
+        }}
+      >
+        {copied ? 'copied' : 'copy'}
+      </button>
     </div>
   );
 }
@@ -430,7 +474,10 @@ function Caveats({ kind }: { kind: Signer['kind'] }) {
         {kind === 'metamask' ? (
           <li>
             Your key is in MetaMask, and this page never sees it. Every signature is EIP-712 typed data, so the
-            prompt shows what you are approving; read it, because approving one is how the money moves.
+            prompt shows what you are approving; read it, because approving one is how the money moves. That is
+            also why a message asks twice: the run is authorised before the work and paid for after it, and the
+            amount does not exist until the tokens are counted. One approval covering a whole session needs a
+            funded escrow the seller can draw on, which is a change to the chain and not to this page.
           </li>
         ) : (
           <li>
