@@ -1,6 +1,14 @@
 # Proposal: one signature that lasts, so holding your own key is not a tax per message
 
-**Status: proposed, not built.** It is a new consensus rule over money, so it is written down and argued before any code.
+**Status: built, not activated.** The rules, the naming, the inference wiring, the
+CLI and the browser flow are all on the branch; nothing is live until a
+`protocol_upgrades` entry names a height, which is
+[its own runbook](../runbooks/budget-activation.md).
+
+What the implementation changed about this document is marked where it happened:
+the price ceiling does less than the first draft claimed, and the terms reach
+consensus through the escrow account's NAME rather than through a new field on
+the transaction.
 
 This is the second half of [`inference-escrow.md`](inference-escrow.md). That proposal makes the answer stream by paying the reservation up front and having consensus refund the difference. It does not reduce how OFTEN a buyer signs, and after using the chat page for ten minutes that is the thing people complain about first.
 
