@@ -231,6 +231,24 @@ type Block struct {
 // ProtocolVersionGenesis is the version a chain starts at.
 const ProtocolVersionGenesis uint32 = 1
 
+// ProtocolVersionSpendBudgets is the version from which a spend budget is a
+// consensus operation rather than an ordinary account name.
+//
+// It needs a version because the rules differ in a way that MOVES MONEY
+// DIFFERENTLY rather than only refusing more. A node without these rules reads
+// "spend/escrow/..." as an ordinary recipient, charges the protocol fee that
+// opening a budget is exempt from, and credits a string as if it were a
+// seller's account - so the two nodes apply the same block and reach different
+// balances. That is exactly the divergence the state root catches after the
+// fact and the version gate prevents in advance: an un-upgraded node refuses to
+// vote at the activation height instead of quietly disagreeing.
+//
+// A chain schedules it with Config.ProtocolUpgrades at a height far enough out
+// for every validator to be running the new binary. It is deliberately NOT the
+// genesis version: bumping that would make every node expect these rules at
+// every height, including the ones already committed.
+const ProtocolVersionSpendBudgets uint32 = 2
+
 // BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
 // the validating node's own clock, in either direction.
 //

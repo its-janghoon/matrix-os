@@ -72,9 +72,12 @@ const DefaultUnpaidJobTTL = 2 * time.Minute
 type PaymentRequest struct {
 	// JobID is the inference job this payment settles.
 	JobID string
-	// From is the buyer's account ID, which must be the signer.
+	// From is the account that must SIGN this settlement. It is the buyer for
+	// an ordinary purchase, and the delegate for one paid out of a budget: the
+	// budget's own name says which key may spend it.
 	From string
-	// To is the provider being paid.
+	// To is where the payment goes: the provider directly, or the draw
+	// recipient that pays the provider out of a budget.
 	To string
 	// Amount is the charge in native MATRIX base units: the billable units the
 	// backend reported, scaled by the provider's price and clamped to the
@@ -276,14 +279,18 @@ func (s *Service) PrepareSettlementProgress(
 			amount, mjob.Price, marketJobID)
 	}
 
-	nonce := s.nextNonceFor(buyer)
+	signer, payTo := invoiceParties(buyer, provider)
+	// The nonce belongs to whoever SIGNS, which under a budget is the delegate
+	// and not the buyer. Deriving it from the buyer would hand the browser a
+	// nonce for an account it holds no key for.
+	nonce := s.nextNonceFor(signer)
 
 	now := time.Now().UTC()
 	s.mu.Lock()
 	pr := &PaymentRequest{
 		JobID:     jobID,
-		From:      buyer,
-		To:        provider,
+		From:      signer,
+		To:        payTo,
 		Amount:    amount,
 		Nonce:     nonce,
 		Timestamp: now.UnixNano(),
@@ -486,4 +493,27 @@ func (s *Service) jobCopy(jobID string) *InferenceJob {
 	}
 	cp := job.snapshot()
 	return &cp
+}
+
+// invoiceParties decides who must sign a settlement and what they pay.
+//
+// For an ordinary buyer both answers are the obvious ones: the buyer signs, and
+// the money goes to the provider.
+//
+// For a BUDGET - an account whose name carries the terms its owner signed once -
+// the signer is the delegate that name authorises and the payment is a draw out
+// of the budget rather than a transfer from it. That is the whole point of the
+// thing: the buyer approves a budget once and the key in their browser settles
+// every message afterwards, inside bounds consensus enforces from the account's
+// own name.
+//
+// Naming the budget as the buyer is how a caller asks for this, and it needs no
+// new field anywhere: a budget IS an account with a balance, so the affordability
+// check, the reservation and the ledger all work on it unchanged.
+func invoiceParties(buyer, provider string) (signer, to string) {
+	terms, err := token.ParseSpendEscrow(buyer)
+	if err != nil {
+		return buyer, provider
+	}
+	return terms.Delegate, terms.DrawRecipient(provider)
 }

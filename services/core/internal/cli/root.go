@@ -116,6 +116,7 @@ Point it at a node with --addr and, if the node runs with ACLs, --api-key.`,
 		newWalletCommand(opts),
 		newStakeCommand(opts),
 		newBridgeCommand(opts),
+		newBudgetCommand(opts),
 	)
 
 	return root

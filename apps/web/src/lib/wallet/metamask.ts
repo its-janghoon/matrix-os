@@ -90,12 +90,51 @@ export async function switchEvmChain(provider: Eip1193Provider, chain: BridgeCha
   if (selected !== chain.id) throw new Error(`wallet remained on chain ${selected}; expected ${chain.id}`);
 }
 
-export async function connectMetamask(): Promise<EvmSigner> {
+/**
+ * Re-open the wallet's account picker for a site that is already connected.
+ *
+ * eth_requestAccounts resolves SILENTLY once a site holds a permission, handing
+ * back whatever account was granted. So a reader who switches account in the
+ * extension and presses Connect again gets the old account back and never sees
+ * a prompt - which reads as the site refusing to let go, with no way out of it
+ * from the page. wallet_requestPermissions is the only thing a page can do to
+ * offer "use a different one", and it is also how a second account gets into
+ * the permitted set in the first place: an account this site was never granted
+ * is invisible to it no matter which one the extension has selected.
+ *
+ * A wallet that does not implement the method falls through to the ordinary
+ * request - refusing to connect at all because the better path is missing would
+ * be worse. A reader who DISMISSES the picker does not fall through: that is an
+ * answer, and silently connecting the old account after they declined to pick
+ * would be the original complaint with an extra click.
+ */
+async function requestAccountChoice(provider: Eip1193Provider): Promise<void> {
+  try {
+    await provider.request({ method: 'wallet_requestPermissions', params: [{ eth_accounts: {} }] });
+  } catch (error) {
+    // 4001 is EIP-1193's "user rejected request".
+    if (errorCode(error) === 4001) throw error;
+  }
+}
+
+export async function connectMetamask(options?: { chooseAccount?: boolean }): Promise<EvmSigner> {
   if (!metamaskAvailable()) throw new Error('no browser wallet is installed on this page');
   const provider = window.ethereum as Eip1193Provider;
+  if (options?.chooseAccount) await requestAccountChoice(provider);
   const accounts = await requestEvmAccounts(provider);
   if (!accounts[0]) throw new Error('the wallet returned no account');
   return new MetamaskSigner(provider, accounts[0]);
+}
+
+/**
+ * Narrows a Signer to the MetaMask one.
+ *
+ * Signer.kind is a literal on a plain interface rather than a discriminated
+ * union, so comparing it narrows the FIELD and not the object. A page that
+ * needs subscribe() or the address needs this.
+ */
+export function isEvmSigner(signer: Signer): signer is EvmSigner {
+  return signer.kind === 'metamask';
 }
 
 export class MetamaskSigner implements EvmSigner {

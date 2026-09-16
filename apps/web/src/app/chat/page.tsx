@@ -2,23 +2,33 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
+import { PAGE_COLUMN } from '@/lib/layout';
 import {
-  chat,
   DEFAULT_ENDPOINT,
   getBalance,
   listModels,
   reportProblem,
   type ModelOffer,
   type SellerChoice,
-  type Settled,
 } from '@/lib/wallet/node';
-import type { Message } from '@/lib/wallet/signing';
-import { checkReceipt, receiptVerdict, type ReceiptCheck } from '@/lib/wallet/receipt';
+import { MatrixRuntimeProvider } from '@/components/assistant/runtime';
+import { Thread } from '@/components/assistant/thread';
 import { browserSigner } from '@/lib/wallet/browserSigner';
-import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
+import {
+  budgetAccount,
+  budgetExpired,
+  budgetSigner,
+  closeBudget,
+  forgetBudget,
+  openBudget,
+  recallBudget,
+  rememberBudget,
+  type Budget,
+} from '@/lib/wallet/budget';
+import { connectMetamask, isEvmSigner, MetamaskSigner, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
 import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
 
@@ -45,21 +55,6 @@ import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/w
  * MADE its claim, not that the claim is true: no signature can tell a buyer that
  * the model named is the model that ran.
  */
-
-interface Turn {
-  role: 'user' | 'assistant';
-  content: string;
-  settled?: Settled;
-  /**
-   * What checking the seller's receipt concluded, run in this page against the
-   * prompt that was actually sent and the answer that came back.
-   *
-   * Checked here rather than shown as a badge from the node, because a receipt
-   * the seller's own node vouches for is not evidence of anything. This page
-   * holds the text and does the arithmetic itself.
-   */
-  receipt?: ReceiptCheck;
-}
 
 const CARD = 'rounded-xl border border-gray-800 bg-gray-900/50 p-6';
 const FIELD =
@@ -94,11 +89,25 @@ function Chat() {
   const [balance, setBalance] = useState<bigint | null>(null);
   const [models, setModels] = useState<ModelOffer[]>([]);
   const [model, setModel] = useState(params.get('model') ?? '');
-  const [draft, setDraft] = useState('');
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const bottom = useRef<HTMLDivElement>(null);
+  // The key that spends a budget. It is the same non-extractable browser key
+  // the page can already generate - held here as a DELEGATE rather than as a
+  // second account, so it never needs funding of its own.
+  const [delegate, setDelegate] = useState<Signer | null>(null);
+  const [budget, setBudget] = useState<Budget | null>(null);
+
+  // Parsed here rather than where it is used, because a half-typed figure is an
+  // ordinary state of a text field and must not throw during a render. An
+  // unreadable value means "no floor", which is what an empty field means too.
+  const minBondUnits = useMemo(() => {
+    const raw = minBond.trim();
+    if (raw === '') return undefined;
+    try {
+      return BigInt(raw);
+    } catch {
+      return undefined;
+    }
+  }, [minBond]);
 
   useEffect(() => {
     // Only the browser key can be picked up automatically. MetaMask needs an
@@ -110,18 +119,65 @@ function Chat() {
       .finally(() => setChecking(false));
   }, []);
 
+  // MetaMask can change account underneath the page, and until this existed it
+  // did so invisibly: the header kept naming the account that connected while
+  // the extension had moved on, so the balance shown, the receipts checked and
+  // the charges settled all belonged to an account the reader was no longer
+  // using. Following the change is the only honest option - a page cannot hold
+  // a wallet to an account, and pretending it did is what made the mismatch
+  // silent.
+  useEffect(() => {
+    if (!signer || !isEvmSigner(signer)) return;
+    return signer.subscribe((change) => {
+      if (change.address === undefined || change.address === signer.address) return;
+      setBalance(null);
+      setProblem('');
+      setSigner(change.address === null ? null : new MetamaskSigner(signer.provider, change.address));
+    });
+  }, [signer]);
+
+  // The delegate is prepared as soon as somebody connects with a wallet,
+  // because it is what a budget NAMES and a budget is opened by a signature -
+  // so the key has to exist before the prompt, not after it.
+  useEffect(() => {
+    if (!signer || signer.kind !== 'metamask' || !walletSupported()) return;
+    let live = true;
+    void loadWallet()
+      .then(async (w) => (w ? browserSigner(w) : browserSigner(await createWallet())))
+      .then((d) => {
+        if (!live) return;
+        setDelegate(d);
+        const remembered = recallBudget(signer.accountId);
+        // A budget whose delegate is not the key this browser holds cannot be
+        // spent from here, and showing it would be showing a balance the page
+        // cannot reach.
+        setBudget(remembered && remembered.delegate === d.accountId ? remembered : null);
+      })
+      .catch(() => {
+        if (live) setDelegate(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [signer]);
+
   // A counter rather than a boolean, so a stale reload cannot clobber a newer
   // one when the endpoint is edited twice in quick succession.
   const [reloads, setReloads] = useState(0);
   const reload = useCallback(() => setReloads((n) => n + 1), []);
 
+  // What a message is actually paid from. With a budget open it is the budget,
+  // not the wallet: showing the wallet's balance would be showing money this
+  // page cannot spend without another prompt.
+  const spendingAccount = budget ? budgetAccount(budget) : (signer?.accountId ?? '');
+
   useEffect(() => {
-    if (!signer) return;
+    if (!signer || spendingAccount === '') return;
     let live = true;
 
     void (async () => {
       try {
-        const [bal, offers] = await Promise.all([getBalance(endpoint, signer.accountId), listModels(endpoint)]);
+        const [bal, offers] = await Promise.all([getBalance(endpoint, spendingAccount), listModels(endpoint)]);
         if (!live) return;
         setProblem('');
         setBalance(bal);
@@ -135,51 +191,14 @@ function Chat() {
     return () => {
       live = false;
     };
-  }, [signer, endpoint, reloads]);
-
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns, busy]);
-
-  const send = async () => {
-    if (!signer || draft.trim() === '' || model === '' || busy) return;
-
-    // The transcript that gets signed is the whole conversation, so the model
-    // sees the context and the signature covers exactly what was sent.
-    const asked = draft.trim();
-    const history: Message[] = [
-      ...turns.map((t) => ({ role: t.role, content: t.content })),
-      { role: 'user' as const, content: asked },
-    ];
-
-    setDraft('');
-    setTurns((prev) => [...prev, { role: 'user', content: asked }]);
-    setBusy(true);
-    setProblem('');
-
-    try {
-      const settled = await chat(endpoint, signer, {
-        model,
-        messages: history,
-        chosen: chosen ?? undefined,
-        minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
-      });
-      const receipt = await checkReceipt(settled, history, signer.accountId);
-      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled, receipt }]);
-      setBalance(await getBalance(endpoint, signer.accountId));
-    } catch (err) {
-      setProblem(reportProblem(err));
-    } finally {
-      setBusy(false);
-    }
-  };
+  }, [signer, spendingAccount, endpoint, reloads]);
 
   if (checking) {
     return (
       <>
         <Navigation />
         <main className='min-h-screen bg-black px-4 pt-24 text-gray-400'>
-          <p className='mx-auto max-w-3xl'>Looking for a wallet in this browser...</p>
+          <p className={PAGE_COLUMN}>Looking for a wallet in this browser...</p>
         </main>
       </>
     );
@@ -189,10 +208,10 @@ function Chat() {
     <>
       <Navigation />
       <main className='min-h-screen bg-black px-4 pb-16 pt-24'>
-        <div className='mx-auto max-w-3xl space-y-6'>
+        <div className={`${PAGE_COLUMN} space-y-6`}>
           <header>
             <h1 className='mb-2 text-3xl font-bold text-white'>Chat, paying with your own key</h1>
-            <p className='text-gray-300'>
+            <p className='max-w-3xl text-gray-300'>
               Your own key signs every message, with MetaMask or with a key this page generates. The node never has
               it, no API key is involved, and nothing you type is stored here.
             </p>
@@ -238,6 +257,26 @@ function Chat() {
                   >
                     refresh
                   </button>
+                  {signer.kind === 'metamask' ? (
+                    <button
+                      className='text-gray-400 underline hover:text-gray-200'
+                      onClick={async () => {
+                        // Disconnecting first and connecting again does NOT do
+                        // this: the wallet already holds a permission for this
+                        // site and hands the same account straight back without
+                        // asking. Only a permission request re-opens the picker.
+                        try {
+                          setSigner(await connectMetamask({ chooseAccount: true }));
+                          setBalance(null);
+                          setProblem('');
+                        } catch (err) {
+                          setProblem(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                    >
+                      use a different account
+                    </button>
+                  ) : null}
                   <button
                     className='text-gray-500 underline hover:text-gray-300'
                     onClick={async () => {
@@ -246,7 +285,6 @@ function Chat() {
                       // is the honest thing for a wallet we do not own.
                       if (signer.kind === 'browser') await forgetWallet();
                       setSigner(null);
-                      setTurns([]);
                       setBalance(null);
                     }}
                   >
@@ -256,6 +294,18 @@ function Chat() {
 
                 {balance === 0n ? <Funding account={signer.accountId} /> : null}
               </section>
+
+              {signer.kind === 'metamask' && delegate ? (
+                <BudgetCard
+                  endpoint={endpoint}
+                  wallet={signer}
+                  delegate={delegate}
+                  budget={budget}
+                  setBudget={setBudget}
+                  onChanged={reload}
+                  setProblem={setProblem}
+                />
+              ) : null}
 
               {problem !== '' ? (
                 <p className='rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200'>{problem}</p>
@@ -290,27 +340,30 @@ function Chat() {
                 {chosen ? null : <AutomaticSeller minBond={minBond} setMinBond={setMinBond} />}
               </section>
 
-              <Transcript turns={turns} busy={busy} bottom={bottom} />
-
-              <section className='flex gap-3'>
-                <input
-                  className={FIELD}
-                  placeholder={busy ? 'waiting for the model...' : 'Say something'}
-                  value={draft}
-                  disabled={busy || models.length === 0}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void send();
-                  }}
-                />
-                <button
-                  className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:opacity-40'
-                  disabled={busy || draft.trim() === '' || models.length === 0}
-                  onClick={() => void send()}
-                >
-                  Send
-                </button>
-              </section>
+              {/*
+                Keyed by the account, so switching wallet starts a new thread
+                rather than carrying the old one over. One account's paid
+                answers above another account's next question would be showing
+                someone else's purchase as theirs - and the next message would
+                sign that transcript.
+              */}
+              <MatrixRuntimeProvider
+                key={spendingAccount}
+                settings={{
+                  endpoint,
+                  // With a budget open, every signature is the browser key's and
+                  // the account named is the budget - which is exactly what the
+                  // node needs to address the invoice to that key. The wallet is
+                  // not asked again.
+                  signer: budget && delegate ? budgetSigner(delegate, budget) : signer,
+                  model,
+                  chosen: chosen ?? undefined,
+                  minBond: minBondUnits,
+                }}
+                onSettled={reload}
+              >
+                <Thread />
+              </MatrixRuntimeProvider>
 
               <Caveats kind={signer.kind} />
             </>
@@ -350,6 +403,12 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
           This is the account that survives: it works anywhere MetaMask is installed, and clearing this site&apos;s
           data does not touch it.
         </p>
+        <p className='mb-3 text-sm text-yellow-200/80'>
+          <strong>Sending costs two confirmations, every message.</strong> One authorises the run before the seller
+          spends GPU time on it; one pays for it once the tokens have been counted, which is the first moment the
+          amount is known. Neither can be dropped while the key is yours - a seller will not work unpaid, and the
+          chain will not move money without your signature on the amount.
+        </p>
         <button
           className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black'
           onClick={async () => {
@@ -358,7 +417,7 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
               return;
             }
             try {
-              onReady(await connectMetamask());
+              onReady(await connectMetamask({ chooseAccount: true }));
             } catch (err) {
               setProblem(err instanceof Error ? err.message : String(err));
             }
@@ -379,6 +438,12 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
             <p className='mb-3 text-sm text-gray-400'>
               There is no backup, and there cannot be - a key that could be written down would not be
               non-extractable. Clear this site&apos;s data and the account is gone with whatever it held.
+            </p>
+            <p className='mb-3 text-sm text-gray-300'>
+              <strong>Nothing pops up when you send.</strong> This key signs in the page, so a message costs one
+              Enter and no confirmations. That is the whole difference in feel - and it is the same fact as the
+              risk: a key that signs without asking is a key that signs without asking. Fund it with what you are
+              willing to lose to a cleared browser.
             </p>
             <button
               className='rounded-lg border border-gray-600 px-5 py-2 text-sm font-semibold text-gray-100'
@@ -426,75 +491,183 @@ function Funding({ account }: { account: string }) {
         pool transfer is refused on a multi-validator network, because it is not consensus-ordered and would leave the
         validators disagreeing about the pool.
       </p>
-      <p className='font-mono text-xs text-yellow-100/60'>{account}</p>
+      <CopyableAccount account={account} />
     </div>
   );
 }
 
-function Transcript({
-  turns,
-  busy,
-  bottom,
-}: {
-  turns: Turn[];
-  busy: boolean;
-  bottom: React.RefObject<HTMLDivElement | null>;
-}) {
+/**
+ * The account id, with a way to take it that does not involve selecting 64
+ * characters of monospace by hand.
+ *
+ * Funding an account means getting this string somewhere else exactly - into a
+ * wallet's recipient field, or a `matrix wallet transfer --to`. One character
+ * wrong is not a failed transfer, it is a successful transfer to an account
+ * nobody holds the key for.
+ */
+function CopyableAccount({ account }: { account: string }) {
+  const [copied, setCopied] = useState(false);
   return (
-    <section className='space-y-3'>
-      {turns.length === 0 && !busy ? (
-        <p className={`${CARD} text-sm text-gray-400`}>Nothing yet. Each message costs a signature and some MATRIX.</p>
-      ) : null}
-      {turns.map((turn, i) => (
-        <div
-          key={i}
-          className={`rounded-xl border p-4 ${
-            turn.role === 'user' ? 'border-gray-800 bg-gray-900/40' : 'border-gray-700 bg-gray-900/70'
-          }`}
+    <div className='flex flex-wrap items-center gap-3'>
+      <p className='break-all font-mono text-xs text-yellow-100/60'>{account}</p>
+      <button
+        className='shrink-0 text-xs text-yellow-100/80 underline underline-offset-2 hover:text-yellow-100'
+        onClick={() => {
+          // Clipboard access is denied outside a secure context and can be
+          // refused inside one. Saying nothing happened is better than a
+          // "copied" that did not.
+          void navigator.clipboard
+            ?.writeText(account)
+            .then(() => setCopied(true))
+            .catch(() => setCopied(false));
+        }}
+      >
+        {copied ? 'copied' : 'copy'}
+      </button>
+    </div>
+  );
+}
+
+/**
+ * One wallet signature, and then the page stops asking.
+ *
+ * The budget is an account whose NAME carries what the wallet agreed to: which
+ * key may spend it, the most one message may cost, the price ceiling, and when
+ * it dies. Depositing into it is signing those terms, because a transfer signs
+ * its recipient - which is why one prompt is the whole cost.
+ *
+ * What is deliberately loud here is the pair of numbers that are the only
+ * protection left once per-message approval is gone: the amount and the expiry.
+ * Everything else about the design is a detail; those two are what a reader is
+ * actually deciding.
+ */
+function BudgetCard({
+  endpoint,
+  wallet,
+  delegate,
+  budget,
+  setBudget,
+  onChanged,
+  setProblem,
+}: {
+  endpoint: string;
+  wallet: Signer;
+  delegate: Signer;
+  budget: Budget | null;
+  setBudget: (b: Budget | null) => void;
+  onChanged: () => void;
+  setProblem: (s: string) => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [hours, setHours] = useState('24');
+  const [busy, setBusy] = useState(false);
+
+  if (budget) {
+    const dead = budgetExpired(budget);
+    return (
+      <section className={CARD}>
+        <p className='text-sm text-gray-400'>
+          {dead
+            ? 'This budget has expired. Nothing more can be spent from it; close it to get the rest back.'
+            : 'A budget is open. Messages are paid from it and your wallet is not asked again.'}
+        </p>
+        <p className='mt-2 text-sm text-gray-400'>
+          expires <span className='text-gray-100'>{new Date(Number(budget.expiry) * 1000).toLocaleString()}</span>
+        </p>
+        <p className='mt-3 break-all font-mono text-xs text-gray-500'>{budgetAccount(budget)}</p>
+        <p className='mt-2 text-xs text-gray-500'>
+          Keep that line if you keep anything. It is the budget&apos;s name, and closing it means naming it - clearing
+          this site&apos;s data loses the copy above, though the deposit is still in your own transaction history.
+        </p>
+        <button
+          className='mt-4 rounded-lg border border-gray-600 px-4 py-2 text-sm font-semibold text-gray-100 disabled:opacity-40'
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setProblem('');
+            try {
+              await closeBudget(endpoint, wallet, budget);
+              forgetBudget();
+              setBudget(null);
+              onChanged();
+            } catch (err) {
+              setProblem(reportProblem(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
         >
-          <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
-          <p className='whitespace-pre-wrap text-gray-100'>{turn.content}</p>
-          {/*
-            A reasoning model's working, shown because it was BILLED. Most of a
-            reasoning model's tokens go here, they settle, and the receipt's
-            digest covers them - so withholding it would be charging for text
-            the buyer is not allowed to read, and would leave them unable to
-            check the receipt at all. Collapsed because it is long and it is not
-            the answer; present because it is paid for.
-          */}
-          {turn.settled?.reasoning ? (
-            <details className='mt-3 rounded-lg border border-gray-800 bg-black/40 p-3'>
-              <summary className='cursor-pointer text-xs uppercase tracking-wide text-gray-500'>
-                reasoning - you paid for these tokens
-              </summary>
-              <p className='mt-2 whitespace-pre-wrap text-sm text-gray-400'>{turn.settled.reasoning}</p>
-            </details>
-          ) : null}
-          {turn.settled ? (
-            <div className='mt-3 space-y-1 font-mono text-xs'>
-              <p className='text-gray-500'>
-                paid {turn.settled.units.toString()} base units to {turn.settled.provider} -{' '}
-                {turn.settled.promptTokens} prompt + {turn.settled.completionTokens} completion tokens
-              </p>
-              <p
-                className={
-                  turn.receipt && !turn.receipt.problem && turn.receipt.boundToExchange !== false
-                    ? 'text-emerald-500/80'
-                    : 'text-amber-500/80'
-                }
-              >
-                {receiptVerdict(turn.receipt)}
-              </p>
-            </div>
-          ) : null}
-        </div>
-      ))}
-      {busy ? (
-        <div className='rounded-xl border border-gray-800 bg-gray-900/40 p-4 text-sm text-gray-400'>
-          Signing the run, waiting for the model, then signing the payment...
-        </div>
-      ) : null}
-      <div ref={bottom} />
+          {busy ? 'closing...' : 'close and take back what is left'}
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className={CARD}>
+      <h2 className='mb-2 text-lg font-semibold text-white'>Approve a budget once</h2>
+      <p className='mb-4 text-sm text-gray-400'>
+        Your wallet signs one transfer into a budget, and the key in this browser spends it after that - no prompt per
+        message. It can only pay sellers for inference, and only until the budget runs out or expires.{' '}
+        <strong className='text-gray-200'>Those two limits are the whole protection</strong>, so put in what you are
+        willing to have spent without being asked again.
+      </p>
+      <div className='flex flex-wrap gap-3'>
+        <input
+          className={`${FIELD} max-w-xs`}
+          placeholder='base units to put in'
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          inputMode='numeric'
+          spellCheck={false}
+        />
+        <input
+          className={`${FIELD} max-w-[8rem]`}
+          placeholder='hours'
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          inputMode='numeric'
+          spellCheck={false}
+        />
+        <button
+          className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:opacity-40'
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setProblem('');
+            try {
+              // Parsed at the click and not during a render: a half-typed
+              // figure is an ordinary state of a text field.
+              const units = BigInt(amount.trim());
+              const ttl = Math.round(Number(hours.trim()) * 3600);
+              if (!Number.isFinite(ttl) || ttl <= 0) throw new Error('give the budget a life in hours');
+              const opened = await openBudget({
+                endpoint,
+                wallet,
+                delegate: delegate.accountId,
+                amount: units,
+                // A per-message cap of a tenth keeps one runaway job from
+                // taking the lot, and is a number a reader does not have to
+                // think about to be protected by.
+                perJobCap: units / 10n > 0n ? units / 10n : units,
+                // Ten times the going rate: a ceiling that refuses a seller
+                // charging something absurd, without refusing an ordinary one.
+                maxPricePerUnit: 10_000n,
+                ttlSeconds: ttl,
+              });
+              rememberBudget(opened);
+              setBudget(opened);
+              onChanged();
+            } catch (err) {
+              setProblem(reportProblem(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'approving...' : 'Approve'}
+        </button>
+      </div>
     </section>
   );
 }
@@ -507,7 +680,10 @@ function Caveats({ kind }: { kind: Signer['kind'] }) {
         {kind === 'metamask' ? (
           <li>
             Your key is in MetaMask, and this page never sees it. Every signature is EIP-712 typed data, so the
-            prompt shows what you are approving; read it, because approving one is how the money moves.
+            prompt shows what you are approving; read it, because approving one is how the money moves. That is
+            also why a message asks twice: the run is authorised before the work and paid for after it, and the
+            amount does not exist until the tokens are counted. One approval covering a whole session needs a
+            funded escrow the seller can draw on, which is a change to the chain and not to this page.
           </li>
         ) : (
           <li>

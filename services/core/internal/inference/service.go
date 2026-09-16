@@ -23,6 +23,11 @@ var (
 	// capped at the reservation, so without this the provider would do the
 	// remainder of the work unpaid.
 	ErrUnderReserved = errors.New("inference: the request costs more than was reserved")
+	// ErrPriceAboveCeiling is returned when a budget names a price ceiling and
+	// the chosen provider is dearer. It is the buyer's own bound, checked by
+	// the node acting for them, because consensus cannot: a draw is an amount
+	// with no unit count in it to divide by.
+	ErrPriceAboveCeiling = errors.New("inference: the seller charges more than this budget allows")
 )
 
 // Settler is the consensus-backed settlement dependency the inference Service
@@ -312,6 +317,16 @@ func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequ
 	if err != nil {
 		return nil, err
 	}
+	// A budget carries the buyer's price ceiling, and this is the one moment
+	// both numbers are in the same place. Consensus cannot check it - a draw is
+	// an amount with no unit count in it to divide by - so it is checked here,
+	// by the node acting for the buyer. That bounds an honest purchase against
+	// an expensive market; what bounds a stolen delegate key is the budget's
+	// balance and its expiry, which consensus does check.
+	if terms, err := token.ParseSpendEscrow(buyer); err == nil && mjob.PricePerUnit > terms.MaxPricePerUnit {
+		return nil, fmt.Errorf("%w: %s charges %d per unit and this budget's ceiling is %d",
+			ErrPriceAboveCeiling, providerID, mjob.PricePerUnit, terms.MaxPricePerUnit)
+	}
 
 	now := time.Now().UTC()
 	job := &InferenceJob{
@@ -448,15 +463,19 @@ func (s *Service) settleRun(ctx context.Context, jobID string, resp InferenceRes
 		return nil, fmt.Errorf("inference: computed charge %d exceeds reserved price %d for job %q", amount, mjob.Price, marketJobID)
 	}
 
-	buyerAcct, ok := s.accounts.Account(buyer)
+	// Under a budget the node holds the DELEGATE's key and not the buyer's,
+	// which is the scoped-custody shape: a key that can spend a capped, expiring
+	// grant on inference, rather than a wallet key that can move everything.
+	signer, payTo := invoiceParties(buyer, provider)
+	signerAcct, ok := s.accounts.Account(signer)
 	if !ok {
 		s.failJob(jobID)
-		return nil, fmt.Errorf("inference: no signing account for buyer %q", buyer)
+		return nil, fmt.Errorf("inference: no signing account for %q", signer)
 	}
 
-	nonce := s.nextNonceFor(buyer)
+	nonce := s.nextNonceFor(signer)
 
-	tx, err := s.settler.SubmitAccountTransfer(buyerAcct, provider, amount, nonce)
+	tx, err := s.settler.SubmitAccountTransfer(signerAcct, payTo, amount, nonce)
 	if err != nil {
 		s.failJob(jobID)
 		return nil, fmt.Errorf("inference: settlement failed: %w", err)

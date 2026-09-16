@@ -26,6 +26,12 @@ const ROUTES = [
   '/',
   '/how-it-works',
   '/download',
+  // The app pages. They were missing, which is backwards: a marketing page is a
+  // column of text that reflows on its own, and these are the ones with tables,
+  // panels and a composer - the layouts that actually break at phone width.
+  '/market',
+  '/chat',
+  '/bridge',
   '/products/marketplace',
   '/products/inference',
   '/products/consensus',
