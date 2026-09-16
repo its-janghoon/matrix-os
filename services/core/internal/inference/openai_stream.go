@@ -71,7 +71,7 @@ const maxStreamLineBytes = 1 << 20
 // recompute from the prompt and completion they hold - which is what makes an
 // inflated bill detectable rather than a matter of trust. A vendor that does
 // report usage is always preferred.
-func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc) (InferenceResponse, error) {
+func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc, onWorking WorkingFunc) (InferenceResponse, error) {
 	msgs, err := req.EffectiveMessages()
 	if err != nil {
 		return InferenceResponse{}, err
@@ -161,10 +161,21 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 			// and that text is what the receipt's digest commits to. The working
 			// is delivered whole, on the settled job, exactly as it is on the
 			// non-streaming path.
+			//
+			// Its SIZE does travel, through onWorking, because a reasoning model
+			// spends most of a run here and a progress signal that ignores it
+			// reports nothing until the thinking is already over. A count is not
+			// the text: nothing a caller can forward by mistake.
 			if r := choice.Delta.Reasoning; r != "" {
 				reasoning.WriteString(r)
+				if err := reportWorking(onWorking, countTokens(r)); err != nil {
+					return InferenceResponse{}, err
+				}
 			} else if r := choice.Delta.ReasoningContent; r != "" {
 				reasoning.WriteString(r)
+				if err := reportWorking(onWorking, countTokens(r)); err != nil {
+					return InferenceResponse{}, err
+				}
 			}
 
 			delta := choice.Delta.Content

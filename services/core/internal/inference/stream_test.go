@@ -37,7 +37,7 @@ func TestTheEchoBackendStreamsAndTheChunksReassemble(t *testing.T) {
 			chunks++
 			got.WriteString(delta)
 			return nil
-		})
+		}, nil)
 	if err != nil {
 		t.Fatalf("InferStream: %v", err)
 	}
@@ -71,7 +71,7 @@ func TestABackendThatCannotStreamStillProducesAStream(t *testing.T) {
 			chunks++
 			got.WriteString(delta)
 			return nil
-		})
+		}, nil)
 	if err != nil {
 		t.Fatalf("streamBackend: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestABackendThatCannotStreamStillProducesAStream(t *testing.T) {
 
 func TestAStreamingBackendIsNotReportedAsOneShot(t *testing.T) {
 	result, err := streamBackend(context.Background(), NewEchoBackend(),
-		InferenceRequest{Prompt: "a b"}, func(string) error { return nil })
+		InferenceRequest{Prompt: "a b"}, func(string) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("streamBackend: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestACallbackErrorAbortsTheStream(t *testing.T) {
 				return clientGone
 			}
 			return nil
-		})
+		}, nil)
 
 	if !errors.Is(err, clientGone) {
 		t.Fatalf("err = %v, want the callback's error", err)

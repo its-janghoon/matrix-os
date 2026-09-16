@@ -73,7 +73,8 @@ func (b *EchoBackend) Infer(_ context.Context, req InferenceRequest) (InferenceR
 // The chunks concatenate to the identical completion Infer returns, and the
 // returned response is identical too, so what settles does not depend on which
 // method a caller used.
-func (b *EchoBackend) InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc) (InferenceResponse, error) {
+// The stub does no separate working, so onWorking is accepted and never called.
+func (b *EchoBackend) InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc, onWorking WorkingFunc) (InferenceResponse, error) {
 	resp, err := b.Infer(ctx, req)
 	if err != nil {
 		return InferenceResponse{}, err
