@@ -190,3 +190,36 @@ func TestTheNonceIsWhatMakesASecondBudgetASecondAccount(t *testing.T) {
 		}
 	}
 }
+
+// The browser spells this name too, and a difference of one character is money
+// in an account nothing on the other side can name. apps/web asserts the same
+// literal for the same terms (src/lib/wallet/budget.test.ts), so a change to
+// either spelling fails loudly instead of stranding somebody's deposit.
+func TestTheNameIsTheSameOneABrowserWrites(t *testing.T) {
+	fixed := SpendEscrow{
+		Buyer:           "eth:0x1111111111111111111111111111111111111111",
+		Delegate:        strings.Repeat("2", 64),
+		PerJobCap:       200000,
+		MaxPricePerUnit: 500,
+		Expiry:          1893456000,
+		Nonce:           7,
+	}
+	const wantTerms = "eth:0x1111111111111111111111111111111111111111." +
+		"2222222222222222222222222222222222222222222222222222222222222222.200000.500.1893456000.7"
+
+	if got, want := fixed.Account(), "spend/escrow/"+wantTerms; got != want {
+		t.Errorf("Account()\n got %q\nwant %q", got, want)
+	}
+	if got, want := fixed.CloseRecipient(), "spend/close/"+wantTerms; got != want {
+		t.Errorf("CloseRecipient()\n got %q\nwant %q", got, want)
+	}
+	// And it reads back, so the literal above is a name the chain accepts and
+	// not just a string two files agree on.
+	back, err := ParseSpendEscrow(fixed.Account())
+	if err != nil {
+		t.Fatalf("the agreed name is not a valid budget: %v", err)
+	}
+	if back != fixed {
+		t.Fatalf("round trip changed the terms: %+v", back)
+	}
+}
