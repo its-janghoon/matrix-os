@@ -22,6 +22,29 @@ import (
 // inference commands reach the InferenceService server.
 const defaultInferenceAddr = "127.0.0.1:9092"
 
+// defaultInferenceTimeout is how long `inference submit` waits when the caller
+// says nothing, replacing the global per-RPC default for this one command.
+//
+// It matches the request_timeout a provider is shown advertising in the GPU
+// provider overlay, because that is the side that knows how long its model
+// takes and the buyer's deadline must not undercut it. A 27B reasoning model
+// answering one question spends minutes producing working before a single
+// completion token exists.
+//
+// It is a default and not a floor: --timeout still wins, in both directions.
+const defaultInferenceTimeout = 10 * time.Minute
+
+// inferenceTimeout resolves the deadline a run gets. An explicit --timeout is
+// obeyed exactly, including a short one: a caller who says 5s is saying they
+// would rather fail fast than wait, and silently lengthening it would make that
+// unsayable. Only silence is replaced.
+func inferenceTimeout(explicit bool, global time.Duration) time.Duration {
+	if explicit {
+		return global
+	}
+	return defaultInferenceTimeout
+}
+
 // newInferenceCommand builds `matrix inference` with submit/get. It drives the
 // node's matrix.inference.v1.InferenceService: a buyer submits an inference job
 // to an inference-capable provider, the provider fulfills it on its registered
@@ -103,6 +126,20 @@ make its operator a custodian of your balance.`,
 				return err
 			}
 			defer ic.Close()
+
+			// Running a model is not a read, and the global default is sized for
+			// reads. A buyer who says nothing about timeouts gets the inference
+			// default here, and one who passes --timeout still wins.
+			//
+			// WHY THIS EXISTS. The buyer's deadline caps the whole call, including
+			// the provider's own request_timeout - so the 60s that is generous for
+			// a balance lookup silently overrode a provider advertising 10m, and a
+			// reasoning model on a real GPU exceeded it every time. It surfaced as
+			// "read provider stream: context deadline exceeded", which names the
+			// provider's stream and reads as the provider's fault, when the limit
+			// came from this side.
+			opts.Timeout = inferenceTimeout(
+				cmd.Root().PersistentFlags().Changed("timeout"), opts.Timeout)
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
 
