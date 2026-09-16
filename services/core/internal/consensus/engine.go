@@ -2342,6 +2342,13 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 	case IsBridgeLockRecipient(tx.To):
 		return e.verifyBridgeLockLocked(tx)
 	case IsSpendRecipient(tx.To):
+		// Refused rather than permanently rejected: the transaction becomes
+		// valid at the activation height and stays in the mempool until then,
+		// which is the difference between "not yet" and "never".
+		if v := e.protocolVersionAt(height); v < ProtocolVersionSpendBudgets {
+			return fmt.Errorf("%w: spend budgets need protocol version %d and height %d runs %d",
+				ErrInvalidMessage, ProtocolVersionSpendBudgets, height, v)
+		}
 		return verifySpendTx(tx)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		return e.verifyLaunchRepairLocked(tx)
@@ -3629,6 +3636,15 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				continue
 			}
 			if IsSpendRecipient(tx.To) {
+				// Belt and braces against the version gate: a block whose rules
+				// predate budgets must not have one applied under them, however
+				// it got here. Skipping rather than erroring keeps a node that
+				// somehow sees one from halting over a transaction that moves
+				// nothing.
+				if b.Version < ProtocolVersionSpendBudgets {
+					applied[mempoolKey(tx)] = false
+					continue
+				}
 				// A budget: opened, drawn on, or closed. Opening and closing move
 				// a buyer's own coins into and out of their own escrow and are
 				// deliberately NOT credited - counting them would pay the provider
