@@ -147,6 +147,29 @@ func TestABudgetRefusesWhatItWasBoundedAgainst(t *testing.T) {
 			signedTransfer(t, delegate, budget.DrawRecipient(buyer.AccountID()), 1_000, 1),
 		},
 		{
+			// A delegate whose output could be a bond, a set change or a bridge
+			// lock is not bounded to paying sellers any more. The namespace list
+			// is consensus's, which is why this refusal lives here and not in
+			// the naming.
+			"a draw into a bond",
+			signedTransfer(t, delegate, budget.DrawRecipient("consensus/stake/bond/"+buyer.AccountID()), 1_000, 1),
+		},
+		{
+			"a draw into the bridge escrow",
+			signedTransfer(t, delegate, budget.DrawRecipient("bridge/escrow"), 1_000, 1),
+		},
+		{
+			// A budget nobody holds a key for is a deposit nothing can close.
+			"a budget owned by a reserved account",
+			signedTransfer(t, buyer, SpendEscrow{
+				Buyer:           "consensus/stake/bond/" + buyer.AccountID(),
+				Delegate:        budget.Delegate,
+				PerJobCap:       budget.PerJobCap,
+				MaxPricePerUnit: budget.MaxPricePerUnit,
+				Expiry:          budget.Expiry,
+			}.Account(), 1_000, 1),
+		},
+		{
 			// The amount is the whole remaining balance and is not the caller's
 			// to choose, exactly as a bond withdrawal's is not.
 			"a close that names an amount",

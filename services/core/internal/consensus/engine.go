@@ -2429,7 +2429,7 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		// into it, and a draw moves some back out to a seller. A close names the
 		// whole remaining balance and so carries none - the amount is not the
 		// caller's to choose, exactly as a bond withdrawal's is not.
-		valueAllowed = !strings.HasPrefix(tx.To, spendClosePrefix)
+		valueAllowed = !strings.HasPrefix(tx.To, token.SpendClosePrefix)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		spec, ok := repairSpec(tx.To)
 		if !ok {
