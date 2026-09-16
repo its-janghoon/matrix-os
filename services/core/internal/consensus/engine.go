@@ -1372,7 +1372,13 @@ func nonceKey(tx *token.Transaction) (string, bool) {
 	// CONSENSUS-AFFECTING. A node with this and a node without it disagree about
 	// whether a second lock at a spent nonce may commit, so it goes out to the
 	// whole validator set together.
-	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) {
+	// A SPEND BUDGET is nonce-checked for the same reason, and the reason is
+	// sharper here: opening one, drawing on one and closing one all move a
+	// user's own balance on a signature they made themselves. Without the rule a
+	// draw the delegate signed once could commit twice, and the budget would be
+	// debited twice for one job - the protection every ordinary transfer has,
+	// missing exactly where a key is allowed to spend without asking.
+	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) && !IsSpendRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
@@ -4658,7 +4664,17 @@ func IsReservedRecipient(to string) bool {
 // a user-visible payment. So the history shows exactly the transfers that moved
 // (or were skipped trying to move) native MATRIX.
 func isHistoryTransfer(tx *token.Transaction) bool {
-	return !IsReservedRecipient(tx.To)
+	// A SPEND BUDGET belongs in the history even though it is a reserved
+	// recipient, because all three of its operations move a user's own money:
+	// opening one takes it out of their account, a draw pays a seller from it,
+	// and closing one brings the rest back. Hiding them would leave a history
+	// that does not add up - money gone with nothing to show for it.
+	//
+	// It is also the only way back to a budget's terms. Those terms are its
+	// account's NAME, so a buyer who has cleared their browser has nothing left
+	// that names the account their money is in; the deposit in their own history
+	// is what lets them find it and close it.
+	return !IsReservedRecipient(tx.To) || IsSpendRecipient(tx.To)
 }
 
 // CommittedTransfers returns value transfers from the committed block chain in
