@@ -73,7 +73,7 @@ export default function BridgePage() {
     setProblem('');
     try {
       if (!metamaskAvailable()) throw new Error('No injected EIP-1193 wallet was found. Install MetaMask first.');
-      const connected = await connectMetamask();
+      const connected = await connectMetamask({ chooseAccount: true });
       const selectedChain = await connected.getChainId();
       setWallet(connected);
       setChainId(selectedChain);
