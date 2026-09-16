@@ -97,6 +97,20 @@ const (
 	// inference. promptDigest keeps the transcript out of the wallet prompt while
 	// still binding the signature to it.
 	eip712RunAuthorizationType = "RunAuthorization(address buyer,string provider,string model,bytes32 promptDigest,int64 timestamp)"
+
+	// SpendingAuthorization delegates BOUNDED spending to a subordinate key, so
+	// a buyer who holds their own key does not approve every message.
+	//
+	// Every field after `delegate` is a bound, and the wallet prompt is where a
+	// person sees them - which is the whole protection once per-draw approval is
+	// gone. They are named as a person would say them for that reason.
+	//
+	// maxPricePerUnit is not decoration. "May only pay for inference" is not a
+	// bound on its own: whoever holds a stolen delegate key can register as a
+	// provider, quote an absurd price and settle against themselves, and the
+	// money has still only ever paid for inference. A price ceiling and a
+	// per-job cap are what turn the scope into a limit.
+	eip712SpendingAuthorizationType = "SpendingAuthorization(address buyer,bytes32 delegate,uint256 cap,uint256 perJobCap,uint256 maxPricePerUnit,int64 expiry,uint256 nonce)"
 )
 
 // eip712DomainSeparator is the hashed domain, computed once.
@@ -193,6 +207,35 @@ func (t *Transaction) EthTransferDigest() ([]byte, error) {
 		eip712Uint256(t.Nonce),
 		eip712Int64(t.Timestamp),
 		prevHash,
+	)
+	return eip712Digest(structHash), nil
+}
+
+// EthSpendingAuthorizationDigest returns the EIP-712 digest a wallet signs to
+// delegate bounded spending to a subordinate key.
+//
+// The delegate is a bytes32 because it is an ed25519 public key, which is
+// exactly 32 bytes - not an address. eip712Bytes32 refuses anything else rather
+// than padding it, because a short value pads one way here and the other way in
+// a wallet, and the two digests would differ under a message that reads
+// "invalid signature".
+func EthSpendingAuthorizationDigest(buyer ethsig.Address, delegate []byte, cap, perJobCap, maxPricePerUnit uint64, expiry int64, nonce uint64) ([]byte, error) {
+	delegateWord, err := eip712Bytes32(delegate)
+	if err != nil {
+		return nil, err
+	}
+	// Field order follows the type string exactly. EIP-712 hashes the encoded
+	// members in declaration order, so a reordering here would produce a digest
+	// no wallet computes.
+	structHash := ethsig.Keccak256(
+		ethsig.Keccak256([]byte(eip712SpendingAuthorizationType)),
+		eip712Address(buyer),
+		delegateWord,
+		eip712Uint256(cap),
+		eip712Uint256(perJobCap),
+		eip712Uint256(maxPricePerUnit),
+		eip712Int64(expiry),
+		eip712Uint256(nonce),
 	)
 	return eip712Digest(structHash), nil
 }
