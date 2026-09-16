@@ -26,7 +26,10 @@ func dialOptions(apiKey string) []grpc.DialOption {
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 	}
 	if apiKey != "" {
-		opts = append(opts, grpc.WithUnaryInterceptor(authUnaryInterceptor(apiKey)))
+		opts = append(opts,
+			grpc.WithUnaryInterceptor(authUnaryInterceptor(apiKey)),
+			grpc.WithStreamInterceptor(authStreamInterceptor(apiKey)),
+		)
 	}
 	return opts
 }
@@ -39,6 +42,31 @@ func authUnaryInterceptor(apiKey string) grpc.UnaryClientInterceptor {
 	return func(ctx context.Context, method string, req, reply interface{}, cc *grpc.ClientConn, invoker grpc.UnaryInvoker, opts ...grpc.CallOption) error {
 		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", apiKey)
 		return invoker(ctx, method, req, reply, cc, opts...)
+	}
+}
+
+// authStreamInterceptor injects the same credential on a STREAMING RPC.
+//
+// BOTH ARE NEEDED, and that a unary interceptor does not cover a stream is the
+// kind of thing you find out from the far end. A streaming call went out with no
+// credential at all, and the node answered "authentication required" - which
+// reads as a key that is missing rather than one that was never sent, and sends
+// you looking at your environment instead of your dial options.
+//
+// It sat unnoticed because the CLI made no streaming calls until one was added.
+// The server was right throughout: it refused a stream with no credential, which
+// is what it should do.
+func authStreamInterceptor(apiKey string) grpc.StreamClientInterceptor {
+	return func(
+		ctx context.Context,
+		desc *grpc.StreamDesc,
+		cc *grpc.ClientConn,
+		method string,
+		streamer grpc.Streamer,
+		opts ...grpc.CallOption,
+	) (grpc.ClientStream, error) {
+		ctx = metadata.AppendToOutgoingContext(ctx, "authorization", apiKey)
+		return streamer(ctx, desc, cc, method, opts...)
 	}
 }
 
