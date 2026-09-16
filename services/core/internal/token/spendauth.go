@@ -46,8 +46,18 @@ type SpendingAuthorization struct {
 	// PerJobCap is the most any single draw may take. It bounds the damage one
 	// runaway job or one hostile seller can do inside the total.
 	PerJobCap uint64
-	// MaxPricePerUnit refuses a seller dearer than this. See the type-string
-	// comment in eth.go: without it the scope is not a bound.
+	// MaxPricePerUnit refuses a seller dearer than this.
+	//
+	// WHO ENFORCES IT, because getting this wrong would be believing in a
+	// protection that is not there. The BUYER'S CLIENT does, when it picks a
+	// seller: consensus sees a draw as an amount moving to a provider and has
+	// no unit count to divide by, and a unit count carried alongside would be
+	// asserted by whoever holds the delegate key - which in the case this would
+	// need to defend against is the thief.
+	//
+	// What actually bounds a stolen delegate key is the escrow balance and the
+	// expiry. This field bounds an honest client against an expensive market,
+	// which is worth having and is not the same claim.
 	MaxPricePerUnit uint64
 	// Expiry is the unix second at and after which this authorization is dead.
 	// Absolute, never a sliding window: one nobody revokes still dies.
@@ -76,7 +86,8 @@ var (
 	// ErrPerJobCapExceeded is returned when one draw is larger than PerJobCap.
 	ErrPerJobCapExceeded = errors.New("token: draw exceeds the per-job cap")
 	// ErrPriceAboveCeiling is returned when the seller's unit price is above
-	// MaxPricePerUnit.
+	// MaxPricePerUnit. Raised by the client that chose the seller; see the
+	// field's comment for why consensus cannot raise it.
 	ErrPriceAboveCeiling = errors.New("token: seller price is above the authorized ceiling")
 )
 
@@ -126,8 +137,8 @@ func (a *SpendingAuthorization) Validate() error {
 			"means it bounds nothing", ErrInvalidAuthorization, a.PerJobCap, a.Cap)
 	}
 	if a.MaxPricePerUnit == 0 {
-		return fmt.Errorf("%w: max price per unit must be positive; without a price "+
-			"ceiling the scope is not a bound", ErrInvalidAuthorization)
+		return fmt.Errorf("%w: max price per unit must be positive; a zero read as "+
+			"\"any price\" is the blank cheque this refuses everywhere else", ErrInvalidAuthorization)
 	}
 	if a.Expiry <= 0 {
 		return fmt.Errorf("%w: expiry must be a positive unix second", ErrInvalidAuthorization)
