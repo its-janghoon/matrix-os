@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FiRefreshCw, FiSearch } from 'react-icons/fi';
 
 import Navigation from '@/components/Navigation';
+import { PAGE_COLUMN } from '@/lib/layout';
 import { compactMatrix, formatMatrix, parseMatrix, SYMBOL } from '@/lib/wallet/format';
 import { DEFAULT_ENDPOINT, listSellers, reportProblem, type Seller } from '@/lib/wallet/node';
 import { searchSellers, sellersByModel, type SortKey } from '@/lib/wallet/search';
@@ -130,7 +131,7 @@ export default function MarketPage() {
     <>
       <Navigation />
       <main className='min-h-screen bg-background bg-section-glow px-4 pb-20 pt-24'>
-        <div className='mx-auto max-w-6xl'>
+        <div className={PAGE_COLUMN}>
           <header className='flex flex-wrap items-end justify-between gap-4'>
             <div>
               <h1 className='text-[28px] font-semibold tracking-tight text-white'>Compute marketplace</h1>

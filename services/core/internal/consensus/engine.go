@@ -1372,7 +1372,13 @@ func nonceKey(tx *token.Transaction) (string, bool) {
 	// CONSENSUS-AFFECTING. A node with this and a node without it disagree about
 	// whether a second lock at a spent nonce may commit, so it goes out to the
 	// whole validator set together.
-	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) {
+	// A SPEND BUDGET is nonce-checked for the same reason, and the reason is
+	// sharper here: opening one, drawing on one and closing one all move a
+	// user's own balance on a signature they made themselves. Without the rule a
+	// draw the delegate signed once could commit twice, and the budget would be
+	// debited twice for one job - the protection every ordinary transfer has,
+	// missing exactly where a key is allowed to spend without asking.
+	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) && !IsSpendRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
@@ -2341,6 +2347,15 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyMaintainerRotateLocked(tx)
 	case IsBridgeLockRecipient(tx.To):
 		return e.verifyBridgeLockLocked(tx)
+	case IsSpendRecipient(tx.To):
+		// Refused rather than permanently rejected: the transaction becomes
+		// valid at the activation height and stays in the mempool until then,
+		// which is the difference between "not yet" and "never".
+		if v := e.protocolVersionAt(height); v < ProtocolVersionSpendBudgets {
+			return fmt.Errorf("%w: spend budgets need protocol version %d and height %d runs %d",
+				ErrInvalidMessage, ProtocolVersionSpendBudgets, height, v)
+		}
+		return verifySpendTx(tx)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		return e.verifyLaunchRepairLocked(tx)
 	}
@@ -2412,6 +2427,15 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 			return err
 		}
 		valueAllowed = true
+	case IsSpendRecipient(tx.To):
+		if err := verifySpendTx(tx); err != nil {
+			return err
+		}
+		// Two of the three carry value: opening a budget moves the buyer's coins
+		// into it, and a draw moves some back out to a seller. A close names the
+		// whole remaining balance and so carries none - the amount is not the
+		// caller's to choose, exactly as a bond withdrawal's is not.
+		valueAllowed = !strings.HasPrefix(tx.To, token.SpendClosePrefix)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		spec, ok := repairSpec(tx.To)
 		if !ok {
@@ -3617,6 +3641,40 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = ok
 				continue
 			}
+			if IsSpendRecipient(tx.To) {
+				// Belt and braces against the version gate: a block whose rules
+				// predate budgets must not have one applied under them, however
+				// it got here. Skipping rather than erroring keeps a node that
+				// somehow sees one from halting over a transaction that moves
+				// nothing.
+				if b.Version < ProtocolVersionSpendBudgets {
+					applied[mempoolKey(tx)] = false
+					continue
+				}
+				// A budget: opened, drawn on, or closed. Opening and closing move
+				// a buyer's own coins into and out of their own escrow and are
+				// deliberately NOT credited - counting them would pay the provider
+				// emission to somebody funding themselves. A DRAW is a real
+				// payment to a seller, so it is charged the fee and recorded as
+				// revenue exactly as an ordinary transfer to that account is.
+				eff, err := e.applySpendOperation(ltx, tx, b.Timestamp)
+				if err != nil {
+					return err
+				}
+				if eff.fee > 0 {
+					feesTaken += eff.fee
+				}
+				if eff.payee != "" && eff.net > 0 {
+					if credited[eff.payee] > ^uint64(0)-eff.net {
+						credited[eff.payee] = ^uint64(0)
+					} else {
+						credited[eff.payee] += eff.net
+					}
+					revenue = append(revenue, payment{payer: eff.payer, payee: eff.payee, amount: eff.net})
+				}
+				applied[mempoolKey(tx)] = eff.applied
+				continue
+			}
 			if IsPinnedPoolTransferRecipient(tx.To) {
 				ok, err := applyLaunchRepair(ltx, tx)
 				if err != nil {
@@ -4596,7 +4654,8 @@ func IsReservedRecipient(to string) bool {
 		IsBurnUnlockRecipient(to) ||
 		IsMaintainerRotateRecipient(to) ||
 		IsBridgeLockRecipient(to) ||
-		IsPinnedPoolTransferRecipient(to)
+		IsPinnedPoolTransferRecipient(to) ||
+		IsSpendRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value
@@ -4605,7 +4664,17 @@ func IsReservedRecipient(to string) bool {
 // a user-visible payment. So the history shows exactly the transfers that moved
 // (or were skipped trying to move) native MATRIX.
 func isHistoryTransfer(tx *token.Transaction) bool {
-	return !IsReservedRecipient(tx.To)
+	// A SPEND BUDGET belongs in the history even though it is a reserved
+	// recipient, because all three of its operations move a user's own money:
+	// opening one takes it out of their account, a draw pays a seller from it,
+	// and closing one brings the rest back. Hiding them would leave a history
+	// that does not add up - money gone with nothing to show for it.
+	//
+	// It is also the only way back to a budget's terms. Those terms are its
+	// account's NAME, so a buyer who has cleared their browser has nothing left
+	// that names the account their money is in; the deposit in their own history
+	// is what lets them find it and close it.
+	return !IsReservedRecipient(tx.To) || IsSpendRecipient(tx.To)
 }
 
 // CommittedTransfers returns value transfers from the committed block chain in

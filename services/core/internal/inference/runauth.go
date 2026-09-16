@@ -243,6 +243,32 @@ func (s *Service) VerifyRunAuthorization(buyer string, req InferenceRequest, aut
 // verifySignature checks the signature and that it authorises `buyer`,
 // dispatching on the key kind.
 func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunAuthorization) error {
+	// A BUDGET authorises its delegate. The buyer's own wallet named that key
+	// when it opened the budget, and the name is inside the signature that
+	// funded it - so checking the key against the account's own terms is the
+	// same guarantee as deriving an account from a key, one step removed.
+	//
+	// This is what lets a browser run a job without a wallet prompt: the key it
+	// generated and cannot export is the one the terms name.
+	if terms, err := token.ParseSpendEscrow(buyer); err == nil {
+		if auth.IsEth() {
+			return fmt.Errorf("%w: a budget is drawn on by an ed25519 delegate, not by an "+
+				"ethereum key", ErrRunUnauthorized)
+		}
+		if len(auth.PublicKey) != ed25519.PublicKeySize {
+			return fmt.Errorf("%w: a delegate key must be %d bytes, got %d",
+				ErrRunUnauthorized, ed25519.PublicKeySize, len(auth.PublicKey))
+		}
+		if got := token.AccountIDFromPublicKey(auth.PublicKey); got != terms.Delegate {
+			return fmt.Errorf("%w: authorized by %s, but this budget names %s",
+				ErrRunUnauthorized, got, terms.Delegate)
+		}
+		if !ed25519.Verify(auth.PublicKey, auth.SigningBytes(req), auth.Signature) {
+			return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
+		}
+		return nil
+	}
+
 	if auth.IsEth() {
 		addr, err := ethsig.AddressFromBytes(auth.PublicKey)
 		if err != nil {

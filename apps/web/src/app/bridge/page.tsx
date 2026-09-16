@@ -5,6 +5,7 @@ import type { Hash } from 'viem';
 import { MinBridgeLockAmount, NativeUnit } from '@matrix-os/protocol';
 import Navigation from '@/components/Navigation';
 import { Footer } from '@/components/Footer';
+import { PAGE_COLUMN } from '@/lib/layout';
 import { bridgeConfigState } from '@/lib/bridge/config';
 import { prepareMint, simulateAndWriteBurn, simulateAndWriteMint, type PreparedMint } from '@/lib/bridge/evm';
 import {
@@ -72,7 +73,7 @@ export default function BridgePage() {
     setProblem('');
     try {
       if (!metamaskAvailable()) throw new Error('No injected EIP-1193 wallet was found. Install MetaMask first.');
-      const connected = await connectMetamask();
+      const connected = await connectMetamask({ chooseAccount: true });
       const selectedChain = await connected.getChainId();
       setWallet(connected);
       setChainId(selectedChain);
@@ -206,7 +207,7 @@ export default function BridgePage() {
       <>
         <Navigation />
         <main className='min-h-screen bg-black px-4 pb-20 pt-28 text-white'>
-          <section className='mx-auto max-w-3xl rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-8'>
+          <section className={`${PAGE_COLUMN} rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-8`}>
             <p className='text-sm font-semibold uppercase tracking-wider text-yellow-300'>Launch not configured</p>
             <h1 className='mt-3 text-3xl font-bold'>The public Base bridge is inactive.</h1>
             <p className='mt-4 text-gray-300'>
@@ -226,7 +227,7 @@ export default function BridgePage() {
     <>
       <Navigation />
       <main className='min-h-screen bg-black px-4 pb-20 pt-24 text-white'>
-        <div className='mx-auto max-w-4xl space-y-6'>
+        <div className={`${PAGE_COLUMN} space-y-6`}>
           <header>
             <p className='text-sm font-semibold uppercase tracking-wider text-primary-300'>Native MATRIX ↔ wMATRIX</p>
             <h1 className='mt-2 text-4xl font-bold'>Base bridge</h1>

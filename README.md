@@ -179,6 +179,17 @@ attestations and releases nothing, and diverges the first time a burn reaches
 quorum; and that an idle chain produces no blocks, so a height that does not move
 proves nothing and the acceptance test is stopping a node, not reading a config.
 
+Holding your own key used to cost a wallet prompt per message, twice. A spend
+budget removes that without anyone taking custody: the owner signs one transfer
+into an account whose NAME carries the terms - which key may draw, the most one
+job may cost, the price ceiling, when it dies - and a delegate spends it until it
+runs out or expires. In a browser the delegate is the non-extractable key the
+page already generates, so it stops being a second account that needs its own
+funding. Turning it on is a rule change over money and activates at an agreed
+height: [the budget activation runbook](docs/runbooks/budget-activation.md), and
+the design, the prior art and what it deliberately does not bound are in
+[the proposal](docs/proposals/spending-authorization.md).
+
 The buying side is the [consumer runbook](docs/runbooks/consumer.md): getting
 MATRIX into an account, and the two doors a buyer can come through. The
 OpenAI-compatible `/v1/chat/completions` is a drop-in for any OpenAI SDK and is
