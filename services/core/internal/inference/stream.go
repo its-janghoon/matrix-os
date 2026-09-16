@@ -42,6 +42,26 @@ var ErrStreamNotSupported = errors.New("inference: streaming is not supported on
 // tokens nobody will read.
 type ChunkFunc func(delta string) error
 
+// WorkingFunc receives the SIZE of each piece of a reasoning model's working as
+// it arrives, in tokens. It never receives the working itself.
+//
+// WHY A COUNT AND NOT THE TEXT. The working is withheld until the buyer has
+// signed, and on the client-signed path that withholding is the only
+// enforcement there is - the provider has already done the work by the time an
+// invoice exists. Handing the text to a callback and asking every caller to
+// remember not to forward it is the shape that already went wrong once here: a
+// strip repeated per caller is a list that grows wrong. So the text does not
+// leave this package's streaming reader at all, and what travels is a number,
+// which is the same thing the progress stream was always meant to carry - the
+// size of the work, not the work.
+//
+// It matters because without it a reasoning model reports no progress for the
+// part of the run that IS the wait. Four fifths of a Qwen3 answer can be
+// working, and counting only the completion leaves the progress line at zero
+// until the thinking is already over - which is the silence this stream exists
+// to break.
+type WorkingFunc func(tokens int) error
+
 // StreamingBackend is the optional interface a Backend implements when it can
 // produce a completion incrementally.
 //
@@ -49,8 +69,20 @@ type ChunkFunc func(delta string) error
 // same InferenceResponse Infer would have: the concatenated completion, the
 // usage, and the units. The response is what settles, so a backend that streams
 // must still account for the whole thing.
+//
+// onWorking may be nil, and a backend whose model does no separate working
+// simply never calls it. Use reportWorking rather than calling it directly.
 type StreamingBackend interface {
-	InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc) (InferenceResponse, error)
+	InferStream(ctx context.Context, req InferenceRequest, onChunk ChunkFunc, onWorking WorkingFunc) (InferenceResponse, error)
+}
+
+// reportWorking calls onWorking when there is one and something to report, so
+// every backend does not repeat the nil check.
+func reportWorking(onWorking WorkingFunc, tokens int) error {
+	if onWorking == nil || tokens <= 0 {
+		return nil
+	}
+	return onWorking(tokens)
 }
 
 // StreamResult reports what a stream produced.
@@ -67,9 +99,9 @@ type StreamResult struct {
 // streamBackend runs a backend with streaming, falling back to one chunk for a
 // backend that cannot. It is the one place the fallback lives, so no caller has
 // to know which backends can stream.
-func streamBackend(ctx context.Context, backend Backend, req InferenceRequest, onChunk ChunkFunc) (StreamResult, error) {
+func streamBackend(ctx context.Context, backend Backend, req InferenceRequest, onChunk ChunkFunc, onWorking WorkingFunc) (StreamResult, error) {
 	if sb, ok := backend.(StreamingBackend); ok {
-		resp, err := sb.InferStream(ctx, req, onChunk)
+		resp, err := sb.InferStream(ctx, req, onChunk, onWorking)
 		return StreamResult{Response: resp}, err
 	}
 
@@ -130,7 +162,10 @@ func (s *Service) StreamJob(ctx context.Context, jobID string, onChunk ChunkFunc
 		return nil, nil, fmt.Errorf("%w: %v", ErrNoBackend, err)
 	}
 
-	result, err := streamBackend(ctx, backend, request, onChunk)
+	// No onWorking: this path streams the completion to a buyer the node signs
+	// for, so there is no separate wait to narrate - the text itself is already
+	// arriving.
+	result, err := streamBackend(ctx, backend, request, onChunk, nil)
 	if err != nil {
 		s.failJob(jobID)
 		return nil, nil, fmt.Errorf("inference: streaming from provider %q failed: %w", provider, err)

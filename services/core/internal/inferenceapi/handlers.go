@@ -217,7 +217,14 @@ func (s *Service) RunInferenceJobProgress(
 
 	// Send returns its error into the callback, so a client that hangs up aborts
 	// the run instead of the provider generating tokens nobody will read.
+	// Remembered so the final message can carry it too. Without that the result
+	// message leaves TokensSoFar at its zero value, and a client that reports the
+	// field on the message it ends with prints "0 tokens produced" however much
+	// actually streamed - which reads as a stream that never worked rather than
+	// one whose total was dropped on the last frame.
+	var lastReported uint64
 	onProgress := func(tokensSoFar uint64) error {
+		lastReported = tokensSoFar
 		return stream.Send(&inferencev1.RunInferenceJobProgressResponse{
 			JobId:       job.ID,
 			TokensSoFar: tokensSoFar,
@@ -234,7 +241,8 @@ func (s *Service) RunInferenceJobProgress(
 	}
 
 	return stream.Send(&inferencev1.RunInferenceJobProgressResponse{
-		JobId: job.ID,
+		JobId:       job.ID,
+		TokensSoFar: lastReported,
 		Result: &inferencev1.RunInferenceJobResponse{
 			Payment: paymentToProto(payment),
 			Job:     jobToProto(ran),

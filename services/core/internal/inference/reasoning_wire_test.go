@@ -158,10 +158,15 @@ func TestTheStreamingPathCarriesTheWorking(t *testing.T) {
 			}
 
 			var streamed strings.Builder
+			workingTokens := 0
 			resp, err := backend.InferStream(context.Background(),
 				InferenceRequest{Model: "qwen3", Prompt: "Is 8191 prime?"},
 				func(chunk string) error {
 					streamed.WriteString(chunk)
+					return nil
+				},
+				func(tokens int) error {
+					workingTokens += tokens
 					return nil
 				})
 			if err != nil {
@@ -180,6 +185,13 @@ func TestTheStreamingPathCarriesTheWorking(t *testing.T) {
 			// the answer nor the working.
 			if streamed.String() != "Yes, prime." {
 				t.Fatalf("the working leaked into the completion stream: %q", streamed.String())
+			}
+			// Its SIZE does travel. Without this a reasoning model reports no
+			// progress for the part of the run that IS the wait: four fifths of
+			// the answer can be working, and a progress line that counts only
+			// completion deltas sits at zero until the thinking is already over.
+			if workingTokens == 0 {
+				t.Fatal("the working produced no progress at all, so the wait it exists to show stays silent")
 			}
 		})
 	}
