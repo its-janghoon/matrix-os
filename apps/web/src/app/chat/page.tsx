@@ -2,22 +2,20 @@
 
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
-import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
+import { Suspense, useCallback, useEffect, useMemo, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
 import { PAGE_COLUMN } from '@/lib/layout';
 import {
-  chat,
   DEFAULT_ENDPOINT,
   getBalance,
   listModels,
   reportProblem,
   type ModelOffer,
   type SellerChoice,
-  type Settled,
 } from '@/lib/wallet/node';
-import type { Message } from '@/lib/wallet/signing';
-import { checkReceipt, receiptVerdict, type ReceiptCheck } from '@/lib/wallet/receipt';
+import { MatrixRuntimeProvider } from '@/components/assistant/runtime';
+import { Thread } from '@/components/assistant/thread';
 import { browserSigner } from '@/lib/wallet/browserSigner';
 import { connectMetamask, isEvmSigner, MetamaskSigner, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
@@ -46,21 +44,6 @@ import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/w
  * MADE its claim, not that the claim is true: no signature can tell a buyer that
  * the model named is the model that ran.
  */
-
-interface Turn {
-  role: 'user' | 'assistant';
-  content: string;
-  settled?: Settled;
-  /**
-   * What checking the seller's receipt concluded, run in this page against the
-   * prompt that was actually sent and the answer that came back.
-   *
-   * Checked here rather than shown as a badge from the node, because a receipt
-   * the seller's own node vouches for is not evidence of anything. This page
-   * holds the text and does the arithmetic itself.
-   */
-  receipt?: ReceiptCheck;
-}
 
 const CARD = 'rounded-xl border border-gray-800 bg-gray-900/50 p-6';
 const FIELD =
@@ -95,11 +78,20 @@ function Chat() {
   const [balance, setBalance] = useState<bigint | null>(null);
   const [models, setModels] = useState<ModelOffer[]>([]);
   const [model, setModel] = useState(params.get('model') ?? '');
-  const [draft, setDraft] = useState('');
-  const [turns, setTurns] = useState<Turn[]>([]);
-  const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState('');
-  const bottom = useRef<HTMLDivElement>(null);
+
+  // Parsed here rather than where it is used, because a half-typed figure is an
+  // ordinary state of a text field and must not throw during a render. An
+  // unreadable value means "no floor", which is what an empty field means too.
+  const minBondUnits = useMemo(() => {
+    const raw = minBond.trim();
+    if (raw === '') return undefined;
+    try {
+      return BigInt(raw);
+    } catch {
+      return undefined;
+    }
+  }, [minBond]);
 
   useEffect(() => {
     // Only the browser key can be picked up automatically. MetaMask needs an
@@ -122,11 +114,6 @@ function Chat() {
     if (!signer || !isEvmSigner(signer)) return;
     return signer.subscribe((change) => {
       if (change.address === undefined || change.address === signer.address) return;
-      // The transcript and the balance belong to the old account. Clearing them
-      // is not tidiness: leaving one account's paid answers above another
-      // account's next prompt would be showing someone else's purchase as
-      // theirs.
-      setTurns([]);
       setBalance(null);
       setProblem('');
       setSigner(change.address === null ? null : new MetamaskSigner(signer.provider, change.address));
@@ -159,43 +146,6 @@ function Chat() {
       live = false;
     };
   }, [signer, endpoint, reloads]);
-
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [turns, busy]);
-
-  const send = async () => {
-    if (!signer || draft.trim() === '' || model === '' || busy) return;
-
-    // The transcript that gets signed is the whole conversation, so the model
-    // sees the context and the signature covers exactly what was sent.
-    const asked = draft.trim();
-    const history: Message[] = [
-      ...turns.map((t) => ({ role: t.role, content: t.content })),
-      { role: 'user' as const, content: asked },
-    ];
-
-    setDraft('');
-    setTurns((prev) => [...prev, { role: 'user', content: asked }]);
-    setBusy(true);
-    setProblem('');
-
-    try {
-      const settled = await chat(endpoint, signer, {
-        model,
-        messages: history,
-        chosen: chosen ?? undefined,
-        minBond: minBond.trim() === '' ? undefined : BigInt(minBond.trim()),
-      });
-      const receipt = await checkReceipt(settled, history, signer.accountId);
-      setTurns((prev) => [...prev, { role: 'assistant', content: settled.completion, settled, receipt }]);
-      setBalance(await getBalance(endpoint, signer.accountId));
-    } catch (err) {
-      setProblem(reportProblem(err));
-    } finally {
-      setBusy(false);
-    }
-  };
 
   if (checking) {
     return (
@@ -271,7 +221,6 @@ function Chat() {
                         // asking. Only a permission request re-opens the picker.
                         try {
                           setSigner(await connectMetamask({ chooseAccount: true }));
-                          setTurns([]);
                           setBalance(null);
                           setProblem('');
                         } catch (err) {
@@ -290,7 +239,6 @@ function Chat() {
                       // is the honest thing for a wallet we do not own.
                       if (signer.kind === 'browser') await forgetWallet();
                       setSigner(null);
-                      setTurns([]);
                       setBalance(null);
                     }}
                   >
@@ -334,27 +282,26 @@ function Chat() {
                 {chosen ? null : <AutomaticSeller minBond={minBond} setMinBond={setMinBond} />}
               </section>
 
-              <Transcript turns={turns} busy={busy} bottom={bottom} />
-
-              <section className='flex gap-3'>
-                <input
-                  className={FIELD}
-                  placeholder={busy ? 'waiting for the model...' : 'Say something'}
-                  value={draft}
-                  disabled={busy || models.length === 0}
-                  onChange={(e) => setDraft(e.target.value)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter') void send();
-                  }}
-                />
-                <button
-                  className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:opacity-40'
-                  disabled={busy || draft.trim() === '' || models.length === 0}
-                  onClick={() => void send()}
-                >
-                  Send
-                </button>
-              </section>
+              {/*
+                Keyed by the account, so switching wallet starts a new thread
+                rather than carrying the old one over. One account's paid
+                answers above another account's next question would be showing
+                someone else's purchase as theirs - and the next message would
+                sign that transcript.
+              */}
+              <MatrixRuntimeProvider
+                key={signer.accountId}
+                settings={{
+                  endpoint,
+                  signer,
+                  model,
+                  chosen: chosen ?? undefined,
+                  minBond: minBondUnits,
+                }}
+                onSettled={reload}
+              >
+                <Thread />
+              </MatrixRuntimeProvider>
 
               <Caveats kind={signer.kind} />
             </>
@@ -472,74 +419,6 @@ function Funding({ account }: { account: string }) {
       </p>
       <p className='font-mono text-xs text-yellow-100/60'>{account}</p>
     </div>
-  );
-}
-
-function Transcript({
-  turns,
-  busy,
-  bottom,
-}: {
-  turns: Turn[];
-  busy: boolean;
-  bottom: React.RefObject<HTMLDivElement | null>;
-}) {
-  return (
-    <section className='space-y-3'>
-      {turns.length === 0 && !busy ? (
-        <p className={`${CARD} text-sm text-gray-400`}>Nothing yet. Each message costs a signature and some MATRIX.</p>
-      ) : null}
-      {turns.map((turn, i) => (
-        <div
-          key={i}
-          className={`rounded-xl border p-4 ${
-            turn.role === 'user' ? 'border-gray-800 bg-gray-900/40' : 'border-gray-700 bg-gray-900/70'
-          }`}
-        >
-          <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
-          <p className='max-w-3xl whitespace-pre-wrap text-gray-100'>{turn.content}</p>
-          {/*
-            A reasoning model's working, shown because it was BILLED. Most of a
-            reasoning model's tokens go here, they settle, and the receipt's
-            digest covers them - so withholding it would be charging for text
-            the buyer is not allowed to read, and would leave them unable to
-            check the receipt at all. Collapsed because it is long and it is not
-            the answer; present because it is paid for.
-          */}
-          {turn.settled?.reasoning ? (
-            <details className='mt-3 rounded-lg border border-gray-800 bg-black/40 p-3'>
-              <summary className='cursor-pointer text-xs uppercase tracking-wide text-gray-500'>
-                reasoning - you paid for these tokens
-              </summary>
-              <p className='mt-2 max-w-3xl whitespace-pre-wrap text-sm text-gray-400'>{turn.settled.reasoning}</p>
-            </details>
-          ) : null}
-          {turn.settled ? (
-            <div className='mt-3 space-y-1 font-mono text-xs'>
-              <p className='text-gray-500'>
-                paid {turn.settled.units.toString()} base units to {turn.settled.provider} -{' '}
-                {turn.settled.promptTokens} prompt + {turn.settled.completionTokens} completion tokens
-              </p>
-              <p
-                className={
-                  turn.receipt && !turn.receipt.problem && turn.receipt.boundToExchange !== false
-                    ? 'text-emerald-500/80'
-                    : 'text-amber-500/80'
-                }
-              >
-                {receiptVerdict(turn.receipt)}
-              </p>
-            </div>
-          ) : null}
-        </div>
-      ))}
-      {busy ? (
-        <div className='rounded-xl border border-gray-800 bg-gray-900/40 p-4 text-sm text-gray-400'>
-          Signing the run, waiting for the model, then signing the payment...
-        </div>
-      ) : null}
-      <div ref={bottom} />
-    </section>
   );
 }
 
