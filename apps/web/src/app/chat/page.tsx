@@ -17,6 +17,17 @@ import {
 import { MatrixRuntimeProvider } from '@/components/assistant/runtime';
 import { Thread } from '@/components/assistant/thread';
 import { browserSigner } from '@/lib/wallet/browserSigner';
+import {
+  budgetAccount,
+  budgetExpired,
+  budgetSigner,
+  closeBudget,
+  forgetBudget,
+  openBudget,
+  recallBudget,
+  rememberBudget,
+  type Budget,
+} from '@/lib/wallet/budget';
 import { connectMetamask, isEvmSigner, MetamaskSigner, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
 import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
@@ -79,6 +90,11 @@ function Chat() {
   const [models, setModels] = useState<ModelOffer[]>([]);
   const [model, setModel] = useState(params.get('model') ?? '');
   const [problem, setProblem] = useState('');
+  // The key that spends a budget. It is the same non-extractable browser key
+  // the page can already generate - held here as a DELEGATE rather than as a
+  // second account, so it never needs funding of its own.
+  const [delegate, setDelegate] = useState<Signer | null>(null);
+  const [budget, setBudget] = useState<Budget | null>(null);
 
   // Parsed here rather than where it is used, because a half-typed figure is an
   // ordinary state of a text field and must not throw during a render. An
@@ -120,18 +136,48 @@ function Chat() {
     });
   }, [signer]);
 
+  // The delegate is prepared as soon as somebody connects with a wallet,
+  // because it is what a budget NAMES and a budget is opened by a signature -
+  // so the key has to exist before the prompt, not after it.
+  useEffect(() => {
+    if (!signer || signer.kind !== 'metamask' || !walletSupported()) return;
+    let live = true;
+    void loadWallet()
+      .then(async (w) => (w ? browserSigner(w) : browserSigner(await createWallet())))
+      .then((d) => {
+        if (!live) return;
+        setDelegate(d);
+        const remembered = recallBudget(signer.accountId);
+        // A budget whose delegate is not the key this browser holds cannot be
+        // spent from here, and showing it would be showing a balance the page
+        // cannot reach.
+        setBudget(remembered && remembered.delegate === d.accountId ? remembered : null);
+      })
+      .catch(() => {
+        if (live) setDelegate(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [signer]);
+
   // A counter rather than a boolean, so a stale reload cannot clobber a newer
   // one when the endpoint is edited twice in quick succession.
   const [reloads, setReloads] = useState(0);
   const reload = useCallback(() => setReloads((n) => n + 1), []);
 
+  // What a message is actually paid from. With a budget open it is the budget,
+  // not the wallet: showing the wallet's balance would be showing money this
+  // page cannot spend without another prompt.
+  const spendingAccount = budget ? budgetAccount(budget) : (signer?.accountId ?? '');
+
   useEffect(() => {
-    if (!signer) return;
+    if (!signer || spendingAccount === '') return;
     let live = true;
 
     void (async () => {
       try {
-        const [bal, offers] = await Promise.all([getBalance(endpoint, signer.accountId), listModels(endpoint)]);
+        const [bal, offers] = await Promise.all([getBalance(endpoint, spendingAccount), listModels(endpoint)]);
         if (!live) return;
         setProblem('');
         setBalance(bal);
@@ -145,7 +191,7 @@ function Chat() {
     return () => {
       live = false;
     };
-  }, [signer, endpoint, reloads]);
+  }, [signer, spendingAccount, endpoint, reloads]);
 
   if (checking) {
     return (
@@ -249,6 +295,18 @@ function Chat() {
                 {balance === 0n ? <Funding account={signer.accountId} /> : null}
               </section>
 
+              {signer.kind === 'metamask' && delegate ? (
+                <BudgetCard
+                  endpoint={endpoint}
+                  wallet={signer}
+                  delegate={delegate}
+                  budget={budget}
+                  setBudget={setBudget}
+                  onChanged={reload}
+                  setProblem={setProblem}
+                />
+              ) : null}
+
               {problem !== '' ? (
                 <p className='rounded-lg border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200'>{problem}</p>
               ) : null}
@@ -290,10 +348,14 @@ function Chat() {
                 sign that transcript.
               */}
               <MatrixRuntimeProvider
-                key={signer.accountId}
+                key={spendingAccount}
                 settings={{
                   endpoint,
-                  signer,
+                  // With a budget open, every signature is the browser key's and
+                  // the account named is the budget - which is exactly what the
+                  // node needs to address the invoice to that key. The wallet is
+                  // not asked again.
+                  signer: budget && delegate ? budgetSigner(delegate, budget) : signer,
                   model,
                   chosen: chosen ?? undefined,
                   minBond: minBondUnits,
@@ -463,6 +525,150 @@ function CopyableAccount({ account }: { account: string }) {
         {copied ? 'copied' : 'copy'}
       </button>
     </div>
+  );
+}
+
+/**
+ * One wallet signature, and then the page stops asking.
+ *
+ * The budget is an account whose NAME carries what the wallet agreed to: which
+ * key may spend it, the most one message may cost, the price ceiling, and when
+ * it dies. Depositing into it is signing those terms, because a transfer signs
+ * its recipient - which is why one prompt is the whole cost.
+ *
+ * What is deliberately loud here is the pair of numbers that are the only
+ * protection left once per-message approval is gone: the amount and the expiry.
+ * Everything else about the design is a detail; those two are what a reader is
+ * actually deciding.
+ */
+function BudgetCard({
+  endpoint,
+  wallet,
+  delegate,
+  budget,
+  setBudget,
+  onChanged,
+  setProblem,
+}: {
+  endpoint: string;
+  wallet: Signer;
+  delegate: Signer;
+  budget: Budget | null;
+  setBudget: (b: Budget | null) => void;
+  onChanged: () => void;
+  setProblem: (s: string) => void;
+}) {
+  const [amount, setAmount] = useState('');
+  const [hours, setHours] = useState('24');
+  const [busy, setBusy] = useState(false);
+
+  if (budget) {
+    const dead = budgetExpired(budget);
+    return (
+      <section className={CARD}>
+        <p className='text-sm text-gray-400'>
+          {dead
+            ? 'This budget has expired. Nothing more can be spent from it; close it to get the rest back.'
+            : 'A budget is open. Messages are paid from it and your wallet is not asked again.'}
+        </p>
+        <p className='mt-2 text-sm text-gray-400'>
+          expires <span className='text-gray-100'>{new Date(Number(budget.expiry) * 1000).toLocaleString()}</span>
+        </p>
+        <p className='mt-3 break-all font-mono text-xs text-gray-500'>{budgetAccount(budget)}</p>
+        <p className='mt-2 text-xs text-gray-500'>
+          Keep that line if you keep anything. It is the budget&apos;s name, and closing it means naming it - clearing
+          this site&apos;s data loses the copy above, though the deposit is still in your own transaction history.
+        </p>
+        <button
+          className='mt-4 rounded-lg border border-gray-600 px-4 py-2 text-sm font-semibold text-gray-100 disabled:opacity-40'
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setProblem('');
+            try {
+              await closeBudget(endpoint, wallet, budget);
+              forgetBudget();
+              setBudget(null);
+              onChanged();
+            } catch (err) {
+              setProblem(reportProblem(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'closing...' : 'close and take back what is left'}
+        </button>
+      </section>
+    );
+  }
+
+  return (
+    <section className={CARD}>
+      <h2 className='mb-2 text-lg font-semibold text-white'>Approve a budget once</h2>
+      <p className='mb-4 text-sm text-gray-400'>
+        Your wallet signs one transfer into a budget, and the key in this browser spends it after that - no prompt per
+        message. It can only pay sellers for inference, and only until the budget runs out or expires.{' '}
+        <strong className='text-gray-200'>Those two limits are the whole protection</strong>, so put in what you are
+        willing to have spent without being asked again.
+      </p>
+      <div className='flex flex-wrap gap-3'>
+        <input
+          className={`${FIELD} max-w-xs`}
+          placeholder='base units to put in'
+          value={amount}
+          onChange={(e) => setAmount(e.target.value)}
+          inputMode='numeric'
+          spellCheck={false}
+        />
+        <input
+          className={`${FIELD} max-w-[8rem]`}
+          placeholder='hours'
+          value={hours}
+          onChange={(e) => setHours(e.target.value)}
+          inputMode='numeric'
+          spellCheck={false}
+        />
+        <button
+          className='rounded-lg bg-white px-5 py-2 text-sm font-semibold text-black disabled:opacity-40'
+          disabled={busy}
+          onClick={async () => {
+            setBusy(true);
+            setProblem('');
+            try {
+              // Parsed at the click and not during a render: a half-typed
+              // figure is an ordinary state of a text field.
+              const units = BigInt(amount.trim());
+              const ttl = Math.round(Number(hours.trim()) * 3600);
+              if (!Number.isFinite(ttl) || ttl <= 0) throw new Error('give the budget a life in hours');
+              const opened = await openBudget({
+                endpoint,
+                wallet,
+                delegate: delegate.accountId,
+                amount: units,
+                // A per-message cap of a tenth keeps one runaway job from
+                // taking the lot, and is a number a reader does not have to
+                // think about to be protected by.
+                perJobCap: units / 10n > 0n ? units / 10n : units,
+                // Ten times the going rate: a ceiling that refuses a seller
+                // charging something absurd, without refusing an ordinary one.
+                maxPricePerUnit: 10_000n,
+                ttlSeconds: ttl,
+              });
+              rememberBudget(opened);
+              setBudget(opened);
+              onChanged();
+            } catch (err) {
+              setProblem(reportProblem(err));
+            } finally {
+              setBusy(false);
+            }
+          }}
+        >
+          {busy ? 'approving...' : 'Approve'}
+        </button>
+      </div>
+    </section>
   );
 }
 
