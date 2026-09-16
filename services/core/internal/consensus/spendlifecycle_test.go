@@ -18,6 +18,13 @@ import (
 // remaining budget is that name's balance, and a balance is already inside the
 // state root that every validator compares.
 
+// budgetsActive schedules the activation at height 1, which is the earliest a
+// schedule can name: normalizeUpgrades puts the genesis version at height 0, so
+// a second version there would be two versions activating at one height.
+func budgetsActive(c *Config) {
+	c.ProtocolUpgrades = append(c.ProtocolUpgrades, ProtocolUpgrade{Height: 1, Version: ProtocolVersionSpendBudgets})
+}
+
 func budgetFor(t *testing.T, buyer *token.Account, delegate ed25519.PublicKey, expiry int64) SpendEscrow {
 	t.Helper()
 	return SpendEscrow{
@@ -31,7 +38,7 @@ func budgetFor(t *testing.T, buyer *token.Account, delegate ed25519.PublicKey, e
 }
 
 func TestABuyerSignsOnceAndADelegateSpendsTheBudget(t *testing.T) {
-	nodes, stop := newCluster(t, 4, nil)
+	nodes, stop := newCluster(t, 4, budgetsActive)
 	defer stop()
 
 	buyer, err := token.GenerateAccount()
@@ -98,7 +105,7 @@ func TestABuyerSignsOnceAndADelegateSpendsTheBudget(t *testing.T) {
 // Everything a delegate must not be able to do, refused where a caller finds
 // out about it rather than silently at apply time.
 func TestABudgetRefusesWhatItWasBoundedAgainst(t *testing.T) {
-	nodes, stop := newCluster(t, 1, nil)
+	nodes, stop := newCluster(t, 1, budgetsActive)
 	defer stop()
 	engine := nodes[0].engine
 
@@ -169,7 +176,7 @@ func TestABudgetRefusesWhatItWasBoundedAgainst(t *testing.T) {
 // directly, because reaching them through a cluster would mean waiting out a
 // real expiry and asserting on a wall clock.
 func TestTheBlockClockAndTheBalanceAreWhatBoundADelegate(t *testing.T) {
-	nodes, stop := newCluster(t, 1, nil)
+	nodes, stop := newCluster(t, 1, budgetsActive)
 	defer stop()
 	engine, ledger := nodes[0].engine, nodes[0].ledger
 
@@ -281,4 +288,43 @@ func everyNodeHas(nodes []*testNode, account string, want uint64) bool {
 		}
 	}
 	return true
+}
+
+// The rules move money differently rather than only refusing more: a node
+// without them reads a budget account as an ordinary recipient, charges the fee
+// opening one is exempt from, and credits a string as a seller. Two nodes would
+// apply the same block and reach different balances - which is why this is
+// gated on a version and not simply shipped.
+func TestABudgetIsNotAConsensusOperationUntilItsActivationHeight(t *testing.T) {
+	const activation uint64 = 100
+	nodes, stop := newCluster(t, 1, func(c *Config) {
+		c.ProtocolUpgrades = append(c.ProtocolUpgrades,
+			ProtocolUpgrade{Height: activation, Version: ProtocolVersionSpendBudgets})
+	})
+	defer stop()
+	e := nodes[0].engine
+
+	buyer, _ := token.GenerateAccount()
+	delegate, _ := token.GenerateAccount()
+	budget := budgetFor(t, buyer, delegate.PublicKey, time.Now().Add(time.Hour).Unix())
+	tx := signedTransfer(t, buyer, budget.Account(), 1_000, 1)
+
+	e.mu.Lock()
+	before := e.verifyReservedRecipientLocked(tx, activation-1)
+	at := e.verifyReservedRecipientLocked(tx, activation)
+	e.mu.Unlock()
+
+	if before == nil {
+		t.Error("a budget was accepted at a height whose rules do not have budgets in them")
+	}
+	if at != nil {
+		t.Errorf("a budget was refused at its own activation height: %v", at)
+	}
+
+	// And the refusal must be "not yet" rather than "never": Submit keeps a
+	// transaction that will become valid, and drops one that cannot. A budget
+	// opened before the activation lands by itself once the height arrives.
+	if err := isPermanentlyInvalidReserved(tx); err != nil {
+		t.Errorf("a well-formed budget was called permanently invalid, so it would never land: %v", err)
+	}
 }
