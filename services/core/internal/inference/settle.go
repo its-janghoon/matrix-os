@@ -187,14 +187,22 @@ func runReportingProgress(
 	}
 
 	var produced uint64
-	result, err := streamBackend(ctx, backend, req, func(delta string) error {
-		// Summed per delta rather than measured over the whole text, because the
-		// whole text is exactly what is not available yet. It is a progress
-		// signal and never the bill: what settles is computed below from the
-		// usage the backend reports, clamped twice.
-		produced += uint64(countTokens(delta))
-		return onProgress(produced)
-	})
+	result, err := streamBackend(ctx, backend, req,
+		func(delta string) error {
+			// Summed per delta rather than measured over the whole text, because the
+			// whole text is exactly what is not available yet. It is a progress
+			// signal and never the bill: what settles is computed below from the
+			// usage the backend reports, clamped twice.
+			produced += uint64(countTokens(delta))
+			return onProgress(produced)
+		},
+		func(tokens int) error {
+			// A reasoning model's working counts toward progress and its text does
+			// not travel at all - see WorkingFunc. Both go into one running total
+			// because the buyer is watching one wait, not two.
+			produced += uint64(tokens)
+			return onProgress(produced)
+		})
 	if err != nil {
 		return InferenceResponse{}, false, err
 	}
