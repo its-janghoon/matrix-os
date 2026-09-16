@@ -113,7 +113,7 @@ export function StakePanel({
                   setProblem('No wallet extension is installed on this page.');
                   return;
                 }
-                setSigner(await connectMetamask());
+                setSigner(await connectMetamask({ chooseAccount: true }));
               } catch (err) {
                 setProblem(reportProblem(err));
               }

@@ -19,7 +19,7 @@ import {
 import type { Message } from '@/lib/wallet/signing';
 import { checkReceipt, receiptVerdict, type ReceiptCheck } from '@/lib/wallet/receipt';
 import { browserSigner } from '@/lib/wallet/browserSigner';
-import { connectMetamask, metamaskAvailable } from '@/lib/wallet/metamask';
+import { connectMetamask, isEvmSigner, MetamaskSigner, metamaskAvailable } from '@/lib/wallet/metamask';
 import type { Signer } from '@/lib/wallet/signer';
 import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
 
@@ -110,6 +110,28 @@ function Chat() {
       .catch(() => setSigner(null))
       .finally(() => setChecking(false));
   }, []);
+
+  // MetaMask can change account underneath the page, and until this existed it
+  // did so invisibly: the header kept naming the account that connected while
+  // the extension had moved on, so the balance shown, the receipts checked and
+  // the charges settled all belonged to an account the reader was no longer
+  // using. Following the change is the only honest option - a page cannot hold
+  // a wallet to an account, and pretending it did is what made the mismatch
+  // silent.
+  useEffect(() => {
+    if (!signer || !isEvmSigner(signer)) return;
+    return signer.subscribe((change) => {
+      if (change.address === undefined || change.address === signer.address) return;
+      // The transcript and the balance belong to the old account. Clearing them
+      // is not tidiness: leaving one account's paid answers above another
+      // account's next prompt would be showing someone else's purchase as
+      // theirs.
+      setTurns([]);
+      setBalance(null);
+      setProblem('');
+      setSigner(change.address === null ? null : new MetamaskSigner(signer.provider, change.address));
+    });
+  }, [signer]);
 
   // A counter rather than a boolean, so a stale reload cannot clobber a newer
   // one when the endpoint is edited twice in quick succession.
@@ -239,6 +261,27 @@ function Chat() {
                   >
                     refresh
                   </button>
+                  {signer.kind === 'metamask' ? (
+                    <button
+                      className='text-gray-400 underline hover:text-gray-200'
+                      onClick={async () => {
+                        // Disconnecting first and connecting again does NOT do
+                        // this: the wallet already holds a permission for this
+                        // site and hands the same account straight back without
+                        // asking. Only a permission request re-opens the picker.
+                        try {
+                          setSigner(await connectMetamask({ chooseAccount: true }));
+                          setTurns([]);
+                          setBalance(null);
+                          setProblem('');
+                        } catch (err) {
+                          setProblem(err instanceof Error ? err.message : String(err));
+                        }
+                      }}
+                    >
+                      use a different account
+                    </button>
+                  ) : null}
                   <button
                     className='text-gray-500 underline hover:text-gray-300'
                     onClick={async () => {
@@ -359,7 +402,7 @@ function NoWallet({ onReady }: { onReady: (s: Signer) => void }) {
               return;
             }
             try {
-              onReady(await connectMetamask());
+              onReady(await connectMetamask({ chooseAccount: true }));
             } catch (err) {
               setProblem(err instanceof Error ? err.message : String(err));
             }
