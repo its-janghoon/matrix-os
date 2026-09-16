@@ -105,11 +105,14 @@ const (
 	// person sees them - which is the whole protection once per-draw approval is
 	// gone. They are named as a person would say them for that reason.
 	//
-	// maxPricePerUnit is not decoration. "May only pay for inference" is not a
-	// bound on its own: whoever holds a stolen delegate key can register as a
-	// provider, quote an absurd price and settle against themselves, and the
-	// money has still only ever paid for inference. A price ceiling and a
-	// per-job cap are what turn the scope into a limit.
+	// cap and expiry are the bounds that hold against a stolen delegate key,
+	// because consensus can check both from the block alone. maxPricePerUnit is
+	// checked by the buyer's own client when it picks a seller - consensus sees
+	// a draw as an amount and has no unit count to divide by - so it bounds an
+	// honest client against an expensive market and not a thief. It is in the
+	// signed message so the bound travels with the grant rather than living in
+	// one page's settings, and the difference is written down in spendauth.go
+	// because believing the stronger claim would be worse than not having it.
 	eip712SpendingAuthorizationType = "SpendingAuthorization(address buyer,bytes32 delegate,uint256 cap,uint256 perJobCap,uint256 maxPricePerUnit,int64 expiry,uint256 nonce)"
 )
 

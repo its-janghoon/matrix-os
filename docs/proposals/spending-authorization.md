@@ -46,24 +46,79 @@ The delegate is an **ed25519 public key, not an address**, which is deliberate: 
 
 ### What consensus has to enforce
 
-State, one record per `(buyer, delegate)`:
+There are three operations and no new state beyond one account:
+
+- **Open.** A transfer from the buyer into the escrow account named below. The amount deposited is the budget.
+- **Draw.** A transfer out of that escrow to a provider, signed by the DELEGATE rather than by the buyer. Consensus refuses it unless the delegate is the one the account names, the block's time is before the expiry, and the amount is within `perJobCap` and within the balance.
+- **Close.** The remaining balance returns to the buyer. After expiry anyone may trigger it, because by then it is not a decision; before expiry only the buyer, and that is what revocation is.
+
+Every check reads the block and the ledger, so four nodes reach the same verdict. In particular the clock is the BLOCK's, never `time.Now()`: four wall clocks are four answers, and an authorization that expires on one node and not another is a fork. Expiry is the moment it is dead rather than the last moment it lives, for the same reason.
+
+A refusal is never a clamp. A partly-paid job is worse than a refused one, because the buyer has paid for something they did not get.
+
+### What `maxPricePerUnit` does and does not bound
+
+**Corrected after starting the implementation, because the first version of this
+section claimed a protection that does not exist.** It said the price ceiling is
+what stops a thief with the delegate key from registering as a provider, quoting
+an absurd price and settling against themselves.
+
+Consensus cannot enforce it. A draw is an amount moving to a provider; there is
+no unit count in it to divide by. Carrying one would not help either, because in
+the case being defended against the unit count is asserted by the same person
+who holds the stolen key.
+
+**What actually bounds a stolen delegate key is the escrow balance and the
+expiry**, and those are exactly the two consensus can check from the block
+alone. That is what a budget means, and it is enough - but it has to be said
+plainly rather than dressed up with a third bound that sounds stronger.
+
+`maxPricePerUnit` stays in the signed message, doing a smaller and real job: the
+buyer's own client refuses a seller dearer than this when it picks one. It
+bounds an honest client against an expensive market. It travels with the grant
+rather than living in one page's settings, which is why it is signed.
+
+A consensus-side version is possible later and is a different check: compare the
+ceiling against the price in the PROVIDER REGISTRY, which is consensus state and
+not the caller's to assert. It is not in this proposal because the cap already
+bounds the loss, and coupling settlement to a registry lookup is real complexity
+for a second lock on the same door.
+
+### How the terms reach consensus, which turned out to need no new wire format
+
+The first sketch had each draw carry the signed authorization so consensus could
+read its terms, which meant a new field on the transaction and therefore a
+protocol message change. Writing it showed that is not necessary, because this
+chain already addresses consensus operations by naming them in the recipient
+string - a bond is a transfer to `consensus/stake/bond/<id>`, a burn release to
+`bridge/unlock/<hash>/<account>/<amount>`.
+
+So the escrow account's NAME carries the terms:
 
 ```
-spend/auth/<buyer>/<delegate> -> { cap, perJobCap, maxPricePerUnit, expiry, nonce, spent }
+spend/escrow/<buyer>/<delegate>/<perJobCap>/<maxPricePerUnit>/<expiry>/<nonce>
 ```
 
-The rules, applied deterministically from a committed block, the way `burnunlock.go` already applies the bridge release:
+Three things fall out of that, and together they are why this is the shape to
+build:
 
-- A transfer signed by a delegate rather than by the buyer is valid **only** if a live authorization names that delegate, and only for an inference settlement or an inference escrow deposit. **Never for a plain transfer to an address of the signer's choosing.** That single restriction is what keeps a stolen delegate key from being a drained account.
-- `spent + amount <= cap`, `amount <= perJobCap`, `now < expiry`, and the seller's `price_per_unit <= maxPricePerUnit`. Any failure is a refusal, never a clamp.
-- A higher-nonce authorization for the same `(buyer, delegate)` replaces the lower one. Setting `cap` to zero is therefore revocation, and it is signed by the wallet, so it needs nothing from us.
-- Expiry is absolute, not a sliding window. An authorization nobody revoked still dies.
+- **The buyer's ordinary transfer signature already covers the terms**, because
+  `to` is part of what a transfer signs. Opening an escrow is a transfer into
+  that account and nothing else.
+- **The remaining budget is that account's balance**, so there is no separate
+  spend record to keep in step, and it is inside the state root already - the
+  root is a fold over balances. A separate record would have been new state that
+  the root does not cover, which is the shape of a silent divergence.
+- **A draw needs no extra bytes at all.** It is a transfer out of the escrow
+  signed by the delegate; consensus parses the terms from the account it is
+  drawing from.
 
-### Why `maxPricePerUnit` is in there
-
-Without it the restriction above is not enough. An attacker holding a delegate key can register themselves as a provider, quote an absurd price, and settle against themselves - the money still only goes "to an inference settlement", and it still lands in the attacker's pocket. `maxPricePerUnit` plus `perJobCap` bounds that to something close to the honest cost of the work, and both are numbers a buyer has an honest reason to set anyway.
-
-This is the kind of hole that appears when a scope is written as "can only pay for inference" and not as "can only pay THIS much for inference". It should stay in the doc even after it is fixed.
+The cost is honest and worth naming: the wallet prompt shows the terms as a long
+recipient string rather than as labelled fields. Everything the buyer is
+agreeing to is visible, but it reads like a path and not like a budget. The
+EIP-712 `SpendingAuthorization` type exists for the version that shows them
+properly, and buying that costs carrying its signature on every draw. Ship the
+plain one first and see whether the string is actually the problem it looks like.
 
 ### How it composes with the escrow proposal
 
