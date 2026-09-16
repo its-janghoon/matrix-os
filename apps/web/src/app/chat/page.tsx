@@ -5,6 +5,7 @@ import { useSearchParams } from 'next/navigation';
 import { Suspense, useCallback, useEffect, useRef, useState } from 'react';
 
 import Navigation from '@/components/Navigation';
+import { PAGE_COLUMN } from '@/lib/layout';
 import {
   chat,
   DEFAULT_ENDPOINT,
@@ -179,7 +180,7 @@ function Chat() {
       <>
         <Navigation />
         <main className='min-h-screen bg-black px-4 pt-24 text-gray-400'>
-          <p className='mx-auto max-w-3xl'>Looking for a wallet in this browser...</p>
+          <p className={PAGE_COLUMN}>Looking for a wallet in this browser...</p>
         </main>
       </>
     );
@@ -189,10 +190,10 @@ function Chat() {
     <>
       <Navigation />
       <main className='min-h-screen bg-black px-4 pb-16 pt-24'>
-        <div className='mx-auto max-w-3xl space-y-6'>
+        <div className={`${PAGE_COLUMN} space-y-6`}>
           <header>
             <h1 className='mb-2 text-3xl font-bold text-white'>Chat, paying with your own key</h1>
-            <p className='text-gray-300'>
+            <p className='max-w-3xl text-gray-300'>
               Your own key signs every message, with MetaMask or with a key this page generates. The node never has
               it, no API key is involved, and nothing you type is stored here.
             </p>
@@ -453,7 +454,7 @@ function Transcript({
           }`}
         >
           <p className='mb-1 text-xs uppercase tracking-wide text-gray-500'>{turn.role}</p>
-          <p className='whitespace-pre-wrap text-gray-100'>{turn.content}</p>
+          <p className='max-w-3xl whitespace-pre-wrap text-gray-100'>{turn.content}</p>
           {/*
             A reasoning model's working, shown because it was BILLED. Most of a
             reasoning model's tokens go here, they settle, and the receipt's
@@ -467,7 +468,7 @@ function Transcript({
               <summary className='cursor-pointer text-xs uppercase tracking-wide text-gray-500'>
                 reasoning - you paid for these tokens
               </summary>
-              <p className='mt-2 whitespace-pre-wrap text-sm text-gray-400'>{turn.settled.reasoning}</p>
+              <p className='mt-2 max-w-3xl whitespace-pre-wrap text-sm text-gray-400'>{turn.settled.reasoning}</p>
             </details>
           ) : null}
           {turn.settled ? (
