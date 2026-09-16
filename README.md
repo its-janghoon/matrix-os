@@ -166,6 +166,19 @@ declaring it under `inference.backends`, pricing tokens against an observed cost
 basis, and which single port a buyer is actually meant to reach. A provider is
 not a validator and needs no stake, no attestor keystore, and no genesis.
 
+Joining the validator set instead is
+[the validator-join runbook](docs/runbooks/validator-join.md). Membership is
+bought with a bond rather than granted, so the whole procedure is: lower the
+admission floor if it is out of reach, fund the candidate's own consensus
+account, and let the node bond and ask for itself. It is written around the
+parts that are not obvious - that the protocol fee comes out of the amount sent
+rather than on top of it, so funding exactly the floor lands under it; that
+`min_bond` decides block validity and so cannot differ across nodes while an
+admission is in flight; that a candidate with no bridge configured tallies
+attestations and releases nothing, and diverges the first time a burn reaches
+quorum; and that an idle chain produces no blocks, so a height that does not move
+proves nothing and the acceptance test is stopping a node, not reading a config.
+
 The buying side is the [consumer runbook](docs/runbooks/consumer.md): getting
 MATRIX into an account, and the two doors a buyer can come through. The
 OpenAI-compatible `/v1/chat/completions` is a drop-in for any OpenAI SDK and is
