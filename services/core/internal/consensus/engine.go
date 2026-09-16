@@ -2341,6 +2341,8 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 		return e.verifyMaintainerRotateLocked(tx)
 	case IsBridgeLockRecipient(tx.To):
 		return e.verifyBridgeLockLocked(tx)
+	case IsSpendRecipient(tx.To):
+		return verifySpendTx(tx)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		return e.verifyLaunchRepairLocked(tx)
 	}
@@ -2412,6 +2414,15 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 			return err
 		}
 		valueAllowed = true
+	case IsSpendRecipient(tx.To):
+		if err := verifySpendTx(tx); err != nil {
+			return err
+		}
+		// Two of the three carry value: opening a budget moves the buyer's coins
+		// into it, and a draw moves some back out to a seller. A close names the
+		// whole remaining balance and so carries none - the amount is not the
+		// caller's to choose, exactly as a bond withdrawal's is not.
+		valueAllowed = !strings.HasPrefix(tx.To, spendClosePrefix)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		spec, ok := repairSpec(tx.To)
 		if !ok {
@@ -3617,6 +3628,31 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = ok
 				continue
 			}
+			if IsSpendRecipient(tx.To) {
+				// A budget: opened, drawn on, or closed. Opening and closing move
+				// a buyer's own coins into and out of their own escrow and are
+				// deliberately NOT credited - counting them would pay the provider
+				// emission to somebody funding themselves. A DRAW is a real
+				// payment to a seller, so it is charged the fee and recorded as
+				// revenue exactly as an ordinary transfer to that account is.
+				eff, err := e.applySpendOperation(ltx, tx, b.Timestamp)
+				if err != nil {
+					return err
+				}
+				if eff.fee > 0 {
+					feesTaken += eff.fee
+				}
+				if eff.payee != "" && eff.net > 0 {
+					if credited[eff.payee] > ^uint64(0)-eff.net {
+						credited[eff.payee] = ^uint64(0)
+					} else {
+						credited[eff.payee] += eff.net
+					}
+					revenue = append(revenue, payment{payer: eff.payer, payee: eff.payee, amount: eff.net})
+				}
+				applied[mempoolKey(tx)] = eff.applied
+				continue
+			}
 			if IsPinnedPoolTransferRecipient(tx.To) {
 				ok, err := applyLaunchRepair(ltx, tx)
 				if err != nil {
@@ -4596,7 +4632,8 @@ func IsReservedRecipient(to string) bool {
 		IsBurnUnlockRecipient(to) ||
 		IsMaintainerRotateRecipient(to) ||
 		IsBridgeLockRecipient(to) ||
-		IsPinnedPoolTransferRecipient(to)
+		IsPinnedPoolTransferRecipient(to) ||
+		IsSpendRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value
