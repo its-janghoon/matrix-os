@@ -1,0 +1,324 @@
+#!/usr/bin/env bash
+# Roll a matrix-os release onto every node of a running network and schedule a
+# protocol-version activation, with the gates the budget-activation runbook asks
+# for. Run it from a machine that can ssh to all of them.
+#
+#   MATRIX_ROLLOUT_BOXES="label|host|keyfile|role   (one per line, role=validator|seller)"
+#   ./scripts/rollout.sh <release-tag> <protocol-version>
+#
+# Example:
+#   export MATRIX_ROLLOUT_BOXES="validator-1|v1.example.com|$HOME/k.pem|validator
+#   gpu|203.0.113.10|$HOME/other.pem|seller"
+#   ./scripts/rollout.sh v0.4.0 2
+#
+# WHY IT IS SHAPED THIS WAY. A protocol version is part of block validity, so two
+# nodes with different schedules disagree about the same block. The dangerous
+# state is therefore not "a node is down" - it is "some nodes carry the schedule
+# and some do not". Every failure path below either completes the change
+# everywhere or undoes it everywhere; it never stops in between.
+#
+# It is safe to re-run: each step checks whether it is already done, and a box
+# that is already on the release, or already carries the schedule, is skipped.
+#
+# HOW IT DECIDES A NODE IS HEALTHY. Not by watching the height go up. A chain
+# with no transactions produces no blocks (see engine.go: an idle proposer
+# returns nil rather than minting an empty block), so "the height moved" is a
+# test that fails on a perfectly healthy quiet network. What it checks instead is
+# that every validator reports the same head hash AND the same state root, which
+# is the property a rule change actually depends on.
+#
+# HOW IT PICKS THE HEIGHT. By measuring this chain, not by assuming a cadence.
+# A lead quoted in blocks means nothing without a block rate - 2000 blocks is
+# fifty minutes on a busy chain and two days on a quiet one.
+
+set -uo pipefail
+
+V=${1:-}
+NEW_PROTOCOL_VERSION=${2:-}
+[ -n "$V" ] && [ -n "$NEW_PROTOCOL_VERSION" ] || {
+  echo "usage: $0 <release-tag> <protocol-version>   (e.g. $0 v0.4.0 2)" >&2; exit 2; }
+: "${MATRIX_ROLLOUT_BOXES:?set MATRIX_ROLLOUT_BOXES to lines of label|host|keyfile|role}"
+
+REPO=${MATRIX_ROLLOUT_REPO:-savagemanage/matrix-os}
+MIN_LEAD=200              # never schedule closer than this many blocks
+TARGET_LEAD_SECONDS=3600  # aim for about an hour of wall clock
+
+mapfile -t BOXES <<< "$(echo "$MATRIX_ROLLOUT_BOXES" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//" | grep -v "^$")"
+
+say()  { printf "\n== %s\n" "$*"; }
+info() { printf "   %s\n" "$*"; }
+die()  { printf "\nABORT: %s\n" "$*" >&2; exit 1; }
+
+field() { echo "$1" | cut -d"|" -f"$2"; }
+
+# rsh <host> <key> <script> [arg]
+rsh() {
+  local host=$1 key=$2 script=$3 arg=${4:-}
+  ssh -i "$key" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
+      -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" <<< "$script"
+}
+
+# ---------------------------------------------------------------- payloads
+
+read -r -d "" R_COMMON <<'EOS'
+P=$(pgrep -x matrixd || true)
+[ -z "$P" ] && { echo "ERR matrixd not running"; exit 1; }
+BIN=$(sudo readlink -f "/proc/$P/exe")
+D=$(dirname "$BIN")
+CMD=$(sudo tr "\0" "\n" < "/proc/$P/cmdline")
+CFG=$(echo "$CMD" | grep -A1 -x -- -config | tail -1)
+[ -z "$CFG" ] && CFG=$(echo "$CMD" | sed -n "s/^-config=//p")
+[ -z "$CFG" ] && { echo "ERR no -config on the command line"; exit 1; }
+port() {
+  sudo awk -v s="$1" '$0 ~ "^" s ":" {f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/addr:/{print $2; exit}' "$CFG" \
+    | tr -d "\"" | sed "s/.*://"
+}
+RPC=$(port eth_rpc)
+chaininfo() {
+  [ -z "$RPC" ] && return 1
+  curl -s --max-time 6 -X POST "http://127.0.0.1:$RPC" \
+    -H "content-type: application/json" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}'
+}
+EOS
+
+# STATE: height|head|root|version|cfg
+R_STATE="$R_COMMON"'
+J=$(chaininfo || true)
+H=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"height\":\([0-9]*\).*/\1/p" | head -1)
+HD=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"head_hash\":\"\([^\"]*\)\".*/\1/p" | head -1)
+SR=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"state_root\":\"\([^\"]*\)\".*/\1/p" | head -1)
+SCHED=$(sudo sed -n "/protocol_upgrades:/,/^[[:space:]]*[a-z_]*:/p" "$CFG" | grep -E "height:|version:" | tr -d " " | tr "\n" ";")
+echo "OK|${H:-0}|${HD:-none}|${SR:-none}|$(matrixd -version 2>&1 | head -1)|$CFG|${SCHED:-empty}"
+'
+
+# UPGRADE: install v0.4.0 unless already on it
+R_UPGRADE="$R_COMMON"'
+V=$1
+if matrixd -version 2>&1 | grep -q "$V" && matrix --version 2>&1 | grep -q "$V"; then
+  echo "SKIP already on $V"; exit 0
+fi
+case "$(uname -m)" in aarch64|arm64) G=arm64;; x86_64|amd64) G=amd64;; *) echo "ERR unknown arch $(uname -m)"; exit 1;; esac
+T=/tmp/mx-$V; rm -rf "$T"; mkdir -p "$T"; cd "$T" || exit 1
+N=matrix-os-$V-linux-$G.tar.gz
+curl -fsSL -o "$N" "https://github.com/'"$REPO"'/releases/download/$V/$N" || { echo "ERR download failed"; exit 1; }
+curl -fsSL -o SHA256SUMS "https://github.com/'"$REPO"'/releases/download/$V/SHA256SUMS" || { echo "ERR checksum download failed"; exit 1; }
+sha256sum --check --ignore-missing SHA256SUMS > /dev/null 2>&1 || { echo "ERR CHECKSUM MISMATCH"; exit 1; }
+tar -xzf "$N" || { echo "ERR extract failed"; exit 1; }
+./matrixd -version | grep -q "$V" || { echo "ERR staged matrixd is not $V"; exit 1; }
+./matrix --version | grep -q "$V" || { echo "ERR staged matrix is not $V"; exit 1; }
+# Everything above touched nothing. Only now is the node stopped.
+sudo systemctl stop matrixd || { echo "ERR stop failed"; exit 1; }
+sudo install -m 0755 "$T/matrixd" "$D/matrixd"
+sudo install -m 0755 "$T/matrix"  "$D/matrix"
+sudo systemctl start matrixd || { echo "ERR start failed"; exit 1; }
+sleep 15
+systemctl is-active --quiet matrixd || { echo "ERR did not come back"; sudo journalctl -u matrixd -n 25 --no-pager; exit 1; }
+echo "OK installed $(matrixd -version 2>&1 | head -1) / $(matrix --version 2>&1 | head -1) into $D"
+'
+
+# SCHEDULE: put protocol_upgrades at height $1, preflight, restart
+R_SCHEDULE="$R_COMMON"'
+H=$1
+[ -z "$H" ] && { echo "ERR no height given"; exit 1; }
+WANT="- height: $H"
+if sudo grep -q "height: $H" "$CFG" && sudo grep -q "version: '"$NEW_PROTOCOL_VERSION"'" "$CFG"; then
+  echo "SKIP schedule already at $H"; exit 0
+fi
+if ! sudo grep -qE "^[[:space:]]*protocol_upgrades:[[:space:]]*\[\][[:space:]]*$" "$CFG"; then
+  echo "ERR protocol_upgrades is not the empty list this expects; refusing to edit"
+  sudo grep -n -A4 "protocol_upgrades" "$CFG"
+  exit 1
+fi
+BK="$CFG.pre-budgets.$(date +%Y%m%d-%H%M%S)"
+sudo cp -p "$CFG" "$BK"
+sudo sed -i "s|^\([[:space:]]*\)protocol_upgrades:[[:space:]]*\[\][[:space:]]*$|\1protocol_upgrades:\n\1  - height: $H\n\1    version: '"$NEW_PROTOCOL_VERSION"'|" "$CFG"
+if ! sudo grep -q "height: $H" "$CFG"; then
+  sudo cp -p "$BK" "$CFG"; echo "ERR edit did not take; config restored"; exit 1
+fi
+# Gate on the real parser before anything restarts. The node is still running.
+if ! sudo matrixd -preflight-production -config "$CFG" > /tmp/preflight.out 2>&1; then
+  sudo cp -p "$BK" "$CFG"
+  echo "ERR preflight refused the edited config; config restored, node untouched"
+  tail -20 /tmp/preflight.out
+  exit 1
+fi
+sudo systemctl restart matrixd || { sudo cp -p "$BK" "$CFG"; echo "ERR restart failed; config restored"; exit 1; }
+sleep 15
+if ! systemctl is-active --quiet matrixd; then
+  sudo cp -p "$BK" "$CFG"; sudo systemctl restart matrixd
+  echo "ERR node did not come back; config restored and node restarted on the old config"
+  exit 1
+fi
+echo "OK scheduled version '"$NEW_PROTOCOL_VERSION"' at height $H (backup $BK)"
+'
+
+# UNSCHEDULE: restore the newest backup this script wrote, preflight, restart.
+R_UNSCHEDULE="$R_COMMON"'
+BK=$(sudo find "$(dirname "$CFG")" -maxdepth 1 -name "$(basename "$CFG").pre-budgets.*" 2>/dev/null | sort | tail -1)
+[ -z "$BK" ] && { echo "SKIP no backup here, nothing to undo"; exit 0; }
+sudo cp -p "$BK" "$CFG"
+sudo matrixd -preflight-production -config "$CFG" > /dev/null 2>&1 || { echo "ERR restored config fails preflight"; exit 1; }
+sudo systemctl restart matrixd || { echo "ERR restart failed during rollback"; exit 1; }
+sleep 15
+systemctl is-active --quiet matrixd || { echo "ERR node did not come back during rollback"; exit 1; }
+echo "OK rolled back to $BK"
+'
+
+# ---------------------------------------------------------------- helpers
+
+read_state() { # label host key -> echoes "OK|height|head|root|version|cfg|sched"
+  local label=$1 host=$2 key=$3
+  rsh "$host" "$key" "$R_STATE" 2>&1 | tail -1
+}
+
+# All validators must report the same head and the same state root.
+check_agreement() {
+  local ref_head="" ref_root="" ref_label="" bad=0 b label host key role out head root height
+  for b in "${BOXES[@]}"; do
+    label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
+    [ "$role" = validator ] || continue
+    out=$(read_state "$label" "$host" "$key")
+    case "$out" in OK\|*) ;; *) info "$label: $out"; bad=1; continue;; esac
+    height=$(field "$out" 2); head=$(field "$out" 3); root=$(field "$out" 4)
+    info "$(printf '%-12s height=%-6s head=%s root=%s' "$label" "$height" "${head:0:14}" "${root:0:14}")"
+    if [ -z "$ref_head" ]; then ref_head=$head; ref_root=$root; ref_label=$label; continue; fi
+    if [ "$head" != "$ref_head" ] || [ "$root" != "$ref_root" ]; then
+      info "  ^^ DISAGREES with $ref_label"; bad=1
+    fi
+  done
+  return $bad
+}
+
+wait_for_agreement() {
+  local tries=${1:-10} i
+  for ((i=1;i<=tries;i++)); do
+    info "agreement check $i/$tries"
+    if check_agreement; then info "all validators agree"; return 0; fi
+    sleep 12
+  done
+  return 1
+}
+
+SCHEDULED=()
+
+rollback_schedule() {
+  local why=$1 entry label host key out
+  printf "\n!! %s\n" "$why" >&2
+  if [ ${#SCHEDULED[@]} -eq 0 ]; then
+    die "nothing had been scheduled yet, so nothing to undo"
+  fi
+  printf "!! %d box(es) already carry the schedule. Undoing them now - a schedule on\n" "${#SCHEDULED[@]}" >&2
+  printf "!! some nodes and not others is the one state that splits the chain.\n" >&2
+  for entry in "${SCHEDULED[@]}"; do
+    label=$(field "$entry" 1); host=$(field "$entry" 2); key=$(field "$entry" 3)
+    out=$(rsh "$host" "$key" "$R_UNSCHEDULE" 2>&1 | tail -3)
+    printf "!!   %-12s %s\n" "$label" "$out" >&2
+  done
+  printf "!! Rollback attempted on every box above. Verify each one before retrying.\n" >&2
+  exit 1
+}
+
+# ---------------------------------------------------------------- run
+
+say "0. Reachability and starting state"
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
+  [ -r "$key" ] || die "cannot read key $key"
+  out=$(read_state "$label" "$host" "$key")
+  case "$out" in
+    OK\|*) info "$(printf '%-12s %s  cfg=%s  sched=%s' "$label" "$(field "$out" 5)" "$(field "$out" 6)" "$(field "$out" 7)")" ;;
+    *)     die "$label unreachable or unhealthy: $out" ;;
+  esac
+done
+
+FIRST_V=""
+for b in "${BOXES[@]}"; do
+  [ "$(field "$b" 4)" = validator ] && { FIRST_V=$b; break; }
+done
+[ -n "$FIRST_V" ] || die "MATRIX_ROLLOUT_BOXES names no validator"
+
+say "1. Validators must agree before anything is touched"
+check_agreement || die "validators do not agree on head/state root. This must be resolved before a rule change is scheduled."
+
+say "2. Binary rollout, one box at a time"
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
+  say "2.$label"
+  out=$(rsh "$host" "$key" "$R_UPGRADE" "$V" 2>&1 | tail -3)
+  case "$out" in
+    SKIP*) info "$out" ;;
+    OK*)   info "$out"
+           if [ "$role" = validator ]; then
+             wait_for_agreement 10 || die "$label did not rejoin agreement after upgrade"
+           fi ;;
+    *)     die "$label upgrade failed: $out" ;;
+  esac
+done
+
+say "3. Confirm every box is on $V"
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
+  out=$(read_state "$label" "$host" "$key")
+  ver=$(field "$out" 5)
+  info "$(printf '%-12s %s' "$label" "$ver")"
+  echo "$ver" | grep -q "$V" || die "$label is on $ver, not $V"
+done
+
+say "4. Measure the block rate and choose the activation height"
+out=$(read_state "$(field "$FIRST_V" 1)" "$(field "$FIRST_V" 2)" "$(field "$FIRST_V" 3)")
+H1=$(field "$out" 2)
+[ "${H1:-0}" -gt 0 ] || die "could not read a height from $(field "$FIRST_V" 1)"
+info "height now $H1, sampling for 90s to measure the rate"
+sleep 90
+out=$(read_state "$(field "$FIRST_V" 1)" "$(field "$FIRST_V" 2)" "$(field "$FIRST_V" 3)")
+H2=$(field "$out" 2)
+DELTA=$((H2 - H1))
+info "produced $DELTA blocks in 90s"
+if [ "$DELTA" -le 0 ]; then
+  LEAD=$MIN_LEAD
+  info "chain is idle; using the floor of $LEAD blocks. Activation may be hours away."
+  ETA="unknown (idle chain)"
+else
+  LEAD=$(( (DELTA * TARGET_LEAD_SECONDS) / 90 ))
+  [ "$LEAD" -lt "$MIN_LEAD" ] && LEAD=$MIN_LEAD
+  SECS=$(( (LEAD * 90) / DELTA ))
+  ETA="about $((SECS / 60)) minutes from now"
+fi
+TARGET=$((H2 + LEAD))
+say "ACTIVATION HEIGHT = $TARGET   (current $H2, lead $LEAD blocks, $ETA)"
+
+say "5. Write the schedule to every box"
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
+  say "5.$label"
+  out=$(rsh "$host" "$key" "$R_SCHEDULE" "$TARGET" 2>&1 | tail -5)
+  case "$out" in
+    SKIP*|OK*) info "$out"; SCHEDULED+=("$b") ;;
+    *)         rollback_schedule "$label refused the schedule: $out" ;;
+  esac
+  if [ "$role" = validator ]; then
+    wait_for_agreement 10 || rollback_schedule "$label did not rejoin agreement after the schedule restart"
+  fi
+done
+
+say "6. Final check: same version, same schedule, same ledger"
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
+  out=$(read_state "$label" "$host" "$key")
+  info "$(printf '%-12s %s  sched=%s' "$label" "$(field "$out" 5)" "$(field "$out" 7)")"
+  field "$out" 7 | grep -q "height:$TARGET" || die "$label does not carry height $TARGET"
+done
+check_agreement || die "validators disagree after the rollout"
+
+out=$(read_state "$(field "$FIRST_V" 1)" "$(field "$FIRST_V" 2)" "$(field "$FIRST_V" 3)")
+NOW=$(field "$out" 2)
+if [ "$TARGET" -le "$NOW" ]; then
+  die "the chain is already at $NOW, past the scheduled $TARGET. The activation boundary was crossed while this ran; check every node for a version disagreement immediately."
+fi
+info "height $NOW, activation at $TARGET, $((TARGET - NOW)) blocks to go"
+
+say "DONE. v0.4.0 on all five boxes; spend budgets activate at height $TARGET ($ETA)."
+echo
+echo "Nothing more to do. Every node switches at that height on its own."
+echo "Until then the chain behaves exactly as it did on v0.3.9."
