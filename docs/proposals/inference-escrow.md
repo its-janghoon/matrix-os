@@ -77,6 +77,16 @@ That is strictly less control, and it is the model every metered API already use
 
 Nothing about the provider being trusted to report token counts. The ceiling still does that work, and it still bounds the bill by the text the buyer receives.
 
+## The half this does not cover
+
+It makes the answer stream. It does not change how OFTEN a buyer signs: the
+transfer at step 2 is still one wallet prompt per job, on top of the run
+authorization. [`spending-authorization.md`](spending-authorization.md) is the
+other half - one signature that delegates a bounded budget to a subordinate key,
+so the per-job signature is made by that key and not by the wallet. Shipped
+alone, each proposal leaves one of the complaints in place; they should go out
+under one activation height.
+
 ## Recommendation
 
 Build it, but not next. In order:
