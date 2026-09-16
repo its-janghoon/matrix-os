@@ -351,3 +351,36 @@ func TestABudgetIsNotAConsensusOperationUntilItsActivationHeight(t *testing.T) {
 		t.Errorf("a well-formed budget was called permanently invalid, so it would never land: %v", err)
 	}
 }
+
+// A budget's terms are its account's NAME, so a buyer who has cleared their
+// browser has nothing left that names the account their money is in. The deposit
+// in their own transaction history is the way back to it - which means budget
+// operations have to be IN that history, unlike every other reserved recipient.
+func TestABuyerCanFindTheirOwnBudgetAgainFromTheirHistory(t *testing.T) {
+	buyer, _ := token.GenerateAccount()
+	delegate, _ := token.GenerateAccount()
+	budget := budgetFor(t, buyer, delegate.PublicKey, time.Now().Add(time.Hour).Unix())
+	seller := hex.EncodeToString(make([]byte, 32))
+
+	for name, tx := range map[string]*token.Transaction{
+		"opening a budget": signedTransfer(t, buyer, budget.Account(), 1_000, 1),
+		"drawing on one":   signedTransfer(t, delegate, budget.DrawRecipient(seller), 100, 1),
+		"closing one":      signedTransfer(t, buyer, budget.CloseRecipient(), 0, 2),
+	} {
+		if !isHistoryTransfer(tx) {
+			t.Errorf("%s is missing from the history, so the money went somewhere with nothing to show for it", name)
+		}
+		// And each is held to the sender-nonce rule, so a draw signed once
+		// cannot commit twice and debit the budget for one job twice over.
+		if _, ok := nonceKey(tx); !ok {
+			t.Errorf("%s is exempt from the uniqueness rule, so it can be replayed", name)
+		}
+	}
+
+	// The other reserved recipients stay out of both, which is what they are
+	// for: they carry protocol state rather than a payment.
+	bond := signedTransfer(t, buyer, "consensus/stake/bond/"+buyer.AccountID(), 1_000, 1)
+	if isHistoryTransfer(bond) {
+		t.Error("a bond leaked into the payment history")
+	}
+}
