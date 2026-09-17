@@ -201,3 +201,29 @@ func escrowRequestToInternal(req *inferencev1.ReserveInferenceEscrowRequest) inf
 		Temperature: req.GetTemperature(),
 	}
 }
+
+// RecoverEscrowedInferenceJob returns the settlement for a funded job the buyer
+// is no longer streaming.
+//
+// The settlement rides on the stream's last frame, so a buyer who cancelled,
+// reloaded, or lost their connection mid-answer never received it - and without
+// it they cannot settle, which costs them the WHOLE reservation when the
+// provider claims it. This is how they come back for it.
+func (s *Service) RecoverEscrowedInferenceJob(
+	ctx context.Context,
+	req *inferencev1.RecoverEscrowedInferenceJobRequest,
+) (*inferencev1.RecoverEscrowedInferenceJobResponse, error) {
+	if req == nil {
+		return nil, status.Error(codes.InvalidArgument, "request is required")
+	}
+	payment, job, cutShort, err := s.inf.RecoverEscrowSettlement(req.GetId(),
+		req.GetAuthorization().GetSignature())
+	if err != nil {
+		return nil, mapInferenceError(err)
+	}
+	return &inferencev1.RecoverEscrowedInferenceJobResponse{
+		Payment:  paymentToProto(payment),
+		Job:      jobToProto(job),
+		CutShort: cutShort,
+	}, nil
+}

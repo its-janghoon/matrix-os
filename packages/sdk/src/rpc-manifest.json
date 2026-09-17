@@ -15,6 +15,7 @@
         "FulfillInferenceJob",
         "FundInferenceEscrow",
         "GetInferenceJob",
+        "RecoverEscrowedInferenceJob",
         "ReserveInferenceEscrow",
         "RunInferenceJob",
         "RunInferenceJobProgress",

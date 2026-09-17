@@ -3,7 +3,9 @@ package inference
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -257,10 +259,34 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth [
 		s.failJob(jobID)
 		return nil, nil, fmt.Errorf("%w: %v", ErrNoBackend, err)
 	}
-	result, err := streamBackend(ctx, backend, request, onChunk, nil)
-	if err != nil {
-		s.failJob(jobID)
-		return nil, nil, fmt.Errorf("inference: streaming from provider %q failed: %w", provider, err)
+
+	// EVERY DELTA IS KEPT HERE, not only in the caller's hands.
+	//
+	// A streaming backend returns an empty response when the run ends badly - it
+	// has nothing coherent to report - so a run cut short at the hundredth token
+	// would otherwise leave this node believing nothing was produced. On a funded
+	// reservation that belief is expensive: a job marked FAILED has no settlement,
+	// and no settlement means the provider claims the WHOLE reservation at the
+	// expiry rather than the fraction the run cost. So the text is accumulated on
+	// the way past and used to bill the partial below.
+	var delivered strings.Builder
+	keeping := func(delta string) error {
+		delivered.WriteString(delta)
+		return onChunk(delta)
+	}
+
+	result, err := streamBackend(ctx, backend, request, keeping, nil)
+	cutShort := err != nil
+	if cutShort {
+		// Not failJob. The buyer paid the cap before the first token, so the only
+		// question left is what fraction of it they owe - and answering "all of
+		// it, by default" is what failing the job would do.
+		result = StreamResult{Response: partialResponse(request, delivered.String())}
+		if result.Response.Completion == "" {
+			s.failJob(jobID)
+			return nil, nil, fmt.Errorf("inference: streaming from provider %q failed before any "+
+				"text was produced: %w", provider, err)
+		}
 	}
 
 	amount, err := s.escrowCharge(marketJobID, request, result.Response, terms.Reserved)
@@ -303,9 +329,95 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth [
 	job.Status = InferenceJobAwaitingPayment
 	job.UpdatedAt = now
 	job.payment = pr
+	job.escrowCutShort = cutShort
 	s.mu.Unlock()
 
+	if cutShort {
+		// The settlement goes back with the error, because the error is not the
+		// end of the story here: the caller is gone, but the job is now settleable
+		// and RecoverEscrowSettlement will hand this same request to whoever comes
+		// back for it.
+		return pr, &result, fmt.Errorf("%w: provider %q", ErrStreamCutShort, provider)
+	}
 	return pr, &result, nil
+}
+
+// ErrStreamCutShort reports a run that stopped before the model was done -
+// usually because the buyer hung up - on a job whose reservation is funded.
+//
+// It is an error and the job is still SETTLEABLE, which is the unusual part: the
+// money moved before the work started, so the honest end of a cut-short run is a
+// bill for what was produced rather than a forfeited reservation.
+var ErrStreamCutShort = errors.New("inference: the stream ended before the model was done")
+
+// RecoverEscrowSettlement returns the settlement for a funded job the buyer is
+// no longer streaming.
+//
+// WHY A SECOND WAY TO GET IT. The settlement rides on the stream's last frame,
+// so a buyer who cancels, reloads the page, or loses their connection mid-answer
+// never receives it - and a buyer who cannot settle pays the WHOLE reservation
+// when the provider claims it, rather than the fraction the run actually cost.
+// Without this, offering a cancel button would mean offering to charge full
+// price for a partial answer.
+//
+// It reads. Calling it twice returns the same request, and it runs nothing.
+func (s *Service) RecoverEscrowSettlement(jobID string, auth []byte) (*PaymentRequest, *InferenceJob, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	job, ok := s.jobs[jobID]
+	if !ok {
+		return nil, nil, false, fmt.Errorf("%w: %q", ErrJobNotFound, jobID)
+	}
+	if job.escrow == nil {
+		return nil, nil, false, fmt.Errorf("%w: job %q has no reservation, so there is nothing "+
+			"here that was paid for in advance", ErrNotAwaitingPayment, jobID)
+	}
+	// The same credential the stream needs, for the same reason: this call hands
+	// back the completion, and a job id is not a secret.
+	if len(job.reserveAuth) > 0 && !bytes.Equal(job.reserveAuth, auth) {
+		return nil, nil, false, fmt.Errorf("%w: recovering job %q needs the authorization its "+
+			"reservation was opened with", ErrRunUnauthorized, jobID)
+	}
+	if job.Status != InferenceJobAwaitingPayment || job.payment == nil {
+		return nil, nil, false, fmt.Errorf("%w: job %q is %s and has no settlement waiting",
+			ErrNotAwaitingPayment, jobID, job.Status)
+	}
+	pr := *job.payment
+	cp := job.snapshot()
+	return &pr, &cp, job.escrowCutShort, nil
+}
+
+// partialResponse bills a run that stopped early for the text that actually
+// reached the buyer.
+//
+// The usage is DERIVED rather than reported, because a backend that errored
+// reported none - and it is derived the same way openai_stream.go derives it
+// when a vendor omits usage, from text both sides hold. The reasoning is not
+// here at all: a reasoning model's working never travels through onChunk, so
+// none of it was delivered and none of it is charged. That undercharges a
+// cut-short reasoning run, deliberately - the buyer is the one who cannot check
+// a number for text they never received.
+func partialResponse(req InferenceRequest, delivered string) InferenceResponse {
+	if delivered == "" {
+		return InferenceResponse{}
+	}
+	promptTokens := 0
+	if msgs, err := req.EffectiveMessages(); err == nil {
+		promptTokens = countTokens(promptText(msgs))
+	}
+	completionTokens := countTokens(delivered)
+	usage := Usage{
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+	}
+	return InferenceResponse{
+		Model:      req.Model,
+		Completion: delivered,
+		Usage:      usage,
+		Units:      UnitsFor(usage),
+	}
 }
 
 // SettleEscrowed submits the signed settlement and waits for consensus to pay

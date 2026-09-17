@@ -80,6 +80,13 @@ func isReadMethod(method string) bool {
 //	SettleEscrowedInferenceJob
 //	                      carries the buyer's signature over the settlement,
 //	                      checked the same way the deposit is.
+//	RecoverEscrowedInferenceJob
+//	                      carries the reservation's authorization, like the
+//	                      stream it stands in for, and needs it for the same
+//	                      reason: it hands back the completion. It reads and runs
+//	                      nothing, and it is on this list rather than in
+//	                      public_reads because what it returns belongs to one
+//	                      buyer.
 //
 // Nothing else belongs here. FundAccount moves money from the reward pool on the
 // operator's authority alone, RegisterProvider and SubmitJob commit a provider's
@@ -91,10 +98,11 @@ var signatureAuthorisedWrites = map[string]struct{}{
 	"RunInferenceJob":         {},
 	"RunInferenceJobProgress": {},
 
-	"ReserveInferenceEscrow":     {},
-	"FundInferenceEscrow":        {},
-	"StreamEscrowedInferenceJob": {},
-	"SettleEscrowedInferenceJob": {},
+	"ReserveInferenceEscrow":      {},
+	"FundInferenceEscrow":         {},
+	"StreamEscrowedInferenceJob":  {},
+	"SettleEscrowedInferenceJob":  {},
+	"RecoverEscrowedInferenceJob": {},
 }
 
 // isSignatureAuthorisedWrite reports whether a method's authority is a client

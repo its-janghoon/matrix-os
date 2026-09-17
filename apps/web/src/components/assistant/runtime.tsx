@@ -8,6 +8,7 @@ import {
   type ThreadMessage,
 } from '@assistant-ui/react';
 
+import { chatEscrowed, type EscrowPhase } from '@/lib/wallet/escrow';
 import { chat, type SellerChoice } from '@/lib/wallet/node';
 import { checkReceipt, type ReceiptCheck } from '@/lib/wallet/receipt';
 import type { Message } from '@/lib/wallet/signing';
@@ -36,6 +37,14 @@ export interface Purchase {
   /** The seller's own endpoint, which is where the work was bought. */
   servedBy: string;
   receipt?: ReceiptCheck;
+  /**
+   * The run stopped before the model was done, so the text above is what arrived
+   * and the charge is for that much.
+   *
+   * Shown rather than kept quiet: a partial answer that looks finished is the one
+   * thing a reader cannot detect for themselves, and they were billed for it.
+   */
+  cutShort?: boolean;
 }
 
 export interface MatrixChatSettings {
@@ -79,14 +88,28 @@ export function transcriptOf(messages: readonly ThreadMessage[]): Message[] {
 /**
  * Wires the chat UI to a seller on the marketplace.
  *
- * WHY THIS DOES NOT STREAM, and why that is not an omission here. The completion
- * is withheld by the serving node until the payment is signed: the buyer holds
- * their own key, so there is no way to take payment first, and handing over the
- * text before being paid would let anyone read for free. So one message is one
- * round trip that returns the whole answer, and the adapter says so by
- * returning rather than yielding. Streaming needs a pre-funded escrow the seller
- * can draw on - the same thing that would let one approval cover many messages -
- * and it is a protocol change, not a UI one.
+ * IT STREAMS, and what made that possible was not a UI change. The completion
+ * used to be withheld until the payment was signed, because the buyer holds
+ * their own key and the charge is unknowable until the work is done - so the
+ * withholding was the only thing holding them to the bargain, and handing the
+ * text over early handed over the leverage.
+ *
+ * The amount is unknowable; the RESERVATION is not. So the escrowed path pays
+ * the most the job can cost BEFORE the model starts, streams because there is
+ * nothing left to withhold, and has consensus return the change when the
+ * settlement names the actual. The adapter yields rather than returns, and each
+ * yield is text the reader has already been charged the cap for.
+ *
+ * WHEN IT FALLS BACK. A node that has not activated the escrow rules refuses the
+ * reserve, and a buyer on such a network should get an answer rather than an
+ * error about a protocol version. So the first failure of the escrowed path
+ * retries with the one this replaces - which does not stream, and says so.
+ *
+ * WHAT STOP DOES. It stops the stream and NOT the payment. The reservation is
+ * already funded by the time there is anything to stop, so the run still settles
+ * for what arrived - a stop that abandoned the job would leave the whole
+ * reservation to the provider's claim, making it the most expensive button here.
+ * The partial answer is kept and marked as partial.
  *
  * The settings are read through a ref rather than closed over, so that editing
  * the endpoint or picking another model takes effect on the NEXT message instead
@@ -112,13 +135,74 @@ export function MatrixRuntimeProvider({
 
   const adapter = useMemo<ChatModelAdapter>(
     () => ({
-      async run({ messages }) {
+      async *run({ messages, abortSignal }) {
         const { endpoint, signer, model, minBond, chosen } = latest.current.settings;
         if (!signer) throw new Error('Connect a wallet before sending a message.');
         if (model === '') throw new Error('Pick a model before sending a message.');
 
         const history = transcriptOf(messages);
-        const settled = await chat(endpoint, signer, { model, messages: history, minBond, chosen });
+
+        // The text so far, and a promise that resolves when the whole exchange
+        // has settled. The deltas arrive in a callback rather than as an async
+        // iterator, so they are queued here and drained by the loop below - a
+        // generator cannot yield from inside somebody else's callback.
+        let text = '';
+        let pending = false;
+        let finished = false;
+        let failed: unknown;
+        // Where it got to. The fallback is only safe from the FIRST step: past
+        // it the reservation is funded, and retrying down the other path would
+        // pay for the same answer twice.
+        let phase: EscrowPhase = 'reserving';
+
+        const run = chatEscrowed(endpoint, signer, {
+          model,
+          messages: history,
+          minBond,
+          chosen,
+          ...(abortSignal ? { signal: abortSignal } : {}),
+          onPhase: (p) => {
+            phase = p;
+          },
+          onDelta: (delta) => {
+            text += delta;
+            pending = true;
+          },
+        }).catch((err: unknown) => {
+          failed = err;
+          return undefined;
+        }).finally(() => {
+          finished = true;
+        });
+
+        // Poll rather than await: yielding on every delta would render a frame
+        // per token on a fast backend, which is work the browser does not need
+        // to do to look like typing.
+        //
+        // An abort does NOT break this loop. The signal is handed to the escrow
+        // client, which stops the stream and then settles for what arrived, and
+        // leaving early here would abandon a funded reservation - the reader
+        // would pay the cap for a partial answer. The wait after a stop is the
+        // settlement, and it is short.
+        while (!finished) {
+          await new Promise((r) => setTimeout(r, 50));
+          if (pending) {
+            pending = false;
+            yield { content: [{ type: 'text' as const, text }] };
+          }
+        }
+        let settled = await run;
+        if (failed !== undefined) {
+          // A node that has not activated the escrow rules refuses the reserve,
+          // and a reader on such a network should get an answer rather than an
+          // error naming a protocol version. Only from the first step: past it
+          // the reservation is funded and a retry would pay twice.
+          if (phase !== 'reserving') throw failed;
+          if (abortSignal?.aborted) throw failed;
+          settled = await chat(endpoint, signer, { model, messages: history, minBond, chosen });
+          text = settled.completion;
+        }
+        if (settled === undefined) throw new Error('the seller produced no answer');
 
         // Checked here, against the prompt this page actually sent and the
         // answer that came back. A receipt the seller's own node vouches for
@@ -136,9 +220,10 @@ export function MatrixRuntimeProvider({
           completionTokens: settled.completionTokens,
           servedBy: settled.seller.endpoint,
           ...(receipt ? { receipt } : {}),
+          ...(settled.cutShort ? { cutShort: true } : {}),
         };
 
-        return {
+        yield {
           content: [
             // The working comes first because that is the order it was produced
             // in, and it is shown at all because it was BILLED: most of a

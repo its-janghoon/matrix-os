@@ -167,6 +167,11 @@ type InferenceJob struct {
 	// applied would be giving the answer away against money that may yet be
 	// skipped as unaffordable.
 	escrowFunded bool
+	// escrowCutShort records that the run stopped before the model was done -
+	// the buyer hung up, or the provider dropped - and that the completion is
+	// therefore what arrived rather than a finished answer. Reported so a client
+	// recovering the settlement can tell the two apart before it signs.
+	escrowCutShort bool
 }
 
 // Service wires inference into the compute marketplace. A provider advertises an
