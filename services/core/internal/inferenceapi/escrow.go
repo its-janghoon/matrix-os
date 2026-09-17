@@ -140,6 +140,26 @@ func (s *Service) StreamEscrowedInferenceJob(
 	}
 	if job, ok := s.inf.GetJob(jobID); ok {
 		final.Job = jobToProto(job)
+		// GetJob WITHHOLDS the completion and the working while a job awaits
+		// payment, and that rule is the whole enforcement of the client-signed
+		// path. It does not apply to this one and must not.
+		//
+		// Here the provider already holds the reservation, this stream has
+		// already delivered the completion, and the buyer is about to be asked to
+		// sign for a bill that COUNTS the working - so withholding it bills them
+		// for text they are not allowed to read, and their own ceiling, computed
+		// without it, refuses an invoice the node considers honest. That is what
+		// happened on the first live escrowed sale: 479 units asked, 193 the most
+		// the buyer could account for, and the difference was working they were
+		// charged for and never shown.
+		//
+		// The exemption is not the path's, it is this CALL's: it presented the
+		// authorization the reservation was opened with. A public
+		// GetInferenceJob presents nothing and still withholds.
+		if result != nil && final.Job != nil {
+			final.Job.Completion = result.Response.Completion
+			final.Job.Reasoning = result.Response.Reasoning
+		}
 	}
 	if result != nil {
 		final.StreamedOneShot = result.StreamedOneShot

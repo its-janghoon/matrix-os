@@ -443,3 +443,58 @@ func TestACutShortRunIsBilledForWhatWentOutAndNotWhatTheBackendHeld(t *testing.T
 			partPR.Amount, ceiling)
 	}
 }
+
+// THE WORKING A BUYER IS BILLED FOR MUST REACH THEM.
+//
+// On the escrowed path the buyer signs the settlement, and the charge counts the
+// model's working - most of a reasoning model's tokens. A buyer who is not given
+// that text cannot check the bill, and worse, their own ceiling computed without
+// it is TIGHTER than the node's, so they refuse an invoice the node considers
+// honest and read it as the seller cheating.
+//
+// That is not hypothetical. The first live escrowed sale on this chain asked 479
+// units against a buyer who could only account for 193, and the difference was
+// working the buyer had been charged for and never shown.
+//
+// Withholding is right on the CLIENT-SIGNED path, where it is the only
+// enforcement. Here the provider already holds the reservation, so there is
+// nothing left to enforce and the text is a delivery.
+func TestTheWorkingIsDeliveredOnTheEscrowedPathBecauseItIsBilled(t *testing.T) {
+	const answer = "A marketplace connects buyers and sellers."
+	working := strings.Repeat("weighing how to phrase it. ", 30)
+
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyerID, providerID := serviceWithBackend(t,
+		reasoningBackend{answer: answer, working: working}, fs, 1, 10_000_000)
+	buyer := svc.accounts.(memAccounts).m[buyerID]
+
+	plan := escrowJob(t, svc, buyerID, providerID, 4000)
+	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+	pr, result, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("StreamEscrowed: %v", err)
+	}
+
+	// The run hands the working back, so the layer above can put it on the final
+	// frame. This is where it was being lost.
+	if result.Response.Reasoning != working {
+		t.Fatalf("the run returned %d bytes of working, want %d",
+			len(result.Response.Reasoning), len(working))
+	}
+
+	// And the bill is one the buyer can account for - but ONLY with the working
+	// counted. Both halves matter: the first says the node is honest, the second
+	// says a buyer who never sees the working would refuse it.
+	withWorking := MaxUnitsFor(InferenceRequest{Prompt: "hello world"}, answer, working)
+	without := MaxUnitsFor(InferenceRequest{Prompt: "hello world"}, answer, "")
+	if pr.Amount > withWorking {
+		t.Fatalf("billed %d, over the %d ceiling that counts the working", pr.Amount, withWorking)
+	}
+	if pr.Amount <= without {
+		t.Fatalf("billed %d, which a buyer could account for without the working (%d) - "+
+			"this test cannot tell the two ceilings apart, so make the working longer",
+			pr.Amount, without)
+	}
+}
