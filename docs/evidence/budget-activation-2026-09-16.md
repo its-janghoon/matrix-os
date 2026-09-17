@@ -60,10 +60,45 @@ byte for byte the value it held at height 1297, two hundred blocks earlier. The
 ledger has not moved. Every block since has been empty, so consensus agreeing
 here is consensus agreeing about nothing having happened.
 
-The functional test - open a budget, read it on every validator, close it - is
-what closes that gap, and it is still outstanding: the wallet that can afford it
-is an encrypted keystore whose passphrase is not in the box's
-`/etc/matrix/matrixd.env`.
+That gap is closed below.
+
+## A budget, opened and closed on the live chain
+
+At height 1523, block 1522 identical on all four validators
+(`0x2a29dbed86562b4aa7401432ebcdaa08dffb52fedbcfc2f9223b129ff0af2055`),
+`scripts/budget-smoke.sh` opened 100,000 base units from the GPU box's wallet
+into
+
+```
+spend/escrow/9ccfa14d542f2012657d886794a27b90f5ae470fc397443ffe5e78203d5b1277
+            .3c65a33fcd8eb176e8d6f4ddf727875a507979113b631a055b5efc0837d2f3c2
+            .10000.10000.1789623713.0
+```
+
+which reads as: this buyer, that delegate, 10,000 per job, a ceiling of 10,000
+per unit, expiring at 1789623713, nonce 0. The expiry is 2026-09-17T05:41:53Z -
+one hour after it was opened, which is the default TTL, so the expiry arithmetic
+lands where it should on a live chain and not only in a test.
+
+It committed within ten seconds. **All five nodes then reported the same
+remaining, the same terms, byte for byte** - which is the check this whole
+activation was for, because that balance is part of the state root. Closing it
+returned the money and left the account at zero.
+
+**The wallet cost nothing: 921238000 before, 921238000 after.** That is correct
+rather than suspicious, and the code says why in both places:
+
+- opening is *"a buyer moving their own coins into their own budget [who] has not
+  been paid by anyone, which is the same reason a bond is exempt"*
+- closing is *"collateral going back to its owner, not value anyone was paid"*
+
+The protocol fee is charged on the DRAW, where value actually changes hands.
+
+**What this run still does not cover.** It never drew. The delegate above is 32
+random bytes used as a public key, so no private key exists that could sign a
+draw against it - which is what made it safe to run against real money, and also
+means the draw path, the per-job cap, and the fee on a draw remain untested on
+this chain. The first real chat turn through a budget is what exercises them.
 
 ## Still open
 
