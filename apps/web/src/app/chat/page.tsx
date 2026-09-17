@@ -362,7 +362,12 @@ function Chat() {
                 }}
                 onSettled={reload}
               >
-                <Thread />
+                {/*
+                  Whether a wallet dialog is coming is not something the thread
+                  can infer, and it used to tell every reader that one was - which
+                  under a budget sent them looking for a prompt that never opens.
+                */}
+                <Thread settlesWithoutPrompting={Boolean(budget && delegate)} />
               </MatrixRuntimeProvider>
 
               <Caveats kind={signer.kind} />
