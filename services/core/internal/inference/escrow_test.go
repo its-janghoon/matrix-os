@@ -316,7 +316,7 @@ func TestHangingUpMidAnswerStillLeavesASettlementForWhatArrived(t *testing.T) {
 
 	// And the buyer can come back for that settlement, which is the only way they
 	// ever see it: the stream they were reading it from is the one that died.
-	recovered, job, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, nil)
+	recovered, job, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, nil, nil)
 	if err != nil {
 		t.Fatalf("RecoverEscrowSettlement: %v", err)
 	}
@@ -332,7 +332,7 @@ func TestHangingUpMidAnswerStillLeavesASettlementForWhatArrived(t *testing.T) {
 	}
 
 	// Reading it does not consume it, and settling it works.
-	if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, nil); err != nil {
+	if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, nil, nil); err != nil {
 		t.Fatalf("recovering twice: %v", err)
 	}
 	done, err := svc.SettleEscrowed(context.Background(), plan.JobID, signPlan(t, buyer, recovered))
@@ -376,12 +376,12 @@ func TestRecoveringNeedsTheAuthorizationTheReservationWasOpenedWith(t *testing.T
 		{"somebody else's", []byte("a different signature")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, tc.auth); !errors.Is(err, ErrRunUnauthorized) {
+			if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, tc.auth, nil); !errors.Is(err, ErrRunUnauthorized) {
 				t.Fatalf("recovered with %s and got %v", tc.name, err)
 			}
 		})
 	}
-	if _, _, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, auth); err != nil || cutShort {
+	if _, _, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, auth, nil); err != nil || cutShort {
 		t.Fatalf("the buyer's own recovery: err=%v cutShort=%v", err, cutShort)
 	}
 }
@@ -423,7 +423,7 @@ func TestACutShortRunIsBilledForWhatWentOutAndNotWhatTheBackendHeld(t *testing.T
 		t.Fatalf("a cut-short run reported %v", err)
 	}
 
-	_, job, _, err := svc.RecoverEscrowSettlement(part.JobID, nil)
+	_, job, _, err := svc.RecoverEscrowSettlement(part.JobID, nil, nil)
 	if err != nil {
 		t.Fatalf("RecoverEscrowSettlement: %v", err)
 	}

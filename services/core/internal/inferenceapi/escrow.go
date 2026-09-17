@@ -246,8 +246,16 @@ func (s *Service) RecoverEscrowedInferenceJob(
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
+	var fresh *inference.RecoverAuthorization
+	if ra := req.GetRecoverAuthorization(); ra != nil {
+		fresh = &inference.RecoverAuthorization{
+			PublicKey: ra.GetPublicKey(),
+			Timestamp: ra.GetTimestamp(),
+			Signature: ra.GetSignature(),
+		}
+	}
 	payment, job, cutShort, err := s.inf.RecoverEscrowSettlement(req.GetId(),
-		req.GetAuthorization().GetSignature())
+		req.GetAuthorization().GetSignature(), fresh)
 	if err != nil {
 		return nil, mapInferenceError(err)
 	}

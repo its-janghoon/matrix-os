@@ -146,6 +146,27 @@ before the boundary fails with a timeout rather than with "not yet", and the
 honest reading of that timeout is "not yet". After the height it commits in one
 block like anything else.
 
+**A settlement you refused, or a client that died holding one.** The settlement
+rides on the stream's last frame, so neither of them has one to sign - and an
+unsettled reservation is the provider's at its expiry. Until recently that made
+refusing a bill more expensive than signing it, which is backwards. Now:
+
+```
+matrix inference recover --id <job> --inference-addr <the SELLER's node>:9092
+matrix inference recover --id <job> --settle ...
+```
+
+It reads by default and signs nothing: what is asked, what arrived, how much of
+it was the model's working, and when the provider may claim. `--settle` pays it.
+The wallet proves itself with a signature made NOW over the job id, rather than
+replaying the authorization the reservation was opened with - which a later run
+does not have, and should not be keeping on disk in order to have.
+
+There is no automatic ceiling check on that path, and the help says so: the check
+counts the prompt, the response does not carry one, and a bound computed without
+it is tighter than the node's. The reader is the check, which is why `--settle`
+is a separate decision.
+
 **A job that streams and then reports `stopped early`.** That is the recovery
 path working. The settlement rides on the stream's last frame, so a buyer who
 cancels, reloads, or loses their connection never receives it - and with nothing
