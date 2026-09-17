@@ -385,3 +385,61 @@ func TestRecoveringNeedsTheAuthorizationTheReservationWasOpenedWith(t *testing.T
 		t.Fatalf("the buyer's own recovery: err=%v cutShort=%v", err, cutShort)
 	}
 }
+
+// The bill follows what was DELIVERED, not what the backend produced.
+//
+// The echo backend hands back a whole response even when the run ended badly,
+// and a real one may too. Charging for text that never left this process would
+// bill a buyer for an answer they cannot read - and cannot check, because their
+// own ceiling is computed from the text they received. So a cut-short run is
+// priced on the deltas that went out, and this is the test that says so.
+func TestACutShortRunIsBilledForWhatWentOutAndNotWhatTheBackendHeld(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyerID, providerID := newTestService(t, fs, 1, 100000)
+	buyer := svc.accounts.(memAccounts).m[buyerID]
+
+	// Two jobs from one prompt: one read to the end, one cut off at the first
+	// chunk. The second must cost strictly less, and the completion it records
+	// must be the shorter text.
+	full := escrowJob(t, svc, buyerID, providerID, 5000)
+	if _, err := svc.FundEscrow(context.Background(), full.JobID, signPlan(t, buyer, full.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+	wholePR, _, err := svc.StreamEscrowed(context.Background(), full.JobID, nil, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("StreamEscrowed: %v", err)
+	}
+
+	part := escrowJob(t, svc, buyerID, providerID, 5000)
+	if _, err := svc.FundEscrow(context.Background(), part.JobID, signPlan(t, buyer, part.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+	var got strings.Builder
+	partPR, _, err := svc.StreamEscrowed(context.Background(), part.JobID, nil, func(delta string) error {
+		got.WriteString(delta)
+		return errors.New("the buyer's connection is gone")
+	})
+	if !errors.Is(err, ErrStreamCutShort) {
+		t.Fatalf("a cut-short run reported %v", err)
+	}
+
+	_, job, _, err := svc.RecoverEscrowSettlement(part.JobID, nil)
+	if err != nil {
+		t.Fatalf("RecoverEscrowSettlement: %v", err)
+	}
+	if job.Completion != got.String() {
+		t.Fatalf("the job records %q but only %q was delivered; the backend's own copy has "+
+			"leaked into the bill", job.Completion, got.String())
+	}
+	if partPR.Amount >= wholePR.Amount {
+		t.Fatalf("a run cut off at the first chunk cost %d, the whole answer cost %d",
+			partPR.Amount, wholePR.Amount)
+	}
+	// And the buyer can verify it: the ceiling over the text they received has
+	// to cover the bill, or an honest buyer's own check would refuse it.
+	ceiling := MaxUnitsFor(InferenceRequest{Prompt: "hello world"}, got.String(), "")
+	if partPR.Amount > ceiling {
+		t.Fatalf("billed %d for text whose ceiling is %d; the buyer would refuse to sign",
+			partPR.Amount, ceiling)
+	}
+}

@@ -291,7 +291,18 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth [
 		// Not failJob. The buyer paid the cap before the first token, so the only
 		// question left is what fraction of it they owe - and answering "all of
 		// it, by default" is what failing the job would do.
-		result = StreamResult{Response: partialResponse(request, delivered.String())}
+		//
+		// BILLED FOR WHAT WAS DELIVERED, never for what the backend produced.
+		// Some backends hand back a whole response even when the run ended badly
+		// (the echo stub does), and charging for text that never left this
+		// process would bill a buyer for an answer they cannot read - and cannot
+		// check the bill against, since their own ceiling is computed from what
+		// they received. `delivered` is exactly what went to onChunk, which is
+		// also exactly what RecoverEscrowSettlement hands back.
+		result = StreamResult{
+			Response:        partialResponse(request, delivered.String()),
+			StreamedOneShot: result.StreamedOneShot,
+		}
 		if result.Response.Completion == "" {
 			s.failJob(jobID)
 			return nil, nil, fmt.Errorf("inference: streaming from provider %q failed before any "+
@@ -343,10 +354,13 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth [
 	s.mu.Unlock()
 
 	if cutShort {
-		// The settlement goes back with the error, because the error is not the
-		// end of the story here: the caller is gone, but the job is now settleable
-		// and RecoverEscrowSettlement will hand this same request to whoever comes
-		// back for it.
+		// The settlement goes back WITH the error, because the error is not the
+		// end of the story: the job is settleable now, and the caller decides how
+		// to deliver that. A caller still connected - the provider dropped, not
+		// them - sends it on the stream's final frame; a caller whose client is
+		// gone leaves it for RecoverEscrowSettlement, which hands back this same
+		// request. Returning nothing here would forfeit the reservation in both
+		// cases.
 		return pr, &result, fmt.Errorf("%w: provider %q", ErrStreamCutShort, provider)
 	}
 	return pr, &result, nil
