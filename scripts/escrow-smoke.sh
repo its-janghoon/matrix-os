@@ -153,9 +153,21 @@ echo "WALLET|${A:-unknown}|${B:-unknown}|$PASS_FROM|${#MATRIX_WALLET_PASSPHRASE}
 # node that OWNS the provider, so the seller's own endpoint is what a buyer has
 # to reach - a reserve sent anywhere else is refused by a node that has never
 # heard of the job.
+# Providers this node serves ITSELF. No --include-remote: the order book of the
+# whole network names sellers this box cannot run, and the escrowed path has to
+# be served by the provider's owner.
+#
+# The raw answer travels back, not a parsed one. The first version matched
+# `"id":"<64 hex>"` and reported "no provider" for everything else - an auth
+# failure, a wrong port, an id that is not 64 hex - which is three different
+# faults wearing one message.
 R_SELLERS="$R_COMMON"'
-matrix provider list --addr "127.0.0.1:$M" --json 2>&1 | tr -d " \n"
-echo
+OUT=$(matrix provider list --addr "127.0.0.1:$M" --json 2>&1)
+RC=$?
+if [ $RC -ne 0 ]; then echo "ERR provider list failed on port $M: $(echo "$OUT" | head -2 | tr "\n" " ")"; exit 0; fi
+IDS=$(echo "$OUT" | tr -d " " | grep -o "\"id\":\"[^\"]*\"" | cut -d"\"" -f4 | grep -v "^$")
+if [ -z "$IDS" ]; then echo "NONE $(echo "$OUT" | tr -d "\n" | cut -c1-120)"; exit 0; fi
+echo "$IDS" | sed "s/^/PROVIDER|/"
 '
 
 R_BUY="$PASS_PREFIX$R_COMMON"'
@@ -228,7 +240,7 @@ say "0b. Find a box that can both pay and serve"
 # buy runs where those two coincide, and the script says so plainly when nothing
 # does rather than producing a confusing refusal from the wrong node.
 BUY_BOX=""; BUYER=""; BEFORE=""; PROVIDER=""; PASSSRC=none
-HAS_WALLET=""; HAS_PROVIDER=""
+HAS_WALLET=""; HAS_PROVIDER=""; SELLER_NOTES=""
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
 
@@ -239,11 +251,15 @@ for b in "${BOXES[@]}"; do
                HAS_WALLET="$HAS_WALLET $label" ;;
   esac
 
-  # No --include-remote: a provider this node lists LOCALLY is one it serves. The
-  # order book of the whole network would name sellers this box cannot run.
-  sl=$(verdict "$(rsh "$host" "$key" "$R_SELLERS" 2>&1)" '\[|\{|ERR')
-  prov=$(echo "$sl" | tr "{" "\n" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4)
+  raw=$(rsh "$host" "$key" "$R_SELLERS" 2>&1)
+  prov=$(verdict "$raw" 'PROVIDER\|')
+  prov=${prov#PROVIDER|}
   [ -n "$prov" ] && HAS_PROVIDER="$HAS_PROVIDER $label"
+  # What the box said when it named none. An empty order book and a refused call
+  # are different problems and used to print the same blank.
+  WHYNOT=$(verdict "$raw" 'NONE |ERR ')
+  [ -z "$prov" ] && [ -n "$WHYNOT" ] && SELLER_NOTES="$SELLER_NOTES
+   $(printf '%-12s %s' "$label" "$WHYNOT")"
 
   info "$(printf '%-12s wallet=%-12s balance=%-10s serves=%s' "$label" \
         "${acct:0:10}${acct:+...}" "${bal:-none}" "${prov:0:10}${prov:+...}")"
@@ -258,7 +274,8 @@ done
 if [ -z "$BUY_BOX" ]; then
   die "no single box both holds a wallet and serves a provider.
    boxes with a wallet:  ${HAS_WALLET:- none}
-   boxes with a provider:${HAS_PROVIDER:- none}
+   boxes with a provider:${HAS_PROVIDER:- none}${SELLER_NOTES:+
+   why not:$SELLER_NOTES}
    The escrowed path signs locally and must be served by the provider's owner, so
    those two have to be the same machine. Put a funded wallet on a seller box, or
    run the buy from a laptop that can reach the seller's inference port."
