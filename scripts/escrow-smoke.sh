@@ -34,8 +34,31 @@ info() { printf "   %s\n" "$*"; }
 die()  { printf "\nABORT: %s\n" "$*" >&2; exit 1; }
 field() { echo "$1" | cut -d"|" -f"$2"; }
 
+# keypath expands a leading ~.
+#
+# `ssh -i "$key"` does NOT expand a tilde - it is inside quotes, and ssh does no
+# expansion of its own - so a box list written with ~/Downloads/k.pem reaches ssh
+# as those literal characters and fails with "no such identity file", which reads
+# as a missing key rather than as a path the shell never resolved. Everyone
+# writes ~ and it is not their mistake to make.
+keypath() { printf %s "${1/#\~/$HOME}"; }
+
+# checkKeys reads every key in the box list before the first ssh.
+#
+# Up front rather than at the first use: the alternative is finding out on box
+# three, which on a rollout is after two nodes have already been restarted.
+checkKeys() {
+  local b k
+  for b in "${BOXES[@]}"; do
+    k=$(keypath "$(field "$b" 3)")
+    [ -f "$k" ] || die "no key file at $k, for $(field "$b" 1). Write the path as \$HOME/... or in full - a ~ inside the quoted box list is never expanded by the shell, and ssh does not expand one either."
+    [ -r "$k" ] || die "cannot read the key file at $k, for $(field "$b" 1)."
+  done
+}
+
 rsh() {
-  local host=$1 key=$2 script=$3 arg=${4:-} arg2=${5:-} arg3=${6:-}
+  local host=$1 key script=$3 arg=${4:-} arg2=${5:-} arg3=${6:-}
+  key=$(keypath "$2")
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
       -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" "$arg2" "$arg3" <<< "$script"
 }
@@ -134,6 +157,8 @@ echo "RC|$RC"
 '
 
 # ---------------------------------------------------------------- run
+
+checkKeys
 
 say "0. Protocol version 3 must have activated, and the nodes must agree"
 LO=0; HI=0; SCHEDULED=""; SCHEDVER=""; VLABELS=(); VHOSTS=(); VKEYS=()
