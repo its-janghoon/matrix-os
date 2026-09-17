@@ -1,6 +1,9 @@
 # Proposal: escrow and refund, so a self-custody buyer can watch the answer arrive
 
-**Status: proposed, not built.** It changes how state is APPLIED and it moves money, so it is written down and approved before any code.
+**Status: decided, being built.** It changes how state is APPLIED and it moves
+money, so the open questions below are answered before any code rather than
+during it. The answers are in **Decisions** and the section that set each one is
+marked where it happens.
 
 ---
 
@@ -63,7 +66,72 @@ Today the buyer signs the EXACT amount. Under this, they sign a CAP and the prov
 
 That is strictly less control, and it is the model every metered API already uses: you authorise a limit, they bill what they used. It should be said out loud rather than discovered, because the current design's selling point is that the buyer signs the real number.
 
-## Open questions, which are the decisions
+## Decisions
+
+Four questions had to be settled before this could be written, and one of them
+turned out to decide the shape of everything else.
+
+### Who signs the settlement: the BUYER's side
+
+The obvious reading of "the provider has been paid up front" is that the
+provider then tells consensus what the job actually cost. That is wrong, and
+reading the code is what shows it.
+
+There is no check on the buyer's side today. The browser signs whatever invoice
+the node returns - it does not compute a ceiling, it does not compare the bill to
+the text it received, it submits the number it was given. `MaxUnitsFor` runs on
+the SELLER's node, bounding the seller's own model server. That is worth having
+and it is not a buyer's protection: an operator who wants to overcharge controls
+the node running the check.
+
+So the only thing that has ever stood between a buyer and an inflated bill is
+their power to WITHHOLD THE SIGNATURE. Hand settlement to the provider and that
+disappears, and what remains bounding the bill is the reservation - which is
+generous by design, which is the exact hole `MaxUnitsFor` was written to close.
+
+The settlement is therefore signed by the buyer's side, which under a spend
+budget is the delegate and needs no prompt. Streaming still works, because what
+frees the text is the money already sitting in escrow rather than a signature
+still to come.
+
+**This makes a second change non-optional: the CLIENT must compute the ceiling
+before signing.** A buyer-signed settlement that rubber-stamps the node's number
+is the same design with extra steps.
+
+### What expiry does: pays the PROVIDER, in full
+
+Answers open question 1, and 2 with it.
+
+An expiry that refunds the buyer makes "receive the answer and never settle"
+free, which is worse than today - today the seller at least still holds the text.
+By the time expiry arrives the provider has spent the GPU time and delivered, so
+expiry pays them the whole reservation.
+
+The buyer is then strictly better off settling honestly, because the actual is by
+construction at most the reservation. Hanging up mid-stream costs the buyer the
+difference rather than the provider their work, which is the honest allocation:
+the bytes were delivered.
+
+The timeout has to clear a slow reasoning run by a wide margin. Refunding a
+provider's fee out from under them while they are still working would be the same
+mistake pointed the other way.
+
+### What parks the money: the BUDGET, not the wallet
+
+Answers open question 3. The reservation moves real money for the length of a
+run, and on a raw wallet that is felt. Funded from a spend budget it is not: the
+escrow is opened from the budget account, inside an amount the buyer has already
+approved and bounded. The two proposals compose here rather than merely shipping
+together.
+
+### Is it worth it
+
+Answers open question 4, and the live network answered it. A buyer can now hold
+their own key and pay without a prompt per message, and the one thing they still
+cannot do is watch the answer arrive. That is the last item on the list that
+made this work worth doing.
+
+## The questions these answered
 
 1. **What happens to escrow when the run never finishes?** A node that dies mid-run leaves `R` sitting in escrow. An expiry that refunds the buyer is the obvious answer, but it has to be a consensus rule too, and its timeout is a policy: too short and a slow legitimate run is refunded out from under a provider that is still working; too long and a buyer's money is parked.
 
