@@ -55,6 +55,37 @@ understanding before you turn it on:
 Together they mean a buyer can only ever pay LESS by settling honestly, and a
 provider is never worse off than the reservation.
 
+## Reaching the height, on a chain nobody is using
+
+`rollout.sh` measures the block rate and, on a chain producing none, falls back to
+a floor of 200 blocks. That floor is honest and it is not a duration. **This chain
+mints a block when there is a transaction to put in one.** With no traffic it
+still escapes, through stall recovery - but that timer is
+`60 x consensus.round_timeout` (see `heightIsStalledLocked` in `engine.go`), so a
+node on the production 3s produces one empty block every three minutes and a
+200-block lead is ten hours away.
+
+An activation is a height rather than a time precisely so that every node
+switches together, so the height has to be reached. Nothing else moves it:
+
+```
+./scripts/advance-height.sh          # aims at the scheduled activation
+./scripts/advance-height.sh 1831     # or a height you name
+```
+
+It sends one base unit back and forth between two accounts the operator already
+controls, one transfer at a time, and reads the height rather than counting
+transfers - transfers that arrive together share a block, so a count overshoots
+and stops short. It needs **two** accounts: the ledger refuses a self-transfer,
+which moves nothing while consuming a nonce, so a free block is not on offer.
+
+Check where it has got to at any point:
+
+```
+curl -s -X POST http://127.0.0.1:9095 -H "content-type: application/json" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}'
+```
+
 ## What is different about verifying it
 
 A budget could be proved with `budget open` and four `budget show` calls, because
