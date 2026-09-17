@@ -220,7 +220,11 @@ func streamEscrowed(
 		}
 		if pay := msg.GetPayment(); pay != nil {
 			fmt.Fprintln(out)
-			return pay, completion, false, nil
+			// The final frame is sent even when the run was cut short, because
+			// the settlement is on it. So a cut-short run that this side is
+			// still connected for - the provider dropped, not us - arrives here
+			// rather than down the recovery path.
+			return pay, completion, msg.GetCutShort(), nil
 		}
 	}
 	// The stream ended without the settlement on it, which is the same position

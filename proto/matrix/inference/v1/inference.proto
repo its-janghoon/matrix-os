@@ -358,6 +358,18 @@ message StreamEscrowedInferenceJobResponse {
     // Set on the final chunk only.
     InferenceJob job = 4;
     bool streamed_one_shot = 5;
+    // Set on the final chunk: the run stopped before the model was done - the
+    // provider dropped, or this connection did - so the delta stream above is
+    // what was produced rather than a finished answer, and the settlement is
+    // for that much.
+    //
+    // The final chunk is still SENT in that case, rather than the stream ending
+    // in an error, because the settlement is on it: a buyer who receives an
+    // error instead of a payment has nothing to sign and forfeits the whole
+    // reservation to the provider's claim. When the connection is the thing that
+    // died, this send fails harmlessly and RecoverEscrowedInferenceJob is how
+    // the buyer comes back for it.
+    bool cut_short = 6;
 }
 
 // RecoverEscrowedInferenceJobRequest asks for the settlement of a funded job
