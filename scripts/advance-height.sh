@@ -58,11 +58,22 @@ checkKeys() {
   done
 }
 
+# rsh runs a script on a box, with arguments that survive the trip.
+#
+# ssh JOINS its command words with spaces and hands one string to the remote
+# shell, which splits it again - so a local quote does not cross the wire. A
+# prompt of "Answer in one short sentence: ..." arrived on the box as $1="Answer"
+# and the rest as separate words, the model was asked one word, and it replied
+# asking what the question was. Both sides then billed for that.
+#
+# %q makes each argument quote itself for the shell that will actually read it.
 rsh() {
-  local host=$1 key script=$3 arg=${4:-} arg2=${5:-}
+  local host=$1 key script=$3 q="" a
   key=$(keypath "$2")
+  shift 3
+  for a in "$@"; do q="$q $(printf %q "$a")"; done
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-      -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" "$arg2" <<< "$script"
+      -o BatchMode=yes "ubuntu@$host" "bash -s --$q" <<< "$script"
 }
 
 # The passphrase travels as the FIRST LINE of the script on ssh's stdin. Not as

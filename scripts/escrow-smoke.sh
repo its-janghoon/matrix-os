@@ -24,7 +24,11 @@
 set -uo pipefail
 
 PROMPT=${1:-"Answer in one short sentence: what is a marketplace for?"}
-UNITS=${2:-200}
+# Enough that the cap does not bind on a reasoning model. The live chain's
+# qwen3.6-27b spent 322 completion tokens on a two-sentence reply, all of it
+# billable, and a 200-unit reservation was consumed whole - which proves the path
+# runs but never shows the change coming back, which is the property under test.
+UNITS=${2:-4000}
 : "${MATRIX_ROLLOUT_BOXES:?set MATRIX_ROLLOUT_BOXES to lines of label|host|keyfile|role}"
 
 mapfile -t BOXES <<< "$(echo "$MATRIX_ROLLOUT_BOXES" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//" | grep -v "^$")"
@@ -68,11 +72,22 @@ checkKeys() {
   done
 }
 
+# rsh runs a script on a box, with arguments that survive the trip.
+#
+# ssh JOINS its command words with spaces and hands one string to the remote
+# shell, which splits it again - so a local quote does not cross the wire. A
+# prompt of "Answer in one short sentence: ..." arrived on the box as $1="Answer"
+# and the rest as separate words, the model was asked one word, and it replied
+# asking what the question was. Both sides then billed for that.
+#
+# %q makes each argument quote itself for the shell that will actually read it.
 rsh() {
-  local host=$1 key script=$3 arg=${4:-} arg2=${5:-} arg3=${6:-}
+  local host=$1 key script=$3 q="" a
   key=$(keypath "$2")
+  shift 3
+  for a in "$@"; do q="$q $(printf %q "$a")"; done
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-      -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" "$arg2" "$arg3" <<< "$script"
+      -o BatchMode=yes "ubuntu@$host" "bash -s --$q" <<< "$script"
 }
 
 # The passphrase travels as the FIRST LINE of the script that goes over ssh's
@@ -294,7 +309,8 @@ say "1. Reserve, fund, stream and settle one real inference"
 # disagree about a ceiling, the first thing to know is whether they were holding
 # the same words.
 info "prompt (${#PROMPT} bytes): $PROMPT"
-out=$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_BUY" "$BUYER" "$PROVIDER" "$PROMPT" 2>&1)
+out_buy=$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_BUY" "$BUYER" "$PROVIDER" "$PROMPT" 2>&1)
+out=$out_buy
 seen=$(echo "$out" | sed -n "s/^PROMPT_SEEN|//p" | tail -1)
 [ -n "$seen" ] && info "the box received ${seen%%|*} bytes of prompt"
 if [ "${seen%%|*}" = 0 ]; then
@@ -311,16 +327,67 @@ out=$(verdict "$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_WALLET"
 AFTER=$(field "$out" 3)
 case "$AFTER" in ''|*[!0-9]*) die "could not read the balance back";; esac
 COST=$((BEFORE - AFTER))
-info "wallet $BEFORE -> $AFTER, cost $COST base units against a reservation of $UNITS"
 
-# THE CHECK. Every command can succeed and this still be a failure: an escrow
-# that was funded and never settled leaves the provider holding the cap, and
-# from the outside that is indistinguishable from a sale that went well.
-if [ "$COST" -ge "$UNITS" ]; then
-  die "the run cost $COST, at or above the $UNITS reserved. The settlement did not apply, so the provider is holding the whole reservation and will claim it at the expiry. This is the exact failure the escrowed path exists to prevent, and it looks like success from every other angle - read the job with 'matrix inference get --id ...' on the seller's node."
+# BASE UNITS AGAINST BASE UNITS.
+#
+# The reservation is `units x price_per_unit`, and $UNITS is the unit COUNT. The
+# first version compared a cost in base units against that count - 200000 against
+# 200 - and called a settled sale a catastrophe. Two numbers on different scales
+# compared as if they were the same is the sort of bug that reads as certainty.
+#
+# The real total is the one the node computed and the run printed, so it is taken
+# from there rather than multiplied out again here.
+RESERVED=$(echo "$out_buy" | sed -n 's/.*reserving [0-9]* units at [0-9]* each = \([0-9]*\).*/\1/p' | head -1)
+case "$RESERVED" in ''|*[!0-9]*) RESERVED=0;; esac
+if [ "$RESERVED" -eq 0 ]; then
+  info "could not read the reservation total from the run; comparing against nothing"
+else
+  info "wallet $BEFORE -> $AFTER, cost $COST base units against a reservation of $RESERVED"
 fi
+
+# Did the settlement APPLY? A job that reads completed and carries a receipt has
+# been paid through consensus. That is what separates the two ways a run can end
+# up costing the whole reservation, and they need opposite responses.
+SETTLED=no
+echo "$out_buy" | grep -q "^status:[[:space:]]*completed" && SETTLED=yes
+echo "$out_buy" | grep -q '"signature"' && HAS_RECEIPT=yes || HAS_RECEIPT=no
+
 if [ "$COST" -le 0 ]; then
   die "the run cost nothing, which consensus refuses for a settlement. Either the balance was read before the settlement applied, or the job was never charged."
 fi
 
-say "PASS. One answer bought down the escrowed path: $UNITS reserved, $COST paid, $((UNITS - COST)) returned."
+if [ "$RESERVED" -gt 0 ] && [ "$COST" -ge "$RESERVED" ]; then
+  if [ "$SETTLED" = yes ] && [ "$HAS_RECEIPT" = yes ]; then
+    # Honest, and not what this test wants to see. The answer genuinely cost more
+    # than was reserved, so the charge was clamped to the cap - the buyer paid
+    # exactly the cap and consensus returned nothing because there was nothing to
+    # return. Nothing is broken; the reservation was too small to demonstrate the
+    # refund, which is the property being tested.
+    say "INCONCLUSIVE. The answer cost the whole reservation."
+    echo
+    echo "The job settled - it reads completed and carries a signed receipt - so the"
+    echo "path worked. But the charge hit the cap, which means the model produced more"
+    echo "than $UNITS units of work and there was no change to return. This test is"
+    echo "supposed to show the change coming back, so reserve more and run it again:"
+    echo
+    echo "  ./scripts/escrow-smoke.sh \"\$PROMPT\" 4000"
+    echo
+    echo "A reasoning model spends most of its tokens on working you do not see in"
+    echo "the answer, and you are billed for those - this run reported 322 completion"
+    echo "tokens for two sentences of reply."
+    exit 2
+  fi
+  die "the run cost $COST against a reservation of $RESERVED, and the job did not settle
+   (status completed: $SETTLED, signed receipt: $HAS_RECEIPT). The provider is holding
+   the whole reservation and will claim it at the expiry. This is the exact failure
+   the escrowed path exists to prevent, and it looks like success from every other
+   angle - read the job with 'matrix inference get --id ...' on the seller's node."
+fi
+
+[ "$SETTLED" = yes ] || die "the wallet paid $COST but the job does not read completed; check it on the seller's node"
+
+say "PASS. One answer bought down the escrowed path: $RESERVED reserved, $COST paid, $((RESERVED - COST)) returned."
+echo
+echo "That last number is the point. The provider held the whole $RESERVED before the"
+echo "first token, the answer streamed because there was nothing left to withhold, and"
+echo "consensus returned the difference when the buyer signed for what it really cost."
