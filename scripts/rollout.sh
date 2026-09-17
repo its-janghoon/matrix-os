@@ -127,15 +127,42 @@ chaininfo() {
 }
 EOS
 
-# STATE: height|head|root|version|cfg
-R_STATE="$R_COMMON"'
+# STATE: OK|height|head|root|version|cfg|schedule
+#
+# A heredoc, not a quoted block: the schedule reader below is an awk program with
+# single quotes of its own, and '...' would have ended the string at the first
+# one. bash -n does not catch that - the result still parses, it just is not the
+# script you wrote.
+read -r -d "" R_STATE_BODY <<'EOS'
 J=$(chaininfo || true)
-H=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"height\":\([0-9]*\).*/\1/p" | head -1)
-HD=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"head_hash\":\"\([^\"]*\)\".*/\1/p" | head -1)
-SR=$(echo "$J" | tr "," "\n" | sed -n "s/.*\"state_root\":\"\([^\"]*\)\".*/\1/p" | head -1)
-SCHED=$(sudo sed -n "/protocol_upgrades:/,/^[[:space:]]*[a-z_]*:/p" "$CFG" | grep -E "height:|version:" | tr -d " " | tr "\n" ";")
+H=$(echo "$J" | tr "," "\n" | sed -n 's/.*"height":\([0-9]*\).*/\1/p' | head -1)
+HD=$(echo "$J" | tr "," "\n" | sed -n 's/.*"head_hash":"\([^"]*\)".*/\1/p' | head -1)
+SR=$(echo "$J" | tr "," "\n" | sed -n 's/.*"state_root":"\([^"]*\)".*/\1/p' | head -1)
+
+# THE WHOLE SCHEDULE, as height=version pairs.
+#
+# This was a sed range ending at /^[[:space:]]*[a-z_]*:/ - and an entry's own
+# `version:` line matches that pattern, so the range stopped at the FIRST entry.
+# It read a two-entry schedule as a one-entry one, and failed the final check of
+# a rollout whose schedule had been written correctly to all five boxes. A reader
+# that under-reports is worse than one that errors: it accuses the thing it is
+# checking, and an operator who believes it goes looking for a fault that is not
+# there - or worse, rewrites a config that was already right.
+#
+# So the block is delimited by INDENTATION, the way the writer finds it too:
+# everything more indented than the key, until a line that is not.
+SCHED=$(sudo awk '
+f && /^[[:space:]]*$/ { next }
+f { match($0,/^[[:space:]]*/); if (RLENGTH<=ind) f=0 }
+f && /height:[[:space:]]*[0-9]+/  { h=$0; sub(/^.*height:[[:space:]]*/,"",h);  sub(/[^0-9].*$/,"",h) }
+f && /version:[[:space:]]*[0-9]+/ { v=$0; sub(/^.*version:[[:space:]]*/,"",v); sub(/[^0-9].*$/,"",v); out = out (out?",":"") h "=" v }
+/^[[:space:]]*protocol_upgrades:/ { match($0,/^[[:space:]]*/); ind=RLENGTH; f=1; if ($0 ~ /\[\][[:space:]]*$/) f=0 }
+END { print (out=="" ? "empty" : out) }
+' "$CFG")
 echo "OK|${H:-0}|${HD:-none}|${SR:-none}|$(matrixd -version 2>&1 | head -1)|$CFG|${SCHED:-empty}"
-'
+EOS
+R_STATE="$R_COMMON
+$R_STATE_BODY"
 
 # UPGRADE: install v0.4.0 unless already on it
 R_UPGRADE="$R_COMMON"'
@@ -469,7 +496,10 @@ for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
   out=$(read_state "$label" "$host" "$key")
   info "$(printf '%-12s %s  sched=%s' "$label" "$(field "$out" 5)" "$(field "$out" 7)")"
-  field "$out" 7 | grep -q "height:$TARGET" || die "$label does not carry height $TARGET"
+  # Height AND version. The old check looked for the height alone, so a box
+  # carrying the right height under the wrong version would have passed it.
+  field "$out" 7 | grep -q "\b$TARGET=$NEW_PROTOCOL_VERSION\b" \
+    || die "$label does not carry $TARGET=$NEW_PROTOCOL_VERSION; it reports $(field "$out" 7)"
 done
 check_agreement || die "the validators are not all on the same chain after the rollout (see the line above)"
 
