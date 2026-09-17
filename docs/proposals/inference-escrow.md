@@ -1,6 +1,9 @@
 # Proposal: escrow and refund, so a self-custody buyer can watch the answer arrive
 
-**Status: built, not yet activated.** It changes how state is APPLIED and it
+**Status: LIVE on chain 8170 since height 1831, 2026-09-17.** One answer bought
+through it: 4,000,000 reserved, 337,000 paid, 3,663,000 returned. The evidence,
+including the four bugs the live chain found that the tests did not, is in
+[`docs/evidence/escrow-activation-2026-09-17.md`](../evidence/escrow-activation-2026-09-17.md). It changes how state is APPLIED and it
 moves money, so the open questions below were answered before any code rather
 than during it. The answers are in **Decisions** and the section that set each
 one is marked where it happens.
