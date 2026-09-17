@@ -43,6 +43,18 @@ field() { echo "$1" | cut -d"|" -f"$2"; }
 # writes ~ and it is not their mistake to make.
 keypath() { printf %s "${1/#\~/$HOME}"; }
 
+# verdict pulls a payload's ANSWER out of everything the box said.
+#
+# A remote payload ends with one line naming its result, and reading `tail -1` as
+# if that were the only thing on the wire is wrong: a box writes to stderr
+# whenever it likes - systemd's "the unit file changed on disk", sudo's lecture, a
+# login banner - and any of it lands after the verdict. It failed a rollout that
+# had actually succeeded, which is how this helper came to exist.
+verdict() { printf '%s\n' "$1" | grep -m1 -E "^($2)" || true; }
+
+# saidWhat is what to show when there was no verdict: the box's own last words.
+saidWhat() { printf '%s' "$1" | tail -6; }
+
 # checkKeys reads every key in the box list before the first ssh.
 #
 # Up front rather than at the first use: the alternative is finding out on box
@@ -164,7 +176,7 @@ say "0. Protocol version 3 must have activated, and the nodes must agree"
 LO=0; HI=0; SCHEDULED=""; SCHEDVER=""; VLABELS=(); VHOSTS=(); VKEYS=()
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
-  out=$(rsh "$host" "$key" "$R_CHAIN" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "$host" "$key" "$R_CHAIN" 2>&1)" 'CHAIN\||ERR')
   case "$out" in CHAIN\|*) ;; *) die "$label: $out";; esac
   h=$(field "$out" 2); sr=$(field "$out" 3); sc=$(field "$out" 4); ve=$(field "$out" 5)
   info "$(printf '%-12s height=%-7s root=%s last schedule=%s version=%s' "$label" "${h:-n/a}" "${sr:0:14}" "$sc" "$ve")"
@@ -197,7 +209,7 @@ CMP=$((LO - 1))
 say "0a. Every validator must have the same block $CMP"
 REF=""; REF_L=""
 for i in "${!VLABELS[@]}"; do
-  out=$(rsh "${VHOSTS[$i]}" "${VKEYS[$i]}" "$R_BLOCK" "$CMP" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "${VHOSTS[$i]}" "${VKEYS[$i]}" "$R_BLOCK" "$CMP" 2>&1)" 'BLOCK\||ERR')
   case "$out" in BLOCK\|*) ;; *) die "${VLABELS[$i]}: $out";; esac
   hash=$(field "$out" 2)
   info "$(printf '%-12s block %s = %s' "${VLABELS[$i]}" "$CMP" "$hash")"
@@ -220,7 +232,7 @@ HAS_WALLET=""; HAS_PROVIDER=""
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
 
-  w=$(rsh "$host" "$key" "$R_WALLET" 2>&1 | tail -1)
+  w=$(verdict "$(rsh "$host" "$key" "$R_WALLET" 2>&1)" 'WALLET\||NOWALLET|ERR')
   acct=""; bal=""; psrc=none
   case "$w" in
     WALLET\|*) acct=$(field "$w" 2); bal=$(field "$w" 3); psrc=$(field "$w" 4)
@@ -229,7 +241,7 @@ for b in "${BOXES[@]}"; do
 
   # No --include-remote: a provider this node lists LOCALLY is one it serves. The
   # order book of the whole network would name sellers this box cannot run.
-  sl=$(rsh "$host" "$key" "$R_SELLERS" 2>&1 | tail -1)
+  sl=$(verdict "$(rsh "$host" "$key" "$R_SELLERS" 2>&1)" '\[|\{|ERR')
   prov=$(echo "$sl" | tr "{" "\n" | grep -o '"id":"[0-9a-f]\{64\}"' | head -1 | cut -d'"' -f4)
   [ -n "$prov" ] && HAS_PROVIDER="$HAS_PROVIDER $label"
 
@@ -262,7 +274,7 @@ RC=$(echo "$out" | sed -n "s/^RC|//p" | tail -1)
 [ "${RC:-1}" = 0 ] || die "the escrowed run failed. If it timed out waiting for the deposit, check that $SCHEDULED has passed on the node you bought from - before the height, the deposit is refused as \"not yet\" and the client gives up first."
 
 say "2. What the wallet actually paid"
-out=$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_WALLET" 2>&1 | tail -1)
+out=$(verdict "$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_WALLET" 2>&1)" 'WALLET\||NOWALLET|ERR')
 AFTER=$(field "$out" 3)
 case "$AFTER" in ''|*[!0-9]*) die "could not read the balance back";; esac
 COST=$((BEFORE - AFTER))
