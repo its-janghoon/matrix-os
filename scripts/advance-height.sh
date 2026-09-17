@@ -149,6 +149,15 @@ EOS
 R_VALIDATORS="$R_COMMON
 $R_VALIDATORS_BODY"
 
+# Provider accounts on the order book. A registered provider IS an account on
+# this chain, and on this network they belong to the same operator - which makes
+# one a legitimate place to put a base unit.
+R_PROVIDERS="$R_COMMON"'
+matrix provider list --addr "127.0.0.1:$M" --json 2>/dev/null \
+  | grep -o "\"id\":\"[0-9a-f]\{64\}\"" | cut -d"\"" -f4 | sed "s/^/ACCT|/"
+echo "PROVIDERS_DONE"
+'
+
 R_WALLET="$PASS_PREFIX$R_COMMON"'
 if [ ! -f "$HOME/.matrix/wallet.json" ]; then echo "NOWALLET"; exit 0; fi
 A=$(matrix wallet show 2>/dev/null | sed -n "s/^account:[[:space:]]*//p" | head -1)
@@ -225,22 +234,50 @@ fi
 
 # The recipient. Anything but the sender: the ledger refuses a self-transfer,
 # which moves nothing while consuming a nonce.
-if [ -z "$RECIPIENT" ]; then
-  for a in "${CANDIDATES[@]}"; do
-    [ "$a" != "$SENDER_ID" ] && { RECIPIENT=$a; info "recipient: another box's wallet, ${a:0:12}..."; break; }
+#
+# Every source reports what it found, including nothing. The first version fell
+# through three of them in silence and then said "no account" - true, useless,
+# and giving no way to tell an empty validators list from a reader that was
+# looking in the wrong place.
+takeAccounts() { # <raw> -> prints each 64-hex account, one per line
+  printf '%s\n' "$1" | sed -n 's/^ACCT|\([0-9a-f]\{64\}\)$/\1/p'
+}
+pickFrom() { # <label> <accounts...> -> sets RECIPIENT if one is not the sender
+  local label=$1 a n=0; shift
+  for a in "$@"; do
+    [ -z "$a" ] && continue
+    n=$((n + 1))
+    if [ -z "$RECIPIENT" ] && [ "$a" != "$SENDER_ID" ]; then
+      RECIPIENT=$a
+      info "recipient from $label: ${a:0:12}..."
+    fi
   done
+  [ -n "$RECIPIENT" ] || info "$label: $n account(s), none usable$([ "$n" -gt 0 ] && echo " (all are the sender)")"
+}
+
+if [ -z "$RECIPIENT" ]; then
+  pickFrom "another box's wallet" "${CANDIDATES[@]:-}"
+fi
+if [ -z "$RECIPIENT" ]; then
+  # Providers on the order book. A registered provider is an account, and on this
+  # network it is this operator's own.
+  mapfile -t provs < <(takeAccounts "$(rsh "$(field "$PROBE" 2)" "$(field "$PROBE" 3)" "$R_PROVIDERS" 2>&1)")
+  pickFrom "the order book" "${provs[@]:-}"
 fi
 if [ -z "$RECIPIENT" ]; then
   # The validator accounts the config names. They are this operator's own nodes,
   # so a base unit sent there has not left the building.
-  raw=$(rsh "$(field "$PROBE" 2)" "$(field "$PROBE" 3)" "$R_VALIDATORS" 2>&1)
-  while IFS= read -r line; do
-    case "$line" in ACCT\|*) a=${line#ACCT|};; *) continue;; esac
-    [ "$a" != "$SENDER_ID" ] && { RECIPIENT=$a; info "recipient: a validator account from the config, ${a:0:12}..."; break; }
-  done <<< "$raw"
+  mapfile -t vals < <(takeAccounts "$(rsh "$(field "$PROBE" 2)" "$(field "$PROBE" 3)" "$R_VALIDATORS" 2>&1)")
+  pickFrom "the config's validators list" "${vals[@]:-}"
 fi
-[ -n "$RECIPIENT" ] || die "no account to send to that is not the sender. Name one as the second argument:
-   ./scripts/advance-height.sh $TARGET <64-hex-account-id>"
+[ -n "$RECIPIENT" ] || die "nothing on this network is a usable recipient, and one is needed because the
+   ledger refuses a self-transfer. Name any account you control:
+
+     ./scripts/advance-height.sh $TARGET <64-hex-account-id>
+
+   To make one that is yours and spendable, on any box:
+     matrix wallet create --wallet ~/.matrix/height-driver.json
+   then pass the account it prints. Its balance is recoverable; it is a real key."
 [ "$RECIPIENT" != "$SENDER_ID" ] || die "the recipient is the sender; the ledger refuses a self-transfer"
 
 info "sending 1 base unit from ${SENDER_ID:0:12}... ($(field "$SENDER_BOX" 1)) to ${RECIPIENT:0:12}..., $NEED times"
