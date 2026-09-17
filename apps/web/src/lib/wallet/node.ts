@@ -16,7 +16,7 @@ import { fromBase64, toBase64 } from './signing';
 import type { Message, Signer } from './signer';
 
 const MARKET = 'matrix.market.v1.MarketService';
-const INFERENCE = 'matrix.inference.v1.InferenceService';
+export const INFERENCE = 'matrix.inference.v1.InferenceService';
 
 /**
  * A node on this machine. Offered as a choice, never assumed.
@@ -221,7 +221,7 @@ export interface BridgeReconciliation {
   blockHeight: bigint;
 }
 
-async function rpc(
+export async function rpc(
   endpoint: string,
   service: string,
   method: string,
@@ -264,22 +264,22 @@ async function rpc(
   return text === '' ? {} : (JSON.parse(text) as Record<string, unknown>);
 }
 
-function str(value: unknown): string {
+export function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-function big(value: unknown): bigint {
+export function big(value: unknown): bigint {
   if (typeof value === 'bigint') return value;
   if (typeof value === 'string' && value !== '') return BigInt(value);
   if (typeof value === 'number') return BigInt(Math.trunc(value));
   return 0n;
 }
 
-function num(value: unknown): number {
+export function num(value: unknown): number {
   return typeof value === 'number' ? value : Number(value ?? 0) || 0;
 }
 
-function obj(value: unknown): Record<string, unknown> {
+export function obj(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
