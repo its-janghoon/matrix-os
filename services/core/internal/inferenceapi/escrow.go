@@ -2,6 +2,7 @@ package inferenceapi
 
 import (
 	"context"
+	"errors"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"google.golang.org/grpc"
@@ -122,11 +123,18 @@ func (s *Service) StreamEscrowedInferenceJob(
 
 	payment, result, err := s.inf.StreamEscrowed(stream.Context(), jobID,
 		req.GetAuthorization().GetSignature(), onChunk)
-	if err != nil {
+	// A CUT-SHORT RUN STILL GETS ITS FINAL FRAME, because the settlement is on
+	// it. Returning the error instead would leave a buyer who is still connected
+	// - the provider dropped, not them - with nothing to sign and the whole
+	// reservation going to the provider's claim. When it is the connection that
+	// died, this send fails harmlessly and the buyer recovers the settlement
+	// instead. Any other error is a real failure with no settlement to deliver.
+	cutShort := errors.Is(err, inference.ErrStreamCutShort)
+	if err != nil && !cutShort {
 		return mapInferenceError(err)
 	}
 
-	final := &inferencev1.StreamEscrowedInferenceJobResponse{JobId: jobID}
+	final := &inferencev1.StreamEscrowedInferenceJobResponse{JobId: jobID, CutShort: cutShort}
 	if payment != nil {
 		final.Payment = paymentToProto(payment)
 	}

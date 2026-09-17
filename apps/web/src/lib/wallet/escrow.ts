@@ -155,6 +155,10 @@ export async function chatEscrowed(
         input.onDelta?.(delta);
       }
       if (frame.payment !== undefined || frame.job !== undefined) last = frame;
+      // The node sends the final frame even when the run was cut short, because
+      // the settlement is on it - so a provider that dropped mid-answer arrives
+      // here with a bill for what it produced rather than as an error.
+      if (frame.cutShort === true) cutShort = true;
     }
   } catch (err) {
     // Only an abort is recoverable here. Anything else - the node refusing, the
