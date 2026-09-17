@@ -10,7 +10,6 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 
 	"github.com/ecirlabs/matrix-core/internal/inference"
-	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // statusToProto maps an inference job status to its proto enum.
@@ -28,6 +27,8 @@ func statusToProto(s inference.InferenceJobStatus) inferencev1.InferenceJobStatu
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_FAILED
 	case inference.InferenceJobAwaitingPayment:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_AWAITING_PAYMENT
+	case inference.InferenceJobAwaitingDeposit:
+		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_AWAITING_DEPOSIT
 	default:
 		return inferencev1.InferenceJobStatus_INFERENCE_JOB_STATUS_UNSPECIFIED
 	}
@@ -257,19 +258,10 @@ func (s *Service) SettleInferenceJob(ctx context.Context, req *inferencev1.Settl
 	if req == nil {
 		return nil, status.Error(codes.InvalidArgument, "request is required")
 	}
-	// Either kind of account: 32 bytes ed25519, 20 bytes an Ethereum address.
-	pub, err := token.ParseSenderKey(req.GetFromPublicKey())
+	tx, err := signedTransferFromFields(req.GetFromPublicKey(), req.GetTo(), req.GetAmount(),
+		req.GetNonce(), req.GetTimestamp(), req.GetPrevHash(), req.GetSignature())
 	if err != nil {
-		return nil, mapInferenceError(err)
-	}
-	tx := &token.Transaction{
-		From:      pub,
-		To:        req.GetTo(),
-		Amount:    req.GetAmount(),
-		Nonce:     req.GetNonce(),
-		Timestamp: req.GetTimestamp(),
-		PrevHash:  req.GetPrevHash(),
-		Signature: req.GetSignature(),
+		return nil, err
 	}
 	job, err := s.inf.SettleSigned(ctx, req.GetId(), tx)
 	if err != nil {
