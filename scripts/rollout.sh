@@ -60,6 +60,28 @@ field() { echo "$1" | cut -d"|" -f"$2"; }
 # writes ~ and it is not their mistake to make.
 keypath() { printf %s "${1/#\~/$HOME}"; }
 
+# verdict pulls the payload's ANSWER out of everything the box said.
+#
+# A remote payload ends with one line naming its result - OK, SKIP, ERR, or a
+# pipe-delimited record - and `tail -3` was being read as if that were the only
+# thing on the wire. It is not. A box writes to stderr whenever it likes:
+# systemd's "the unit file changed on disk, run daemon-reload", sudo's lecture, a
+# login banner, apt's warnings. Any one of them lands after the verdict and the
+# prefix match fails.
+#
+# That is not cosmetic. It failed a validator-4 upgrade that had SUCCEEDED - the
+# OK line was right there under two systemd warnings - and in the schedule step
+# the same noise would have called rollback_schedule and undone a correct
+# schedule on every box that already had it, which is the one state this script
+# exists to never leave a chain in.
+#
+# The FIRST match, not the last: an ERR path prints its verdict and then dumps
+# journalctl, and a log line is not a second verdict.
+verdict() { printf '%s\n' "$1" | grep -m1 -E "^($2)" || true; }
+
+# saidWhat is what to show when there was no verdict: the box's own last words.
+saidWhat() { printf '%s' "$1" | tail -6; }
+
 # checkKeys reads every key in the box list before the first ssh.
 #
 # Up front rather than at the first use: the alternative is finding out on box
@@ -134,6 +156,13 @@ tar -xzf "$N" || { echo "ERR extract failed"; exit 1; }
 sudo systemctl stop matrixd || { echo "ERR stop failed"; exit 1; }
 sudo install -m 0755 "$T/matrixd" "$D/matrixd"
 sudo install -m 0755 "$T/matrix"  "$D/matrix"
+# Reload the unit BEFORE starting. systemd warns "the unit file changed on disk"
+# when the file differs from what it has loaded, and then starts the STALE one -
+# so a box whose service file was edited at some point comes back on the old
+# ExecStart and old environment while reporting the new binary. Harmless where
+# nothing changed, and the difference between a real upgrade and an apparent one
+# where it did. validator-4 was carrying exactly that warning.
+sudo systemctl daemon-reload
 sudo systemctl start matrixd || { echo "ERR start failed"; exit 1; }
 sleep 15
 systemctl is-active --quiet matrixd || { echo "ERR did not come back"; sudo journalctl -u matrixd -n 25 --no-pager; exit 1; }
@@ -221,6 +250,7 @@ if ! sudo matrixd -preflight-production -config "$CFG" > /tmp/preflight.out 2>&1
   tail -20 /tmp/preflight.out
   exit 1
 fi
+sudo systemctl daemon-reload
 sudo systemctl restart matrixd || { sudo cp -p "$BK" "$CFG"; echo "ERR restart failed; config restored"; exit 1; }
 sleep 15
 if ! systemctl is-active --quiet matrixd; then
@@ -264,8 +294,10 @@ echo "OK rolled back to $BK"
 # ---------------------------------------------------------------- helpers
 
 read_state() { # label host key -> echoes "OK|height|head|root|version|cfg|sched"
-  local label=$1 host=$2 key=$3
-  rsh "$host" "$key" "$R_STATE" 2>&1 | tail -1
+  local label=$1 host=$2 key=$3 raw
+  raw=$(rsh "$host" "$key" "$R_STATE" 2>&1)
+  local v; v=$(verdict "$raw" 'OK\||ERR')
+  printf '%s' "${v:-$(saidWhat "$raw")}"
 }
 
 # Every validator must have committed the SAME BLOCK at a height they all have.
@@ -277,7 +309,7 @@ read_state() { # label host key -> echoes "OK|height|head|root|version|cfg|sched
 # those would report a fork that is not there, and during the schedule step that
 # report triggers an automatic rollback of a schedule that was correct.
 check_agreement() {
-  local b label host key role out h lo=0 hi=0 hash ref="" ref_l=""
+  local b label host key role out raw h lo=0 hi=0 hash ref="" ref_l=""
   local -a labels=() hosts=() keys=() heights=()
   for b in "${BOXES[@]}"; do
     label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
@@ -298,8 +330,9 @@ check_agreement() {
 
   local cmp=$((lo - 1))
   for i in "${!labels[@]}"; do
-    out=$(rsh "${hosts[$i]}" "${keys[$i]}" "$R_BLOCK" "$cmp" 2>&1 | tail -1)
-    case "$out" in BLOCK\|*) ;; *) info "${labels[$i]}: $out"; return 1;; esac
+    raw=$(rsh "${hosts[$i]}" "${keys[$i]}" "$R_BLOCK" "$cmp" 2>&1)
+    out=$(verdict "$raw" 'BLOCK\||ERR')
+    case "$out" in BLOCK\|*) ;; *) info "${labels[$i]}: ${out:-$(saidWhat "$raw")}"; return 1;; esac
     hash=$(field "$out" 2)
     info "$(printf '%-12s height=%-6s block %s = %s' "${labels[$i]}" "${heights[$i]}" "$cmp" "${hash:0:18}")"
     [ "$hash" = none ] && { info "  ^^ does not have block $cmp"; return 1; }
@@ -334,8 +367,9 @@ rollback_schedule() {
   printf "!! some nodes and not others is the one state that splits the chain.\n" >&2
   for entry in "${SCHEDULED[@]}"; do
     label=$(field "$entry" 1); host=$(field "$entry" 2); key=$(field "$entry" 3)
-    out=$(rsh "$host" "$key" "$R_UNSCHEDULE" 2>&1 | tail -3)
-    printf "!!   %-12s %s\n" "$label" "$out" >&2
+    raw=$(rsh "$host" "$key" "$R_UNSCHEDULE" 2>&1)
+    out=$(verdict "$raw" 'OK|SKIP|ERR')
+    printf "!!   %-12s %s\n" "$label" "${out:-$(saidWhat "$raw")}" >&2
   done
   printf "!! Rollback attempted on every box above. Verify each one before retrying.\n" >&2
   exit 1
@@ -369,14 +403,16 @@ say "2. Binary rollout, one box at a time"
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
   say "2.$label"
-  out=$(rsh "$host" "$key" "$R_UPGRADE" "$V" 2>&1 | tail -3)
+  raw=$(rsh "$host" "$key" "$R_UPGRADE" "$V" 2>&1)
+  out=$(verdict "$raw" 'OK|SKIP|ERR')
   case "$out" in
     SKIP*) info "$out" ;;
     OK*)   info "$out"
            if [ "$role" = validator ]; then
              wait_for_agreement 10 || die "$label did not rejoin agreement after upgrade"
            fi ;;
-    *)     die "$label upgrade failed: $out" ;;
+    *)     die "$label upgrade failed: ${out:-the box gave no verdict}
+$(saidWhat "$raw")" ;;
   esac
 done
 
@@ -416,10 +452,12 @@ say "5. Write the schedule to every box"
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
   say "5.$label"
-  out=$(rsh "$host" "$key" "$R_SCHEDULE" "$TARGET" "$NEW_PROTOCOL_VERSION" 2>&1 | tail -5)
+  raw=$(rsh "$host" "$key" "$R_SCHEDULE" "$TARGET" "$NEW_PROTOCOL_VERSION" 2>&1)
+  out=$(verdict "$raw" 'OK|SKIP|ERR')
   case "$out" in
     SKIP*|OK*) info "$out"; SCHEDULED+=("$b") ;;
-    *)         rollback_schedule "$label refused the schedule: $out" ;;
+    *)         rollback_schedule "$label refused the schedule: ${out:-the box gave no verdict}
+$(saidWhat "$raw")" ;;
   esac
   if [ "$role" = validator ]; then
     wait_for_agreement 10 || rollback_schedule "$label did not rejoin agreement after the schedule restart"

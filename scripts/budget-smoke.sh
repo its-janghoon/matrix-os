@@ -46,6 +46,18 @@ field() { echo "$1" | cut -d"|" -f"$2"; }
 # writes ~ and it is not their mistake to make.
 keypath() { printf %s "${1/#\~/$HOME}"; }
 
+# verdict pulls a payload's ANSWER out of everything the box said.
+#
+# A remote payload ends with one line naming its result, and reading `tail -1` as
+# if that were the only thing on the wire is wrong: a box writes to stderr
+# whenever it likes - systemd's "the unit file changed on disk", sudo's lecture, a
+# login banner - and any of it lands after the verdict. It failed a rollout that
+# had actually succeeded, which is how this helper came to exist.
+verdict() { printf '%s\n' "$1" | grep -m1 -E "^($2)" || true; }
+
+# saidWhat is what to show when there was no verdict: the box's own last words.
+saidWhat() { printf '%s' "$1" | tail -6; }
+
 # checkKeys reads every key in the box list before the first ssh.
 #
 # Up front rather than at the first use: the alternative is finding out on box
@@ -163,7 +175,7 @@ echo "CLOSED"
 '
 
 remaining_on_opener() { # -> the number, or "" if the account is not there yet
-  rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_SHOW" "$1" 2>&1 | tail -1 \
+  verdict "$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_SHOW" "$1" 2>&1)" '\{|ERR' \
     | sed -n "s/.*\"remaining\":\([0-9]*\).*/\1/p" | head -1
 }
 
@@ -193,7 +205,7 @@ say "0. The activation height must have passed, and the nodes must agree"
 LO=0; HI=0; SCHEDULED=""; VLABELS=(); VHOSTS=(); VKEYS=()
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
-  out=$(rsh "$host" "$key" "$R_CHAIN" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "$host" "$key" "$R_CHAIN" 2>&1)" 'CHAIN\||ERR')
   case "$out" in CHAIN\|*) ;; *) die "$label: $out";; esac
   h=$(field "$out" 2); hd=$(field "$out" 3); sr=$(field "$out" 4); sc=$(field "$out" 5)
   info "$(printf '%-12s height=%-6s head=%s root=%s schedule=%s' "$label" "${h:-n/a}" "${hd:0:14}" "${sr:0:14}" "$sc")"
@@ -231,7 +243,7 @@ CMP=$((LO - 1))
 say "0a. Every validator must have the same block $CMP"
 REF=""; REF_L=""
 for i in "${!VLABELS[@]}"; do
-  out=$(rsh "${VHOSTS[$i]}" "${VKEYS[$i]}" "$R_BLOCK" "$CMP" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "${VHOSTS[$i]}" "${VKEYS[$i]}" "$R_BLOCK" "$CMP" 2>&1)" 'BLOCK\||ERR')
   case "$out" in BLOCK\|*) ;; *) die "${VLABELS[$i]}: $out";; esac
   hash=$(field "$out" 2)
   info "$(printf '%-12s block %s = %s' "${VLABELS[$i]}" "$CMP" "$hash")"
@@ -245,7 +257,7 @@ say "0b. Find a box with a funded wallet"
 OPENER=""
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
-  out=$(rsh "$host" "$key" "$R_WALLET" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "$host" "$key" "$R_WALLET" 2>&1)" 'WALLET\||NOWALLET|ERR')
   case "$out" in
     WALLET\|*) info "$(printf '%-12s account=%s balance=%s passphrase=%s (%s chars)' "$label" \
                  "$(field "$out" 2)" "$(field "$out" 3)" "$(field "$out" 4)" "$(field "$out" 5)")"
@@ -261,7 +273,7 @@ fi
 info "opening from $(field "$OPENER" 1), balance $BEFORE"
 
 say "1. Open a budget of $AMOUNT base units"
-out=$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_OPEN" "$AMOUNT" "$PER_JOB_CAP" 2>&1 | tail -3)
+out=$(verdict "$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_OPEN" "$AMOUNT" "$PER_JOB_CAP" 2>&1)" 'ACCOUNT\||ERR')
 case "$out" in ACCOUNT\|*) ;; *) die "open failed: $out";; esac
 ACCOUNT=${out#ACCOUNT|}
 info "$ACCOUNT"
@@ -273,7 +285,7 @@ say "3. Every node must report the same thing"
 REF=""; REF_LABEL=""; BAD=0
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
-  out=$(rsh "$host" "$key" "$R_SHOW" "$ACCOUNT" 2>&1 | tail -1)
+  out=$(verdict "$(rsh "$host" "$key" "$R_SHOW" "$ACCOUNT" 2>&1)" '\{|ERR')
   info "$(printf '%-12s %s' "$label" "${out:0:110}")"
   case "$out" in *\"remaining\":$AMOUNT*) ;; *) info "  ^^ does not report remaining=$AMOUNT"; BAD=1 ;; esac
   if [ -z "$REF" ]; then REF=$out; REF_LABEL=$label; continue; fi
@@ -281,10 +293,10 @@ for b in "${BOXES[@]}"; do
 done
 
 say "4. Close it and check the money comes back"
-out=$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_CLOSE" "$ACCOUNT" 2>&1 | tail -3)
+out=$(verdict "$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_CLOSE" "$ACCOUNT" 2>&1)" 'CLOSED|ERR')
 case "$out" in CLOSED) info "close submitted" ;; *) info "close: $out"; BAD=1 ;; esac
 wait_for_remaining "$ACCOUNT" 0 || { info "the close did not land"; BAD=1; }
-out=$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_WALLET" 2>&1 | tail -1)
+out=$(verdict "$(rsh "$(field "$OPENER" 2)" "$(field "$OPENER" 3)" "$R_WALLET" 2>&1)" 'WALLET\||NOWALLET|ERR')
 AFTER=$(field "$out" 3)
 info "wallet $BEFORE -> $AFTER (cost $((BEFORE - AFTER)) base units in fees)"
 
