@@ -18,6 +18,13 @@
  * offer, and it means settling honestly is always the cheaper move - so step 4
  * is not a courtesy, it is how the reader gets their change back.
  *
+ * WHICH IS WHY CANCELLING IS NOT JUST HANGING UP. The settlement arrives on the
+ * stream's LAST frame, so a reader who stops reading never receives one - and
+ * with no settlement to sign they pay the whole cap instead of the fraction the
+ * run cost. A cancel that did nothing but abort the fetch would be the most
+ * expensive button on the page. So an aborted run recovers its settlement from
+ * the node and signs it for what arrived.
+ *
  * THE SETTLEMENT IS CHECKED BEFORE IT IS SIGNED. See ceiling.ts: signing the
  * number the node handed over would give back the one piece of leverage moving
  * settlement to the buyer was meant to create.
@@ -40,6 +47,15 @@ export interface EscrowChatOptions {
   onDelta?: (delta: string) => void;
   /** Called when the job moves from one step to the next. */
   onPhase?: (phase: EscrowPhase) => void;
+  /**
+   * Stops the answer.
+   *
+   * It stops the STREAM and not the job: the reservation is already funded when
+   * this can fire, so the run still settles for what arrived. Aborting the
+   * settlement too would leave the whole reservation to the provider's claim,
+   * which is the opposite of what a reader pressing stop is asking for.
+   */
+  signal?: AbortSignal;
 }
 
 /** Thrown when the node asks for more than the answer can account for. */
@@ -121,16 +137,41 @@ export async function chatEscrowed(
   input.onPhase?.('streaming');
   let completion = '';
   let last: Record<string, unknown> = {};
-  for await (const frame of streamRpc(serving, INFERENCE, 'StreamEscrowedInferenceJob', {
-    id: jobId,
-    authorization,
-  })) {
-    const delta = str(frame.delta);
-    if (delta !== '') {
-      completion += delta;
-      input.onDelta?.(delta);
+  let cutShort = false;
+  try {
+    for await (const frame of streamRpc(serving, INFERENCE, 'StreamEscrowedInferenceJob', {
+      id: jobId,
+      authorization,
+    }, input.signal)) {
+      const delta = str(frame.delta);
+      if (delta !== '') {
+        completion += delta;
+        input.onDelta?.(delta);
+      }
+      if (frame.payment !== undefined || frame.job !== undefined) last = frame;
     }
-    if (frame.payment !== undefined || frame.job !== undefined) last = frame;
+  } catch (err) {
+    // Only an abort is recoverable here. Anything else - the node refusing, the
+    // job not existing - is a real failure and recovering from it would ask a
+    // node a question it has already answered.
+    if (!isAbort(err)) throw err;
+    cutShort = true;
+  }
+
+  if (cutShort || last.payment === undefined) {
+    // The settlement was on a frame that never arrived. Ask for it directly:
+    // without it there is nothing to sign, and an unsigned reservation is one
+    // the provider claims in full.
+    last = await rpc(serving, INFERENCE, 'RecoverEscrowedInferenceJob', {
+      id: jobId,
+      authorization,
+    });
+    cutShort = last.cutShort === true;
+    // The node's record of what it delivered. Trusted over the local buffer only
+    // when the local one is EMPTY, which is the case where the reader aborted
+    // before the first delta and has nothing to check the bill against - and
+    // never as a replacement for text the reader actually saw.
+    if (completion === '') completion = str(obj(last.job).completion);
   }
 
   const settlement = obj(last.payment);
@@ -172,6 +213,7 @@ export async function chatEscrowed(
   const settled = obj(done.job);
   const usage = obj(settled.usage);
   return {
+    cutShort,
     // The completion came down the stream, not out of the settled job: the
     // reader has been watching it, and the job's copy is only the node's record.
     completion,
@@ -215,11 +257,13 @@ export async function* streamRpc(
   service: string,
   method: string,
   body: unknown,
+  signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
   const res = await fetch(`${endpoint.replace(/\/$/, '')}/${service}/${method}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', 'connect-protocol-version': '1' },
     body: JSON.stringify(body),
+    ...(signal ? { signal } : {}),
   });
   if (!res.ok || res.body === null) {
     throw new Error(`${method} failed: ${res.status} ${await res.text().catch(() => '')}`.trim());
@@ -261,4 +305,21 @@ export async function* streamRpc(
 
     if (done) return;
   }
+}
+
+/**
+ * Whether a thrown value is an abort rather than a failure.
+ *
+ * Checked by name and not by instance: `fetch` rejects with a DOMException in a
+ * browser and an `AbortError`-named Error under Node's undici, and an
+ * `instanceof DOMException` test passes in one and silently fails in the other -
+ * which would turn every cancelled run in a test into an unhandled error.
+ */
+function isAbort(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'name' in err &&
+    (err as { name: unknown }).name === 'AbortError'
+  );
 }

@@ -167,6 +167,19 @@ export interface Settled {
   receipt: string;
   /** Who served it, so a UI can name the seller rather than just the account. */
   seller: Seller;
+  /**
+   * True when the run stopped before the model was done - the reader cancelled,
+   * or the connection dropped - so the completion is what arrived rather than a
+   * finished answer.
+   *
+   * Only the escrowed path can report this. On the other two the answer is
+   * withheld until it is paid for, so a cut-short run produces no completion and
+   * no bill at all. Here the money moved first, and a partial answer with a
+   * partial bill is the honest outcome: the reader is charged for what arrived,
+   * and a page that presented it as a finished answer would be hiding the one
+   * thing they need to know before they read it.
+   */
+  cutShort?: boolean;
 }
 
 export interface NativeTransaction {

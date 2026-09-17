@@ -295,6 +295,10 @@ function BillLines({ purchase }: { purchase: Purchase }) {
     <details className='mt-1 font-mono text-xs'>
       <summary className='cursor-pointer list-none text-gray-600 hover:text-gray-400'>
         {formatMatrix(BigInt(purchase.units))} {SYMBOL} · {purchase.promptTokens + purchase.completionTokens} tokens
+        {/* A stopped answer looks exactly like a finished one, and it was paid
+            for. This is the only thing on the page that says otherwise, so it
+            is on the collapsed line rather than inside the fold. */}
+        {purchase.cutShort ? <span className='ml-2 text-amber-300'>stopped early</span> : null}
         {failed ? <span className='ml-2 text-red-300'>receipt failed</span> : null}
       </summary>
       <div className='mt-2 space-y-1 border-l border-gray-800 pl-3 text-gray-500'>
@@ -305,6 +309,12 @@ function BillLines({ purchase }: { purchase: Purchase }) {
           {purchase.promptTokens} prompt + {purchase.completionTokens} completion tokens, {purchase.model}
         </p>
         <p>served by {purchase.servedBy}</p>
+        {purchase.cutShort ? (
+          <p className='text-amber-300'>
+            stopped before the model finished - you were charged for the text above and the rest of
+            the reservation was returned
+          </p>
+        ) : null}
         <p className={failed ? 'text-red-300' : undefined}>{verdict}</p>
       </div>
     </details>

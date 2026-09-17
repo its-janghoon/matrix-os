@@ -57,6 +57,7 @@ func TestReadClassificationIsPinned(t *testing.T) {
 		"FulfillInferenceJob",
 		"FundAccount",
 		"FundInferenceEscrow",
+		"RecoverEscrowedInferenceJob",
 		"RegisterProvider",
 		"ReserveInferenceEscrow",
 		"RunInferenceJob",

@@ -349,6 +349,30 @@ message StreamEscrowedInferenceJobResponse {
     bool streamed_one_shot = 5;
 }
 
+// RecoverEscrowedInferenceJobRequest asks for the settlement of a funded job
+// whose stream the buyer is no longer holding open.
+message RecoverEscrowedInferenceJobRequest {
+    string id = 1;
+    // The SAME authorization that opened the reservation, for the same reason
+    // StreamEscrowedInferenceJob needs it: a job id is not a credential, and the
+    // answer comes back on this call.
+    RunAuthorization authorization = 2;
+}
+
+// RecoverEscrowedInferenceJobResponse returns what the job produced and the
+// settlement to sign for it.
+message RecoverEscrowedInferenceJobResponse {
+    // The settlement, identical to the one the stream's last frame carried.
+    PaymentRequest payment = 1;
+    // The job, INCLUDING its completion. It is not withheld on this path: the
+    // provider already holds the reservation, so the text is not leverage, and a
+    // buyer who cannot see what was produced cannot check the bill against it.
+    InferenceJob job = 2;
+    // True when the run was cut short - the buyer hung up, or the provider
+    // stopped - so the completion is what arrived rather than a finished answer.
+    bool cut_short = 3;
+}
+
 // SettleEscrowedInferenceJobRequest submits the buyer's signed settlement.
 message SettleEscrowedInferenceJobRequest {
     string id = 1;
@@ -612,4 +636,18 @@ service InferenceService {
     // claims the whole reservation once its expiry passes. That is what made
     // streaming safe, and it means settling honestly is always the cheaper move.
     rpc SettleEscrowedInferenceJob(SettleEscrowedInferenceJobRequest) returns (SettleEscrowedInferenceJobResponse) {}
+
+    // RecoverEscrowedInferenceJob returns the settlement for a funded job the
+    // buyer is no longer streaming. Input: the job ID and the authorization its
+    // reservation was opened with. Output: what the job produced and the
+    // transfer that settles it. Side effects: none - it reads.
+    //
+    // WHY THIS EXISTS. The settlement rides on the stream's last frame, so a
+    // buyer who cancels, reloads, or loses their connection mid-answer never
+    // receives it - and without it they cannot settle, which means the provider
+    // claims the WHOLE reservation at the expiry instead of the fraction the run
+    // actually cost. Streaming without this turns every cancelled request into a
+    // full-price one. It is idempotent and reads nothing the buyer has not paid
+    // for.
+    rpc RecoverEscrowedInferenceJob(RecoverEscrowedInferenceJobRequest) returns (RecoverEscrowedInferenceJobResponse) {}
 }

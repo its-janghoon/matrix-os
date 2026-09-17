@@ -272,3 +272,116 @@ func TestStreamingNeedsTheAuthorizationTheReservationWasOpenedWith(t *testing.T)
 		t.Fatalf("the buyer's own authorization was refused: %v", err)
 	}
 }
+
+// A CANCELLED RUN IS BILLED FOR WHAT IT PRODUCED, not for the whole reservation.
+//
+// This is the property that makes a cancel button honest. The settlement rides on
+// the stream's last frame, so a buyer who hangs up never receives one - and a job
+// with no settlement is a job the provider claims in full at the expiry. Without
+// this, cancelling after two words would cost the same as reading the whole
+// answer, and a reader who closed a tab would pay the cap.
+func TestHangingUpMidAnswerStillLeavesASettlementForWhatArrived(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyerID, providerID := newTestService(t, fs, 1, 100000)
+	buyer := svc.accounts.(memAccounts).m[buyerID]
+
+	plan := escrowJob(t, svc, buyerID, providerID, 5000)
+	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+
+	// The buyer takes one chunk and goes away, which is what a closed tab looks
+	// like from here: the send fails and the error travels back through onChunk.
+	hungUp := errors.New("the buyer's connection is gone")
+	var got strings.Builder
+	chunks := 0
+	pr, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(delta string) error {
+		chunks++
+		got.WriteString(delta)
+		if chunks >= 1 {
+			return hungUp
+		}
+		return nil
+	})
+	if !errors.Is(err, ErrStreamCutShort) {
+		t.Fatalf("a cut-short run reported %v, want ErrStreamCutShort", err)
+	}
+	if pr == nil {
+		t.Fatal("no settlement after a cut-short run: the provider would claim the whole reservation")
+	}
+	if pr.Amount == 0 || pr.Amount >= plan.Deposit {
+		t.Fatalf("a run cut off after one chunk was billed %d against a %d reservation",
+			pr.Amount, plan.Deposit)
+	}
+
+	// And the buyer can come back for that settlement, which is the only way they
+	// ever see it: the stream they were reading it from is the one that died.
+	recovered, job, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, nil)
+	if err != nil {
+		t.Fatalf("RecoverEscrowSettlement: %v", err)
+	}
+	if !cutShort {
+		t.Fatal("the recovered job does not say it was cut short, so a client cannot tell a partial answer from a finished one")
+	}
+	if recovered.Amount != pr.Amount || recovered.Nonce != pr.Nonce || recovered.To != pr.To {
+		t.Fatalf("recovered a different settlement: %+v vs %+v", recovered, pr)
+	}
+	if job.Completion != got.String() {
+		t.Fatalf("the recovered job's completion %q is not the text that was delivered %q",
+			job.Completion, got.String())
+	}
+
+	// Reading it does not consume it, and settling it works.
+	if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, nil); err != nil {
+		t.Fatalf("recovering twice: %v", err)
+	}
+	done, err := svc.SettleEscrowed(context.Background(), plan.JobID, signPlan(t, buyer, recovered))
+	if err != nil {
+		t.Fatalf("SettleEscrowed after a cut-short run: %v", err)
+	}
+	if done.Status != InferenceJobCompleted {
+		t.Fatalf("job is %s after settling a cut-short run", done.Status)
+	}
+}
+
+// Recovering hands back the COMPLETION, so it needs the same credential the
+// stream does. Otherwise cancelling once would publish the answer to whoever
+// learned the job id.
+func TestRecoveringNeedsTheAuthorizationTheReservationWasOpenedWith(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyerID, providerID := newTestService(t, fs, 3, 1000)
+	buyer := svc.accounts.(memAccounts).m[buyerID]
+
+	job, err := svc.SubmitInferenceJob(buyerID, providerID, InferenceRequest{Prompt: "hello world"}, 8)
+	if err != nil {
+		t.Fatalf("SubmitInferenceJob: %v", err)
+	}
+	auth := []byte("the signature the reservation was opened with")
+	plan, err := svc.ReserveEscrow(job.ID, auth)
+	if err != nil {
+		t.Fatalf("ReserveEscrow: %v", err)
+	}
+	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+	if _, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, auth, func(string) error { return nil }); err != nil {
+		t.Fatalf("StreamEscrowed: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		auth []byte
+	}{
+		{"none at all", nil},
+		{"somebody else's", []byte("a different signature")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, _, _, err := svc.RecoverEscrowSettlement(plan.JobID, tc.auth); !errors.Is(err, ErrRunUnauthorized) {
+				t.Fatalf("recovered with %s and got %v", tc.name, err)
+			}
+		})
+	}
+	if _, _, cutShort, err := svc.RecoverEscrowSettlement(plan.JobID, auth); err != nil || cutShort {
+		t.Fatalf("the buyer's own recovery: err=%v cutShort=%v", err, cutShort)
+	}
+}
