@@ -43,6 +43,15 @@ rsh() {
       -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" "$arg2" <<< "$script"
 }
 
+# The passphrase, if the operator supplied one, travels as the first line of the
+# script that goes over ssh's STDIN. Not as an argument: `bash -s -- "$pass"`
+# would put it in argv, where `ps` on that box shows it to anyone logged in.
+PASS_PREFIX=""
+if [ -n "${MATRIX_WALLET_PASSPHRASE:-}" ]; then
+  PASS_PREFIX="export MATRIX_WALLET_PASSPHRASE=$(printf %q "$MATRIX_WALLET_PASSPHRASE")
+"
+fi
+
 read -r -d "" R_COMMON <<'EOS'
 P=$(pgrep -x matrixd || true)
 [ -z "$P" ] && { echo "ERR matrixd not running"; exit 1; }
@@ -55,16 +64,30 @@ M=${M:-9091}
 # The node's own key, read on the node and never printed. --api-key would put it
 # in argv, where ps shows it to anyone on the box; the environment does not.
 export MATRIX_ADMIN_API_KEY=$(sudo sed -n "s/^[[:space:]-]*key:[[:space:]]*//p" "$CFG" | head -1 | tr -d "\"")
+# A wallet keystore needs a passphrase and there is no terminal here to ask on.
+# If the operator did not supply one, fall back to the root-owned env file the
+# node itself reads it from. Read on the box, used on the box, never printed.
+PASS_FROM="supplied"
+if [ -z "${MATRIX_WALLET_PASSPHRASE:-}" ]; then
+  PASS_FROM="none"
+  for envfile in /etc/matrix/matrixd.env "$(dirname "$CFG")/matrixd.env"; do
+    if sudo test -r "$envfile"; then
+      V=$(sudo sed -n "s/^[[:space:]]*\(export[[:space:]]\+\)\?MATRIX_WALLET_PASSPHRASE=//p" "$envfile" | head -1)
+      V=${V%\"}; V=${V#\"}; V=${V%\'}; V=${V#\'}
+      if [ -n "$V" ]; then export MATRIX_WALLET_PASSPHRASE="$V"; PASS_FROM="$envfile"; break; fi
+    fi
+  done
+fi
 EOS
 
-R_WALLET="$R_COMMON"'
+R_WALLET="$PASS_PREFIX$R_COMMON"'
 if [ ! -f "$HOME/.matrix/wallet.json" ]; then echo "NOWALLET"; exit 0; fi
 A=$(matrix wallet show 2>/dev/null | sed -n "s/^account:[[:space:]]*//p" | head -1)
 B=$(matrix wallet balance --addr "127.0.0.1:$M" 2>/dev/null | awk "{print \$NF}" | head -1)
-echo "WALLET|${A:-unknown}|${B:-unknown}"
+echo "WALLET|${A:-unknown}|${B:-unknown}|$PASS_FROM|${#MATRIX_WALLET_PASSPHRASE}"
 '
 
-R_OPEN="$R_COMMON"'
+R_OPEN="$PASS_PREFIX$R_COMMON"'
 D=$(openssl rand -hex 32)
 OUT=$(matrix budget open --addr "127.0.0.1:$M" --amount "$1" --delegate "$D" \
         --per-job-cap "$2" --max-price-per-unit "'"$MAX_PRICE"'" --ttl "'"$TTL"'" 2>&1)
@@ -78,7 +101,7 @@ matrix budget show --addr "127.0.0.1:$M" --account "$1" --json 2>&1 | tr -d " \n
 echo
 '
 
-R_CLOSE="$R_COMMON"'
+R_CLOSE="$PASS_PREFIX$R_COMMON"'
 OUT=$(matrix budget close --addr "127.0.0.1:$M" --account "$1" 2>&1) || { echo "ERR close failed:"; echo "$OUT"; exit 1; }
 echo "CLOSED"
 '
@@ -114,13 +137,17 @@ for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
   out=$(rsh "$host" "$key" "$R_WALLET" 2>&1 | tail -1)
   case "$out" in
-    WALLET\|*) info "$(printf '%-12s account=%s balance=%s' "$label" "$(field "$out" 2)" "$(field "$out" 3)")"
-               [ -z "$OPENER" ] && OPENER=$b && BEFORE=$(field "$out" 3) ;;
+    WALLET\|*) info "$(printf '%-12s account=%s balance=%s passphrase=%s (%s chars)' "$label" \
+                 "$(field "$out" 2)" "$(field "$out" 3)" "$(field "$out" 4)" "$(field "$out" 5)")"
+               [ -z "$OPENER" ] && OPENER=$b && BEFORE=$(field "$out" 3) && PASSSRC=$(field "$out" 4) ;;
     NOWALLET)  info "$(printf '%-12s no wallet' "$label")" ;;
     *)         info "$(printf '%-12s %s' "$label" "$out")" ;;
   esac
 done
 [ -n "$OPENER" ] || die "no box has a wallet at ~/.matrix/wallet.json; open the budget from the browser instead"
+if [ "${PASSSRC:-none}" = none ]; then
+  die "that wallet is encrypted and no passphrase is available. Either put MATRIX_WALLET_PASSPHRASE in the box's root-owned /etc/matrix/matrixd.env, or set it in YOUR OWN shell before running this - read -s -p \"passphrase: \" MATRIX_WALLET_PASSPHRASE; export MATRIX_WALLET_PASSPHRASE - and it will travel over ssh's stdin, never in argv and never on screen."
+fi
 info "opening from $(field "$OPENER" 1), balance $BEFORE"
 
 say "1. Open a budget of $AMOUNT base units"
