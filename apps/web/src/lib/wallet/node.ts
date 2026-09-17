@@ -561,6 +561,12 @@ export async function sellerFor(
  * Streaming is not available here, and that is a consequence rather than an
  * omission: streaming the answer out before the payment is signed would hand
  * over the very thing being withheld.
+ *
+ * BOTH SIGNATURES ARE THE DELEGATE'S when the buyer is a spend budget, and it is
+ * worth saying because a reader who assumes a human is behind them will write
+ * copy telling people to approve something nobody is going to be asked about.
+ * The COUNT does not change and neither does the withholding - what changes is
+ * that no dialog opens.
  */
 export async function chat(
   endpoint: string,
