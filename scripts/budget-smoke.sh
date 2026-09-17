@@ -80,6 +80,24 @@ if [ -z "${MATRIX_WALLET_PASSPHRASE:-}" ]; then
 fi
 EOS
 
+# A heredoc, not a quoted concatenation: this payload contains single quotes of
+# its own (awk programs, a JSON body) and '...' would have ended the string at the
+# first one. bash -n does not catch that - the result still parses, it just is not
+# the script you wrote.
+read -r -d "" R_CHAIN_BODY <<'EOS'
+R=$(sudo awk '/^eth_rpc:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/addr:/{print $2; exit}' "$CFG" | tr -d '"' | sed "s/.*://")
+SCHED=$(sudo sed -n "s/^[[:space:]-]*height:[[:space:]]*//p" "$CFG" | head -1)
+# A box with no eth_rpc (a seller, typically) still reports its schedule, and
+# still has to report five fields or the caller reads the schedule as a root.
+if [ -z "$R" ]; then echo "CHAIN|0|none|none|${SCHED:-none}"; exit 0; fi
+J=$(curl -s --max-time 6 -X POST "http://127.0.0.1:$R" -H "content-type: application/json" \
+      -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}')
+field_of() { echo "$J" | tr "," "\n" | sed -n "s/.*\"$1\":\"\?\([^\",]*\).*/\1/p" | head -1; }
+echo "CHAIN|$(field_of height)|$(field_of head_hash)|$(field_of state_root)|${SCHED:-none}"
+EOS
+R_CHAIN="$R_COMMON
+$R_CHAIN_BODY"
+
 R_WALLET="$PASS_PREFIX$R_COMMON"'
 if [ ! -f "$HOME/.matrix/wallet.json" ]; then echo "NOWALLET"; exit 0; fi
 A=$(matrix wallet show 2>/dev/null | sed -n "s/^account:[[:space:]]*//p" | head -1)
@@ -131,7 +149,35 @@ wait_for_remaining() {
 
 # ---------------------------------------------------------------- run
 
-say "0. Find a box with a funded wallet"
+say "0. The activation height must have passed, and the nodes must agree"
+REF_HEAD=""; REF_ROOT=""; REF_L=""; HEIGHT=0; SCHEDULED=""
+for b in "${BOXES[@]}"; do
+  label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
+  out=$(rsh "$host" "$key" "$R_CHAIN" 2>&1 | tail -1)
+  case "$out" in CHAIN\|*) ;; *) die "$label: $out";; esac
+  h=$(field "$out" 2); hd=$(field "$out" 3); sr=$(field "$out" 4); sc=$(field "$out" 5)
+  info "$(printf '%-12s height=%-6s head=%s root=%s schedule=%s' "$label" "${h:-n/a}" "${hd:0:14}" "${sr:0:14}" "$sc")"
+  [ -z "$SCHEDULED" ] && [ "$sc" != none ] && SCHEDULED=$sc
+  [ "$sc" = "$SCHEDULED" ] || die "$label is scheduled for $sc but another box says $SCHEDULED. Every node must carry the same height or they disagree about block validity."
+  [ "$role" = validator ] || continue
+  [ "${h:-0}" -gt "$HEIGHT" ] && HEIGHT=$h
+  if [ -z "$REF_HEAD" ]; then REF_HEAD=$hd; REF_ROOT=$sr; REF_L=$label; continue; fi
+  if [ "$hd" != "$REF_HEAD" ] || [ "$sr" != "$REF_ROOT" ]; then
+    die "$label disagrees with $REF_L on head or state root. Past an activation height there is no rollback - read every validator before doing anything, and do not restart one onto an older binary."
+  fi
+done
+[ -n "$SCHEDULED" ] || die "no box carries a protocol_upgrades height; there is nothing to test yet"
+if [ "$HEIGHT" -lt "$SCHEDULED" ]; then
+  say "NOT YET. Height $HEIGHT, activation at $SCHEDULED, $((SCHEDULED - HEIGHT)) blocks to go."
+  echo
+  echo "The nodes agree and nothing is wrong. This chain mints a block per"
+  echo "transaction rather than on a timer, so the wait is however long it takes"
+  echo "for that many transactions - sending some brings it forward."
+  exit 0
+fi
+info "height $HEIGHT is past the activation at $SCHEDULED, and every validator agrees"
+
+say "0b. Find a box with a funded wallet"
 OPENER=""
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3)
