@@ -107,6 +107,11 @@ Two refused runs each funded a 4,000,000 reservation that was never settled -
 8,000,000 base units in escrow accounts, which the provider claims at their
 expiry. Both accounts are the same operator's, so nothing leaves; what it shows
 is a real gap: **a refused settlement has no way back.**
-`RecoverEscrowedInferenceJob` exists on the node and nothing calls it from a
-terminal. A buyer who refuses one bill today waits out the expiry and pays the
-cap.
+`RecoverEscrowedInferenceJob` existed on the node and nothing called it from a
+terminal.
+
+**Since fixed**: `matrix inference recover --id <job>` reads the settlement and
+`--settle` pays it. The two reservations above can be collected with it. The
+proof it presents is a signature made now over the job id, because a later
+process does not hold the reservation's own authorization and should not be
+keeping one on disk so that it can.

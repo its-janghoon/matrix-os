@@ -78,6 +78,7 @@ The inference API listens on its own address (default 127.0.0.1:9092), set with
 	cmd.AddCommand(
 		newInferenceSubmitCommand(opts, &inferenceAddr),
 		newInferenceGetCommand(opts, &inferenceAddr),
+		newInferenceRecoverCommand(opts, &inferenceAddr),
 	)
 	return cmd
 }

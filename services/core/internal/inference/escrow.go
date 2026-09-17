@@ -385,7 +385,9 @@ var ErrStreamCutShort = errors.New("inference: the stream ended before the model
 // price for a partial answer.
 //
 // It reads. Calling it twice returns the same request, and it runs nothing.
-func (s *Service) RecoverEscrowSettlement(jobID string, auth []byte) (*PaymentRequest, *InferenceJob, bool, error) {
+func (s *Service) RecoverEscrowSettlement(
+	jobID string, streamAuth []byte, fresh *RecoverAuthorization,
+) (*PaymentRequest, *InferenceJob, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -397,11 +399,31 @@ func (s *Service) RecoverEscrowSettlement(jobID string, auth []byte) (*PaymentRe
 		return nil, nil, false, fmt.Errorf("%w: job %q has no reservation, so there is nothing "+
 			"here that was paid for in advance", ErrNotAwaitingPayment, jobID)
 	}
-	// The same credential the stream needs, for the same reason: this call hands
-	// back the completion, and a job id is not a secret.
-	if len(job.reserveAuth) > 0 && !bytes.Equal(job.reserveAuth, auth) {
-		return nil, nil, false, fmt.Errorf("%w: recovering job %q needs the authorization its "+
-			"reservation was opened with", ErrRunUnauthorized, jobID)
+
+	// EITHER credential, because there are two callers and only one of them
+	// still holds the first.
+	//
+	// A client recovering IN-FLIGHT - its own stream just died - still has the
+	// authorization the reservation was opened with, and presenting it is the
+	// cheapest thing it can do. A client coming back LATER does not: a crashed
+	// process, a closed tab, an operator returning to a bill their own ceiling
+	// check refused. Requiring the first would mean telling them to keep a
+	// credential on disk so a later run could replay it.
+	//
+	// Both prove the same thing, which is all this gate needs: you are the party
+	// that will sign the settlement. A caller who passes either could settle this
+	// job anyway, so handing them the settlement and the text discloses nothing
+	// they could not get by paying for it.
+	if len(job.reserveAuth) > 0 && bytes.Equal(job.reserveAuth, streamAuth) {
+		// The in-flight caller, recognised.
+	} else if fresh != nil {
+		if err := verifyRecoverAuthorization(jobID, job.Buyer, fresh, time.Now().UTC()); err != nil {
+			return nil, nil, false, err
+		}
+	} else if len(job.reserveAuth) > 0 {
+		return nil, nil, false, fmt.Errorf("%w: recovering job %q needs either the authorization "+
+			"its reservation was opened with, or a fresh signature over the job id by the key "+
+			"that settles it", ErrRunUnauthorized, jobID)
 	}
 	if job.Status != InferenceJobAwaitingPayment || job.payment == nil {
 		return nil, nil, false, fmt.Errorf("%w: job %q is %s and has no settlement waiting",

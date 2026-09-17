@@ -379,7 +379,33 @@ message RecoverEscrowedInferenceJobRequest {
     // The SAME authorization that opened the reservation, for the same reason
     // StreamEscrowedInferenceJob needs it: a job id is not a credential, and the
     // answer comes back on this call.
+    //
+    // A client whose own stream just died still holds this and should send it.
     RunAuthorization authorization = 2;
+    // OR a fresh signature over the job id, for the caller who does not.
+    //
+    // A crashed process, a closed tab, an operator returning to a bill their own
+    // ceiling check refused - none of them still has the authorization above,
+    // and telling them to keep one on disk would be telling them to persist a
+    // credential so a later run could replay it. This proves the same thing
+    // without that: you hold the key that will sign the settlement. Whoever can
+    // produce it could settle this job anyway.
+    RecoverAuthorization recover_authorization = 3;
+}
+
+// RecoverAuthorization is a fresh signature over one job id, by the key that
+// settles it. Ed25519 only: an Ethereum wallet signs typed data rather than
+// arbitrary bytes, and a browser buyer recovers in-flight with the
+// authorization above rather than needing this.
+message RecoverAuthorization {
+    // The ed25519 public key of the account that settles - the buyer, or a
+    // budget's delegate.
+    bytes public_key = 1;
+    // Unix nanoseconds at signing time, bounded by a short window.
+    int64 timestamp = 2;
+    // Over a domain-separated, length-prefixed encoding of the key, the job id
+    // and the timestamp.
+    bytes signature = 3;
 }
 
 // RecoverEscrowedInferenceJobResponse returns what the job produced and the

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
+	"github.com/spf13/cobra"
 
 	"github.com/ecirlabs/matrix-core/internal/inference"
 	"github.com/ecirlabs/matrix-core/internal/token"
@@ -347,4 +348,155 @@ func promptBytes(req inference.InferenceRequest) int {
 		n += len(m.Role) + len(m.Content)
 	}
 	return n
+}
+
+// newInferenceRecoverCommand builds `matrix inference recover`, which collects a
+// settlement whose stream is gone and pays it.
+//
+// WHY IT HAS TO EXIST. The settlement rides on the stream's last frame, so a
+// buyer who cancelled, crashed, lost their connection - or whose own ceiling
+// check REFUSED the bill - never received one. With nothing signed, the provider
+// claims the whole reservation at its expiry. So today refusing a bill costs a
+// buyer MORE than signing it, which turns the one protection this path gives
+// them into a penalty for using it.
+//
+// It prints what it is being asked to sign, with the arithmetic beside it, and
+// stops there unless told to pay. A recovery that settled silently would be the
+// same rubber stamp the ceiling check exists to remove.
+func newInferenceRecoverCommand(opts *globalOptions, inferenceAddr *string) *cobra.Command {
+	var (
+		id         string
+		walletPath string
+		settle     bool
+	)
+	cmd := &cobra.Command{
+		Use:   "recover",
+		Short: "Collect the settlement for an escrowed job whose stream is gone",
+		Long: `recover fetches the settlement for a funded escrow job and, with --settle,
+signs and submits it.
+
+The settlement arrives on the stream's last frame. A buyer who cancelled,
+crashed, lost the connection, or whose own ceiling check refused the bill never
+received one - and an unsettled reservation is the provider's to claim at its
+expiry. This is how the money comes back.
+
+It READS by default - what is asked, what arrived, how much of it was the
+model's working, and when the provider may claim - and signs nothing. Pass
+--settle to pay it.
+
+There is no automatic ceiling check here. That check counts the PROMPT, this
+response does not carry one, and a bound computed without it comes out tighter
+than the node's - which is how a buyer ends up refusing an honest invoice. So
+you are the check, which is why --settle is a separate decision.
+
+The wallet must hold the key that settles the job: the buyer's own, or a
+budget's delegate. It proves that with a signature made now over the job id,
+rather than replaying the authorization the reservation was opened with -
+keeping one of those on disk for a later run is the thing worth avoiding.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if id == "" {
+				return fmt.Errorf("--id is required")
+			}
+			path, err := resolveWalletPath(walletPath)
+			if err != nil {
+				return err
+			}
+			acct, err := loadWallet(path, passphrasePrompt(cmd.ErrOrStderr(), "Passphrase for "+path))
+			if err != nil {
+				return err
+			}
+
+			ic, err := dialInference(*inferenceAddr, opts.APIKey)
+			if err != nil {
+				return err
+			}
+			defer ic.Close()
+			ctx, cancel := callContext(cmd.Context(), opts)
+			defer cancel()
+
+			// Signed NOW, over this job id. Not the reservation's own
+			// authorization: this run does not have it, and keeping one on disk
+			// to replay later is the thing worth avoiding.
+			proof := &inference.RecoverAuthorization{
+				PublicKey: acct.PublicKey,
+				Timestamp: time.Now().UTC().UnixNano(),
+			}
+			if err := proof.Sign(id, acct.PrivateKey); err != nil {
+				return fmt.Errorf("sign the recovery proof: %w", err)
+			}
+
+			resp, err := ic.inference.RecoverEscrowedInferenceJob(ctx,
+				&inferencev1.RecoverEscrowedInferenceJobRequest{
+					Id: id,
+					RecoverAuthorization: &inferencev1.RecoverAuthorization{
+						PublicKey: proof.PublicKey,
+						Timestamp: proof.Timestamp,
+						Signature: proof.Signature,
+					},
+				})
+			if err != nil {
+				return mapErr(*inferenceAddr, err)
+			}
+
+			pay, job := resp.GetPayment(), resp.GetJob()
+			if pay == nil {
+				return fmt.Errorf("job %s has no settlement waiting", id)
+			}
+
+			out := cmd.OutOrStdout()
+			fmt.Fprintf(out, "job:        %s\n", id)
+			fmt.Fprintf(out, "status:     %s\n", inferenceStatusString(job.GetStatus()))
+			if resp.GetCutShort() {
+				fmt.Fprintf(out, "cut short:  yes - the run stopped before the model was done, so the\n")
+				fmt.Fprintf(out, "            answer below is what arrived and the bill is for that much\n")
+			}
+			fmt.Fprintf(out, "asks:       %d base units\n", pay.GetAmount())
+			fmt.Fprintf(out, "claimable:  %s by the provider, if this is not settled first\n",
+				time.Unix(0, pay.GetTimestamp()).UTC().Format(time.RFC3339))
+			fmt.Fprintf(out, "answer:     %s\n", job.GetCompletion())
+			if w := job.GetReasoning(); w != "" {
+				fmt.Fprintf(out, "working:    %d bytes, which the bill counts\n", len(w))
+			}
+
+			// NO AUTOMATIC CEILING CHECK HERE, and saying so beats pretending.
+			//
+			// The check the streaming path runs needs the PROMPT: the ceiling
+			// counts it, and a bound computed without it is tighter than the
+			// node's, which is how a buyer comes to refuse an honest invoice.
+			// This response does not carry the prompt, and this process may not
+			// be the one that sent it.
+			//
+			// So the reader is the check, which is why --settle is a separate
+			// decision rather than the default. Everything the check would use is
+			// printed above: what is asked, what arrived, and how much of it was
+			// working.
+			fmt.Fprintf(out, "\nThe prompt is not on this response, so the ceiling cannot be\n")
+			fmt.Fprintf(out, "recomputed here - read the bill against the answer yourself.\n")
+			if !settle {
+				fmt.Fprintf(out, "Nothing was signed. Pass --settle to pay it.\n")
+				return nil
+			}
+			fmt.Fprintf(out, "\nSettling %d base units.\n", pay.GetAmount())
+
+			tx, err := signAs(acct, pay)
+			if err != nil {
+				return err
+			}
+			done, err := ic.inference.SettleEscrowedInferenceJob(ctx,
+				&inferencev1.SettleEscrowedInferenceJobRequest{
+					Id: id, FromPublicKey: acct.PublicKey,
+					To: tx.To, Amount: tx.Amount, Nonce: tx.Nonce,
+					Timestamp: tx.Timestamp, PrevHash: tx.PrevHash, Signature: tx.Signature,
+				})
+			if err != nil {
+				return mapErr(*inferenceAddr, err)
+			}
+			return printInferenceJob(out, opts.JSON, done.GetJob())
+		},
+	}
+	cmd.Flags().StringVar(&id, "id", "", "inference job ID (required)")
+	cmd.Flags().StringVar(&walletPath, "wallet", "", "wallet to sign with (default ~/.matrix/wallet.json)")
+	cmd.Flags().BoolVar(&settle, "settle", false, "sign and submit the settlement rather than only showing it")
+	return cmd
 }
