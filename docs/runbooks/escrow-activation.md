@@ -15,13 +15,17 @@ validator-2|host|keyfile|validator
 validator-3|host|keyfile|validator
 validator-4|host|keyfile|validator
 gpu|host|keyfile|seller"
-./scripts/rollout.sh v0.5.0 3
+./scripts/rollout.sh v0.5.1 3
 ```
 
 `rollout.sh` appends to an existing schedule rather than replacing it, so the
 version 2 entry the chain already ran stays where it is. It refuses a schedule
 that goes backwards in height or in version, and refuses a second entry at a
 height already named.
+
+**v0.5.1, not v0.5.0.** v0.5.0 was cut before the cut-short fixes and bills a
+buyer who disconnects for the whole reservation. It is on the releases page and
+should not be rolled anywhere.
 
 ---
 
