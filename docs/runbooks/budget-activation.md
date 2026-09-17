@@ -51,10 +51,34 @@ without.**
         -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}'
       ```
 
-      Run it on every validator. `head_hash` AND `state_root` must match across
-      all of them. A differing `state_root` at the same height means two nodes
-      applied the same blocks and reached different balances, which is the one
-      condition under which a rule change must not be scheduled at all.
+      Run it on every validator - but do NOT compare the heads it returns.
+      Reading four machines takes time, a block committing in between leaves the
+      last one a height ahead, and a node at a different height legitimately has
+      a different head. Comparing those reports a fork that is not there, which
+      on this network it duly did, minutes after an activation. The engine knows
+      the rule and states it plainly:
+
+      ```go
+      // Only comparable at the same height: a peer one block ahead legitimately
+      // has a different head and a different ledger.
+      if ann.Height != e.height { return "" }
+      ```
+
+      So compare a NAMED height instead. Take the lowest height any validator
+      reports, and ask every one of them for that block by number:
+
+      ```
+      curl -s -X POST http://127.0.0.1:9095 -H "content-type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x5f0",false]}'
+      ```
+
+      Every validator must return the same `hash` for it. Same height asked of
+      every node means an identical hash is required, and a different one is a
+      real fork rather than a timing artefact - which is the one condition under
+      which a rule change must not be scheduled at all. A spread of a block or
+      two between nodes is the sweep taking time; a large one is a node that has
+      stopped keeping up, and past an activation that is what a node missing the
+      new rules looks like.
 - [ ] **Every validator on the new binary**, verified individually. Not "the
       release is out".
 - [ ] **A height chosen from this chain's measured block rate.** A lead quoted
