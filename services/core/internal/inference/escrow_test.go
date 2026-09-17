@@ -32,7 +32,7 @@ func escrowJob(t *testing.T, svc *Service, buyerID, providerID string, units uin
 	if err != nil {
 		t.Fatalf("SubmitInferenceJob: %v", err)
 	}
-	plan, err := svc.ReserveEscrow(job.ID)
+	plan, err := svc.ReserveEscrow(job.ID, nil)
 	if err != nil {
 		t.Fatalf("ReserveEscrow: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestNothingStreamsUntilTheDepositHasApplied(t *testing.T) {
 	plan := escrowJob(t, svc, buyerID, providerID, 8)
 
 	// Before funding.
-	_, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, func(string) error { return nil })
+	_, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(string) error { return nil })
 	if err == nil {
 		t.Fatal("streamed a job whose reservation was never funded")
 	}
@@ -91,7 +91,7 @@ func TestNothingStreamsUntilTheDepositHasApplied(t *testing.T) {
 		t.Fatalf("FundEscrow: %v", err)
 	}
 	var streamed strings.Builder
-	pr, res, err := svc.StreamEscrowed(context.Background(), plan.JobID, func(d string) error {
+	pr, res, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(d string) error {
 		streamed.WriteString(d)
 		return nil
 	})
@@ -124,7 +124,7 @@ func TestADepositThatDidNotApplyLeavesNothingToStream(t *testing.T) {
 	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err == nil {
 		t.Fatal("FundEscrow reported success for a deposit that never applied")
 	}
-	if _, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, func(string) error { return nil }); err == nil {
+	if _, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(string) error { return nil }); err == nil {
 		t.Fatal("a job whose deposit failed still streamed")
 	}
 }
@@ -169,7 +169,7 @@ func TestTheSettlementIsClampedByTheAnswerAndNotOnlyByTheCap(t *testing.T) {
 	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
 		t.Fatalf("FundEscrow: %v", err)
 	}
-	pr, res, err := svc.StreamEscrowed(context.Background(), plan.JobID, func(string) error { return nil })
+	pr, res, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(string) error { return nil })
 	if err != nil {
 		t.Fatalf("StreamEscrowed: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSettlingCompletesTheJobAndLeavesAReceipt(t *testing.T) {
 	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
 		t.Fatalf("FundEscrow: %v", err)
 	}
-	pr, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, func(string) error { return nil })
+	pr, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, nil, func(string) error { return nil })
 	if err != nil {
 		t.Fatalf("StreamEscrowed: %v", err)
 	}
@@ -220,5 +220,55 @@ func TestSettlingCompletesTheJobAndLeavesAReceipt(t *testing.T) {
 	}
 	if done.Units != pr.Amount {
 		t.Fatalf("the job's charge %d is not what was settled %d", done.Units, pr.Amount)
+	}
+}
+
+// A job id is not a credential.
+//
+// Streaming takes only an id, and an id is not a secret - it is in logs, in a
+// URL, in a client's own storage. Without this check, whoever learned one could
+// race the buyer for an answer the buyer paid for, and the buyer would still owe
+// the settlement.
+func TestStreamingNeedsTheAuthorizationTheReservationWasOpenedWith(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, buyerID, providerID := newTestService(t, fs, 3, 1000)
+	buyer := svc.accounts.(memAccounts).m[buyerID]
+
+	job, err := svc.SubmitInferenceJob(buyerID, providerID, InferenceRequest{Prompt: "hello world"}, 8)
+	if err != nil {
+		t.Fatalf("SubmitInferenceJob: %v", err)
+	}
+	auth := []byte("the signature the reservation was opened with")
+	plan, err := svc.ReserveEscrow(job.ID, auth)
+	if err != nil {
+		t.Fatalf("ReserveEscrow: %v", err)
+	}
+	if _, err := svc.FundEscrow(context.Background(), plan.JobID, signPlan(t, buyer, plan.Request)); err != nil {
+		t.Fatalf("FundEscrow: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		auth []byte
+	}{
+		{"none at all", nil},
+		{"somebody else's", []byte("a different signature")},
+		{"a truncated one", auth[:len(auth)-1]},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, tc.auth, func(string) error { return nil })
+			if err == nil {
+				t.Fatal("streamed a job without the authorization that reserved it")
+			}
+			if !errors.Is(err, ErrRunUnauthorized) {
+				t.Fatalf("wrong refusal: %v", err)
+			}
+		})
+	}
+
+	// And the one that must work, so the refusals above are not passing because
+	// everything is refused.
+	if _, _, err := svc.StreamEscrowed(context.Background(), plan.JobID, auth, func(string) error { return nil }); err != nil {
+		t.Fatalf("the buyer's own authorization was refused: %v", err)
 	}
 }

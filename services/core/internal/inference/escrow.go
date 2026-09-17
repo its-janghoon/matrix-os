@@ -1,6 +1,7 @@
 package inference
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"time"
@@ -79,7 +80,7 @@ type EscrowPlan struct {
 // job's reserved price, which was already affordability-checked when the job was
 // submitted - so a buyer who cannot cover it is refused before a provider spends
 // any GPU time, exactly as on the other paths.
-func (s *Service) ReserveEscrow(jobID string) (*EscrowPlan, error) {
+func (s *Service) ReserveEscrow(jobID string, reserveAuth []byte) (*EscrowPlan, error) {
 	s.mu.Lock()
 	job, ok := s.jobs[jobID]
 	if !ok {
@@ -138,6 +139,7 @@ func (s *Service) ReserveEscrow(jobID string) (*EscrowPlan, error) {
 	job.UpdatedAt = now
 	job.escrow = &terms
 	job.payment = pr
+	job.reserveAuth = append([]byte(nil), reserveAuth...)
 	s.mu.Unlock()
 
 	return &EscrowPlan{
@@ -214,7 +216,7 @@ func (s *Service) FundEscrow(ctx context.Context, jobID string, tx *token.Transa
 // It streams because there is nothing left to withhold. The provider already
 // holds the reservation, so the text is not leverage any more - it is a delivery
 // against money that has moved.
-func (s *Service) StreamEscrowed(ctx context.Context, jobID string, onChunk ChunkFunc) (*PaymentRequest, *StreamResult, error) {
+func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth []byte, onChunk ChunkFunc) (*PaymentRequest, *StreamResult, error) {
 	if onChunk == nil {
 		return nil, nil, fmt.Errorf("inference: a chunk callback is required to stream")
 	}
@@ -234,6 +236,14 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, onChunk Chun
 		status := job.Status
 		s.mu.Unlock()
 		return nil, nil, fmt.Errorf("%w: job %q is %s", ErrJobNotFound, jobID, status)
+	}
+	// A job id is not a credential. When the reservation was opened with an
+	// authorization, the same one has to come back - otherwise anyone who
+	// learned the id could race the buyer for an answer the buyer paid for.
+	if len(job.reserveAuth) > 0 && !bytes.Equal(job.reserveAuth, streamAuth) {
+		s.mu.Unlock()
+		return nil, nil, fmt.Errorf("%w: streaming job %q needs the authorization its reservation "+
+			"was opened with", ErrRunUnauthorized, jobID)
 	}
 	buyer, provider, request := job.Buyer, job.Provider, job.Request
 	marketJobID := job.MarketJobID

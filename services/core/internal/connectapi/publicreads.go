@@ -59,6 +59,28 @@ func isReadMethod(method string) bool {
 //	                      this list exists for - would be back to staring at a
 //	                      minute of silence.
 //
+// The ESCROWED path's four, which is the whole point of that path: a browser
+// holds its own key, and none of these asks it to hand one over.
+//
+//	ReserveInferenceEscrow
+//	                      carries the same RunAuthorization RunInferenceJob
+//	                      does, and is safe for exactly that reason. It reserves
+//	                      capacity, so without the signature anyone could hold a
+//	                      provider's capacity against someone else's account.
+//	FundInferenceEscrow   carries the buyer's signature over the exact deposit,
+//	                      checked field by field against what the node asked for.
+//	StreamEscrowedInferenceJob
+//	                      carries the authorization the RESERVATION was opened
+//	                      with, and needs it: this is the one call on the path
+//	                      whose request would otherwise be a job id and nothing
+//	                      else. An id is not a secret - it is in logs, in a URL,
+//	                      in a client's storage - so an id alone would let
+//	                      whoever learned one race the buyer for an answer the
+//	                      buyer paid for.
+//	SettleEscrowedInferenceJob
+//	                      carries the buyer's signature over the settlement,
+//	                      checked the same way the deposit is.
+//
 // Nothing else belongs here. FundAccount moves money from the reward pool on the
 // operator's authority alone, RegisterProvider and SubmitJob commit a provider's
 // capacity, and CompleteJob and CancelJob decide a job's outcome - none of them
@@ -68,6 +90,11 @@ var signatureAuthorisedWrites = map[string]struct{}{
 	"SettleInferenceJob":      {},
 	"RunInferenceJob":         {},
 	"RunInferenceJobProgress": {},
+
+	"ReserveInferenceEscrow":     {},
+	"FundInferenceEscrow":        {},
+	"StreamEscrowedInferenceJob": {},
+	"SettleEscrowedInferenceJob": {},
 }
 
 // isSignatureAuthorisedWrite reports whether a method's authority is a client

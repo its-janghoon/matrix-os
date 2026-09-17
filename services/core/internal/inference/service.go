@@ -153,6 +153,15 @@ type InferenceJob struct {
 	// that consensus will re-derive from the recipient - kept to build the
 	// settlement and to say when the provider may claim.
 	escrow *token.InferEscrow
+	// reserveAuth is the signature of the RunAuthorization the reservation was
+	// opened with, when there was one.
+	//
+	// Streaming a funded job takes only a job id, and an id is not a secret: it
+	// appears in logs, in a URL and in a client's own storage. So the caller has
+	// to present the same authorization again, and this is what it is compared
+	// against. Compared rather than re-verified, because a RunAuthorization is
+	// single-use and verifying it twice would refuse the buyer as a replay.
+	reserveAuth []byte
 	// escrowFunded records that the deposit COMMITTED AND APPLIED, not merely
 	// that it was submitted. Streaming turns on this bit, so anything less than
 	// applied would be giving the answer away against money that may yet be
