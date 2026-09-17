@@ -46,6 +46,25 @@ than minting an empty one - so this rate is a property of the traffic, not of th
 software. Sending transactions brings the activation forward; doing nothing
 leaves it about five hours away.
 
+## The boundary, crossed
+
+At height 1504, past the scheduled 1497, all four validators reported the same
+head `0x60f7f61d9f47` and the same state root `0x7b76963cc422`. Nobody stopped
+voting and nobody diverged, which is the thing the version gate exists to make
+loud: a node without the new rules would have refused every block from 1497 on
+and been visibly stuck while the others advanced.
+
+**What that proves and what it does not.** It proves the activation did not split
+the network. It does not prove a budget works, and the state root says why: it is
+byte for byte the value it held at height 1297, two hundred blocks earlier. The
+ledger has not moved. Every block since has been empty, so consensus agreeing
+here is consensus agreeing about nothing having happened.
+
+The functional test - open a budget, read it on every validator, close it - is
+what closes that gap, and it is still outstanding: the wallet that can afford it
+is an encrypted keystore whose passphrase is not in the box's
+`/etc/matrix/matrixd.env`.
+
 ## Still open
 
 At 07:48:43, before any of this, validator-1 logged:
