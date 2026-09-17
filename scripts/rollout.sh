@@ -35,8 +35,19 @@ set -uo pipefail
 
 V=${1:-}
 NEW_PROTOCOL_VERSION=${2:-}
-[ -n "$V" ] && [ -n "$NEW_PROTOCOL_VERSION" ] || {
-  echo "usage: $0 <release-tag> <protocol-version>   (e.g. $0 v0.4.0 2)" >&2; exit 2; }
+[ -n "$V" ] || {
+  echo "usage: $0 <release-tag> [protocol-version]   (e.g. $0 v0.4.0 2, or $0 v0.5.2)" >&2; exit 2; }
+
+# A PROTOCOL VERSION IS OPTIONAL, because most releases do not change one.
+#
+# It used to be required, so rolling a plain bug fix meant either inventing a
+# version number the chain would refuse - the schedule check rejects a version
+# not past the one already scheduled - or updating binaries by hand on five
+# boxes. Without it this does steps 0 to 3: agreement, one box at a time,
+# agreement after each, and a final version check. It writes no schedule and
+# touches no config.
+SCHEDULING=yes
+[ -n "$NEW_PROTOCOL_VERSION" ] || SCHEDULING=no
 : "${MATRIX_ROLLOUT_BOXES:?set MATRIX_ROLLOUT_BOXES to lines of label|host|keyfile|role}"
 
 REPO=${MATRIX_ROLLOUT_REPO:-savagemanage/matrix-os}
@@ -461,6 +472,14 @@ for b in "${BOXES[@]}"; do
   info "$(printf '%-12s %s' "$label" "$ver")"
   echo "$ver" | grep -q "$V" || die "$label is on $ver, not $V"
 done
+
+if [ "$SCHEDULING" = no ]; then
+  say "DONE. $V on every box. No protocol version was named, so no schedule was written"
+  echo
+  echo "The chain's rules are unchanged. To schedule an activation, run this again"
+  echo "with the version: $0 $V <protocol-version>"
+  exit 0
+fi
 
 say "4. Measure the block rate and choose the activation height"
 out=$(read_state "$(field "$FIRST_V" 1)" "$(field "$FIRST_V" 2)" "$(field "$FIRST_V" 3)")
