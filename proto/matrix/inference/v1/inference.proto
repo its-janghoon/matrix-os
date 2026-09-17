@@ -292,6 +292,17 @@ message ReserveInferenceEscrowResponse {
     // unsettled. A client should treat this as the real deadline: it is enforced
     // by consensus rather than by this node.
     int64 claimable_at = 4;
+    // What the reservation is made of: units held, and what each one costs.
+    //
+    // Sent because the deposit alone is a number a buyer cannot check. With
+    // these two they can verify `payment.amount == units_reserved *
+    // price_per_unit` BEFORE funding, and - more to the point - convert the
+    // settlement they are later asked to sign back into units, which is the only
+    // way to tell an honest bill from a seller billing the whole cap. A browser
+    // reads the price from the order book; a client talking straight to the
+    // seller's node has no order book to read.
+    uint64 units_reserved = 5;
+    uint64 price_per_unit = 6;
 }
 
 // FundInferenceEscrowRequest submits the buyer's signed deposit. Every signable
