@@ -199,6 +199,27 @@ func parseInferTerms(raw string) (InferEscrow, error) {
 	return e, nil
 }
 
+// SpenderFor resolves which KEY may move a payer's money.
+//
+// An ordinary account signs for itself. A BUDGET cannot sign at all - it is an
+// account, not a key - so the signature that counts is its delegate's, which is
+// what the budget's own name authorises.
+//
+// It lives here rather than in either caller because consensus and the inference
+// service must agree about it exactly. A second copy is how one of them starts
+// accepting a signature the other refuses, and the symptom would be a settlement
+// that verifies locally and is skipped by every validator.
+func SpenderFor(payer string) (spender string, budget *SpendEscrow, err error) {
+	if !IsSpendEscrowAccount(payer) {
+		return payer, nil, nil
+	}
+	terms, err := ParseSpendEscrow(payer)
+	if err != nil {
+		return "", nil, err
+	}
+	return terms.Delegate, &terms, nil
+}
+
 // validPayer accepts an ordinary account, or a budget account when a spend
 // budget is funding the job.
 func validPayer(id string) error {

@@ -92,6 +92,12 @@ const (
 	// amount nobody can compute yet. The completion is withheld in this state -
 	// see RunUnsettled.
 	InferenceJobAwaitingPayment InferenceJobStatus = "awaiting_payment"
+	// InferenceJobAwaitingDeposit means a reservation has been named and the
+	// buyer has not funded it yet. It is where the ESCROWED path parks BEFORE
+	// anything runs, which is the difference that lets that path stream: by the
+	// time a model starts, the provider has already been paid the most the job
+	// can cost, so the answer is a delivery rather than leverage.
+	InferenceJobAwaitingDeposit InferenceJobStatus = "awaiting_deposit"
 )
 
 // InferenceJob is the record of an inference job submitted to the marketplace.
@@ -142,6 +148,16 @@ type InferenceJob struct {
 	// what it asked for, and SettleSigned compares an incoming transfer against
 	// it, so a caller must not be able to edit it through a returned job copy.
 	payment *PaymentRequest
+	// escrow is the reservation this job is paid through, on the ESCROWED path
+	// only. Its terms are an account NAME, so this is the node's copy of a string
+	// that consensus will re-derive from the recipient - kept to build the
+	// settlement and to say when the provider may claim.
+	escrow *token.InferEscrow
+	// escrowFunded records that the deposit COMMITTED AND APPLIED, not merely
+	// that it was submitted. Streaming turns on this bit, so anything less than
+	// applied would be giving the answer away against money that may yet be
+	// skipped as unaffordable.
+	escrowFunded bool
 }
 
 // Service wires inference into the compute marketplace. A provider advertises an
@@ -174,6 +190,12 @@ type Service struct {
 	// unpaidJobTTL bounds how long a job may sit awaiting a buyer's signature
 	// before its reservation is released. Zero means DefaultUnpaidJobTTL.
 	unpaidJobTTL time.Duration
+
+	// EscrowTTL is how long a funded reservation stays the buyer's to settle
+	// before the provider may claim the whole of it. Zero means
+	// DefaultEscrowTTL. Exported because it is an operator's judgement about
+	// their own slowest model, not a protocol constant.
+	EscrowTTL time.Duration
 
 	// runAuth remembers recently used run authorizations, so one cannot be
 	// replayed into a second run of free work.

@@ -55,23 +55,6 @@ type inferEffect struct {
 	fee uint64
 }
 
-// spenderFor resolves who is allowed to move a reservation's money.
-//
-// An ordinary payer signs for themselves. A BUDGET payer cannot sign at all -
-// it is an account, not a key - so the signature that counts is its delegate's,
-// which is the same resolution the inference service already does when it
-// addresses an invoice.
-func spenderFor(payer string) (spender string, budget *token.SpendEscrow, err error) {
-	if !token.IsSpendEscrowAccount(payer) {
-		return payer, nil, nil
-	}
-	terms, err := token.ParseSpendEscrow(payer)
-	if err != nil {
-		return "", nil, err
-	}
-	return terms.Delegate, &terms, nil
-}
-
 // verifyInferTx refuses an escrow operation that can never be valid, before it
 // enters a block. It reads nothing but the transaction, which is what lets the
 // mempool gate and the block check share it.
@@ -95,7 +78,7 @@ func verifyInferTx(tx *token.Transaction) error {
 			return fmt.Errorf("%w: an inference provider must be an account, not the reserved "+
 				"recipient %q", ErrInvalidMessage, terms.Provider)
 		}
-		spender, _, err := spenderFor(terms.Payer)
+		spender, _, err := token.SpenderFor(terms.Payer)
 		if err != nil {
 			return err
 		}
@@ -117,7 +100,7 @@ func verifyInferTx(tx *token.Transaction) error {
 		if err != nil {
 			return err
 		}
-		spender, _, err := spenderFor(terms.Payer)
+		spender, _, err := token.SpenderFor(terms.Payer)
 		if err != nil {
 			return err
 		}
@@ -176,7 +159,7 @@ func (e *Engine) applyInferOperation(ltx market.LedgerTx, tx *token.Transaction,
 			// is a gift, not an escrow.
 			return inferEffect{}, nil
 		}
-		_, budget, err := spenderFor(terms.Payer)
+		_, budget, err := token.SpenderFor(terms.Payer)
 		if err != nil {
 			return inferEffect{}, err
 		}
