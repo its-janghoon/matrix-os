@@ -98,6 +98,21 @@ EOS
 R_CHAIN="$R_COMMON
 $R_CHAIN_BODY"
 
+read -r -d "" R_BLOCK_BODY <<'EOS'
+# One NAMED height, not "the current head". Two nodes read a second apart are
+# legitimately on different heads, and comparing those cries wolf about the one
+# condition that must never be reported falsely.
+R=$(sudo awk '/^eth_rpc:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/addr:/{print $2; exit}' "$CFG" | tr -d '"' | sed "s/.*://")
+[ -z "$R" ] && { echo "BLOCK|none"; exit 0; }
+HEX=$(printf "0x%x" "$1")
+J=$(curl -s --max-time 6 -X POST "http://127.0.0.1:$R" -H "content-type: application/json" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBlockByNumber\",\"params\":[\"$HEX\",false]}")
+HASH=$(echo "$J" | tr "," "\n" | sed -n 's/^"hash":"\([^"]*\)".*/\1/p' | head -1)
+echo "BLOCK|${HASH:-none}"
+EOS
+R_BLOCK="$R_COMMON
+$R_BLOCK_BODY"
+
 R_WALLET="$PASS_PREFIX$R_COMMON"'
 if [ ! -f "$HOME/.matrix/wallet.json" ]; then echo "NOWALLET"; exit 0; fi
 A=$(matrix wallet show 2>/dev/null | sed -n "s/^account:[[:space:]]*//p" | head -1)
@@ -150,7 +165,7 @@ wait_for_remaining() {
 # ---------------------------------------------------------------- run
 
 say "0. The activation height must have passed, and the nodes must agree"
-REF_HEAD=""; REF_ROOT=""; REF_L=""; HEIGHT=0; SCHEDULED=""
+LO=0; HI=0; SCHEDULED=""; VLABELS=(); VHOSTS=(); VKEYS=()
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
   out=$(rsh "$host" "$key" "$R_CHAIN" 2>&1 | tail -1)
@@ -160,22 +175,46 @@ for b in "${BOXES[@]}"; do
   [ -z "$SCHEDULED" ] && [ "$sc" != none ] && SCHEDULED=$sc
   [ "$sc" = "$SCHEDULED" ] || die "$label is scheduled for $sc but another box says $SCHEDULED. Every node must carry the same height or they disagree about block validity."
   [ "$role" = validator ] || continue
-  [ "${h:-0}" -gt "$HEIGHT" ] && HEIGHT=$h
-  if [ -z "$REF_HEAD" ]; then REF_HEAD=$hd; REF_ROOT=$sr; REF_L=$label; continue; fi
-  if [ "$hd" != "$REF_HEAD" ] || [ "$sr" != "$REF_ROOT" ]; then
-    die "$label disagrees with $REF_L on head or state root. Past an activation height there is no rollback - read every validator before doing anything, and do not restart one onto an older binary."
-  fi
+  VLABELS+=("$label"); VHOSTS+=("$host"); VKEYS+=("$key")
+  [ "$LO" -eq 0 ] && LO=$h
+  [ "$h" -lt "$LO" ] && LO=$h
+  [ "$h" -gt "$HI" ] && HI=$h
 done
 [ -n "$SCHEDULED" ] || die "no box carries a protocol_upgrades height; there is nothing to test yet"
-if [ "$HEIGHT" -lt "$SCHEDULED" ]; then
-  say "NOT YET. Height $HEIGHT, activation at $SCHEDULED, $((SCHEDULED - HEIGHT)) blocks to go."
+[ "$LO" -gt 0 ] || die "no validator reported a height"
+
+# A spread of a block or two is the sweep taking time, not a fault. A large one
+# is a node that has stopped keeping up, which past an activation is what a node
+# missing the new rules looks like.
+SPREAD=$((HI - LO))
+[ "$SPREAD" -gt 0 ] && info "heights span $LO..$HI; comparing at a height they all have"
+[ "$SPREAD" -le 5 ] || die "validators span $SPREAD blocks ($LO..$HI). One is not keeping up - past an activation height that is what a node without the new rules looks like. Check its log for refused blocks before doing anything else."
+
+if [ "$LO" -lt "$SCHEDULED" ]; then
+  say "NOT YET. Slowest validator at $LO, activation at $SCHEDULED, $((SCHEDULED - LO)) blocks to go."
   echo
   echo "The nodes agree and nothing is wrong. This chain mints a block per"
   echo "transaction rather than on a timer, so the wait is however long it takes"
   echo "for that many transactions - sending some brings it forward."
   exit 0
 fi
-info "height $HEIGHT is past the activation at $SCHEDULED, and every validator agrees"
+
+# The real agreement check: one named block, asked of every validator. Same
+# height on every node, so an identical hash is required and a different one is
+# a genuine fork rather than a timing artefact.
+CMP=$((LO - 1))
+say "0a. Every validator must have the same block $CMP"
+REF=""; REF_L=""
+for i in "${!VLABELS[@]}"; do
+  out=$(rsh "${VHOSTS[$i]}" "${VKEYS[$i]}" "$R_BLOCK" "$CMP" 2>&1 | tail -1)
+  case "$out" in BLOCK\|*) ;; *) die "${VLABELS[$i]}: $out";; esac
+  hash=$(field "$out" 2)
+  info "$(printf '%-12s block %s = %s' "${VLABELS[$i]}" "$CMP" "$hash")"
+  [ "$hash" = none ] && die "${VLABELS[$i]} does not have block $CMP"
+  if [ -z "$REF" ]; then REF=$hash; REF_L=${VLABELS[$i]}; continue; fi
+  [ "$hash" = "$REF" ] || die "${VLABELS[$i]} has a different block $CMP than $REF_L. This is a fork, not a timing difference - both nodes are asked for the SAME height. Past an activation there is no rollback: read every validator before doing anything, and do not restart one onto an older binary."
+done
+info "all ${#VLABELS[@]} validators committed the same block $CMP, past the activation at $SCHEDULED"
 
 say "0b. Find a box with a funded wallet"
 OPENER=""
