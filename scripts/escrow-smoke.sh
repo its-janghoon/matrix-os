@@ -171,6 +171,9 @@ echo "$IDS" | sed "s/^/PROVIDER|/"
 '
 
 R_BUY="$PASS_PREFIX$R_COMMON"'
+# What this box received, before anything is bought with it. An argument that
+# arrived empty is invisible in the answer and obvious here.
+echo "PROMPT_SEEN|${#3}|$3"
 OUT=$(matrix inference submit --escrowed --inference-addr "127.0.0.1:$I" \
         --buyer "$1" --provider "$2" --prompt "$3" --units "'"$UNITS"'" 2>&1)
 RC=$?
@@ -285,7 +288,20 @@ fi
 info "buying on $(field "$BUY_BOX" 1) as ${BUYER:0:16}..., from provider ${PROVIDER:0:16}..., reserving $UNITS units"
 
 say "1. Reserve, fund, stream and settle one real inference"
+# The prompt is echoed because the ANSWER is the only other evidence it arrived,
+# and an answer that says "please share your question" is what an empty prompt
+# looks like from here. Both sides bill against this text, so when the two
+# disagree about a ceiling, the first thing to know is whether they were holding
+# the same words.
+info "prompt (${#PROMPT} bytes): $PROMPT"
 out=$(rsh "$(field "$BUY_BOX" 2)" "$(field "$BUY_BOX" 3)" "$R_BUY" "$BUYER" "$PROVIDER" "$PROMPT" 2>&1)
+seen=$(echo "$out" | sed -n "s/^PROMPT_SEEN|//p" | tail -1)
+[ -n "$seen" ] && info "the box received ${seen%%|*} bytes of prompt"
+if [ "${seen%%|*}" = 0 ]; then
+  die "the prompt arrived empty on $(field "$BUY_BOX" 1). The answer would be the model
+   asking what you wanted, and the bill would be checked against text neither side
+   has - so this stops here rather than buying one."
+fi
 echo "$out" | sed -n "/OUTPUT_BEGIN/,/OUTPUT_END/p" | sed "1d;\$d" | sed "s/^/   | /"
 RC=$(echo "$out" | sed -n "s/^RC|//p" | tail -1)
 [ "${RC:-1}" = 0 ] || die "the escrowed run failed. If it timed out waiting for the deposit, check that $SCHEDULED has passed on the node you bought from - before the height, the deposit is refused as \"not yet\" and the client gives up first."
