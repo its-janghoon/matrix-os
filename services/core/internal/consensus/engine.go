@@ -1378,7 +1378,12 @@ func nonceKey(tx *token.Transaction) (string, bool) {
 	// draw the delegate signed once could commit twice, and the budget would be
 	// debited twice for one job - the protection every ordinary transfer has,
 	// missing exactly where a key is allowed to spend without asking.
-	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) && !IsSpendRecipient(tx.To) {
+	// AN INFERENCE ESCROW is nonce-checked for the same reason as a budget, and
+	// the stakes are the same: opening one moves the payer's balance on a
+	// signature they made, and a settlement the delegate signed once could
+	// otherwise pay the provider twice out of one reservation.
+	if IsReservedRecipient(tx.To) && !IsBridgeLockRecipient(tx.To) &&
+		!IsSpendRecipient(tx.To) && !IsInferRecipient(tx.To) {
 		return "", false
 	}
 	return fmt.Sprintf("%s:%d", tx.SenderID(), tx.Nonce), true
@@ -2356,6 +2361,15 @@ func (e *Engine) verifyReservedRecipientLocked(tx *token.Transaction, height uin
 				ErrInvalidMessage, ProtocolVersionSpendBudgets, height, v)
 		}
 		return verifySpendTx(tx)
+	case IsInferRecipient(tx.To):
+		// Refused rather than permanently rejected, for the reason a budget is:
+		// the transaction becomes valid at the activation height and waits in
+		// the mempool until then. "Not yet" and "never" are different answers.
+		if v := e.protocolVersionAt(height); v < ProtocolVersionInferenceEscrow {
+			return fmt.Errorf("%w: inference escrow needs protocol version %d and height %d runs %d",
+				ErrInvalidMessage, ProtocolVersionInferenceEscrow, height, v)
+		}
+		return verifyInferTx(tx)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		return e.verifyLaunchRepairLocked(tx)
 	}
@@ -2436,6 +2450,14 @@ func isPermanentlyInvalidReserved(tx *token.Transaction) error {
 		// whole remaining balance and so carries none - the amount is not the
 		// caller's to choose, exactly as a bond withdrawal's is not.
 		valueAllowed = !strings.HasPrefix(tx.To, token.SpendClosePrefix)
+	case IsInferRecipient(tx.To):
+		if err := verifyInferTx(tx); err != nil {
+			return err
+		}
+		// Two of the three carry value: the deposit is the reservation, and a
+		// settlement's amount is the actual. A CLAIM names no amount - it takes
+		// whatever is left - exactly as a budget close does.
+		valueAllowed = !strings.HasPrefix(tx.To, token.InferClaimPrefix)
 	case IsPinnedPoolTransferRecipient(tx.To):
 		spec, ok := repairSpec(tx.To)
 		if !ok {
@@ -3675,6 +3697,38 @@ func (e *Engine) commitAndApply(b *Block, endorsements []Vote) error {
 				applied[mempoolKey(tx)] = eff.applied
 				continue
 			}
+			if IsInferRecipient(tx.To) {
+				// Belt and braces against the version gate, as for budgets: a
+				// block whose rules predate escrow must not have one applied
+				// under them, however it got here.
+				if b.Version < ProtocolVersionInferenceEscrow {
+					applied[mempoolKey(tx)] = false
+					continue
+				}
+				// A reservation: funded, settled, or claimed. Funding moves the
+				// payer's own coins into their own escrow and is NOT credited -
+				// counting it would pay the provider emission to somebody
+				// funding themselves, and would count the cap rather than the
+				// bill. A settlement and a claim are real payments to a seller,
+				// so they carry the fee and land in revenue.
+				eff, err := e.applyInferOperation(ltx, tx, b.Timestamp)
+				if err != nil {
+					return err
+				}
+				if eff.fee > 0 {
+					feesTaken += eff.fee
+				}
+				if eff.payee != "" && eff.net > 0 {
+					if credited[eff.payee] > ^uint64(0)-eff.net {
+						credited[eff.payee] = ^uint64(0)
+					} else {
+						credited[eff.payee] += eff.net
+					}
+					revenue = append(revenue, payment{payer: eff.payer, payee: eff.payee, amount: eff.net})
+				}
+				applied[mempoolKey(tx)] = eff.applied
+				continue
+			}
 			if IsPinnedPoolTransferRecipient(tx.To) {
 				ok, err := applyLaunchRepair(ltx, tx)
 				if err != nil {
@@ -4655,7 +4709,8 @@ func IsReservedRecipient(to string) bool {
 		IsMaintainerRotateRecipient(to) ||
 		IsBridgeLockRecipient(to) ||
 		IsPinnedPoolTransferRecipient(to) ||
-		IsSpendRecipient(to)
+		IsSpendRecipient(to) ||
+		IsInferRecipient(to)
 }
 
 // isHistoryTransfer reports whether a committed transaction is an ordinary value
@@ -4674,7 +4729,12 @@ func isHistoryTransfer(tx *token.Transaction) bool {
 	// account's NAME, so a buyer who has cleared their browser has nothing left
 	// that names the account their money is in; the deposit in their own history
 	// is what lets them find it and close it.
-	return !IsReservedRecipient(tx.To) || IsSpendRecipient(tx.To)
+	// AN INFERENCE ESCROW belongs there too, and for the sharper version of the
+	// same reason. All three operations move the payer's money, and the terms
+	// that say who may settle and when a provider may claim are the account's
+	// NAME - so the deposit in the payer's own history is the only thing that
+	// can lead them back to a reservation whose refund has not arrived.
+	return !IsReservedRecipient(tx.To) || IsSpendRecipient(tx.To) || IsInferRecipient(tx.To)
 }
 
 // CommittedTransfers returns value transfers from the committed block chain in
