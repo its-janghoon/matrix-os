@@ -153,6 +153,22 @@ fi
 echo "OK scheduled version '"$NEW_PROTOCOL_VERSION"' at height $H (backup $BK)"
 '
 
+read -r -d "" R_BLOCK_BODY <<'EOS'
+# One NAMED height, asked of every node. "The current head" read from four
+# machines a second apart is four answers to four different questions: a node one
+# block ahead legitimately has a different head, and comparing those reports a
+# fork that is not there.
+R=$(sudo awk '/^eth_rpc:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/addr:/{print $2; exit}' "$CFG" | tr -d '"' | sed "s/.*://")
+[ -z "$R" ] && { echo "BLOCK|none"; exit 0; }
+HEX=$(printf "0x%x" "$1")
+J=$(curl -s --max-time 6 -X POST "http://127.0.0.1:$R" -H "content-type: application/json" \
+      -d "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"eth_getBlockByNumber\",\"params\":[\"$HEX\",false]}")
+HASH=$(echo "$J" | tr "," "\n" | sed -n 's/^"hash":"\([^"]*\)".*/\1/p' | head -1)
+echo "BLOCK|${HASH:-none}"
+EOS
+R_BLOCK="$R_COMMON
+$R_BLOCK_BODY"
+
 # UNSCHEDULE: restore the newest backup this script wrote, preflight, restart.
 R_UNSCHEDULE="$R_COMMON"'
 BK=$(sudo find "$(dirname "$CFG")" -maxdepth 1 -name "$(basename "$CFG").pre-budgets.*" 2>/dev/null | sort | tail -1)
@@ -172,22 +188,48 @@ read_state() { # label host key -> echoes "OK|height|head|root|version|cfg|sched
   rsh "$host" "$key" "$R_STATE" 2>&1 | tail -1
 }
 
-# All validators must report the same head and the same state root.
+# Every validator must have committed the SAME BLOCK at a height they all have.
+#
+# Not "the same current head". This function gates the whole rollout - whether a
+# node rejoined, whether the next one may be touched, whether a written schedule
+# stands - and it reads nodes one after another, so a block committing mid-sweep
+# leaves the last node one ahead and legitimately on a different head. Comparing
+# those would report a fork that is not there, and during the schedule step that
+# report triggers an automatic rollback of a schedule that was correct.
 check_agreement() {
-  local ref_head="" ref_root="" ref_label="" bad=0 b label host key role out head root height
+  local b label host key role out h lo=0 hi=0 hash ref="" ref_l=""
+  local -a labels=() hosts=() keys=() heights=()
   for b in "${BOXES[@]}"; do
     label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
     [ "$role" = validator ] || continue
     out=$(read_state "$label" "$host" "$key")
-    case "$out" in OK\|*) ;; *) info "$label: $out"; bad=1; continue;; esac
-    height=$(field "$out" 2); head=$(field "$out" 3); root=$(field "$out" 4)
-    info "$(printf '%-12s height=%-6s head=%s root=%s' "$label" "$height" "${head:0:14}" "${root:0:14}")"
-    if [ -z "$ref_head" ]; then ref_head=$head; ref_root=$root; ref_label=$label; continue; fi
-    if [ "$head" != "$ref_head" ] || [ "$root" != "$ref_root" ]; then
-      info "  ^^ DISAGREES with $ref_label"; bad=1
+    case "$out" in OK\|*) ;; *) info "$label: $out"; return 1;; esac
+    h=$(field "$out" 2)
+    labels+=("$label"); hosts+=("$host"); keys+=("$key"); heights+=("$h")
+    [ "$lo" -eq 0 ] && lo=$h
+    [ "$h" -lt "$lo" ] && lo=$h
+    [ "$h" -gt "$hi" ] && hi=$h
+  done
+  [ "$lo" -gt 0 ] || { info "no validator reported a height"; return 1; }
+  if [ $((hi - lo)) -gt 5 ]; then
+    info "heights span $lo..$hi - a validator is not keeping up"
+    return 1
+  fi
+
+  local cmp=$((lo - 1))
+  for i in "${!labels[@]}"; do
+    out=$(rsh "${hosts[$i]}" "${keys[$i]}" "$R_BLOCK" "$cmp" 2>&1 | tail -1)
+    case "$out" in BLOCK\|*) ;; *) info "${labels[$i]}: $out"; return 1;; esac
+    hash=$(field "$out" 2)
+    info "$(printf '%-12s height=%-6s block %s = %s' "${labels[$i]}" "${heights[$i]}" "$cmp" "${hash:0:18}")"
+    [ "$hash" = none ] && { info "  ^^ does not have block $cmp"; return 1; }
+    if [ -z "$ref" ]; then ref=$hash; ref_l=${labels[$i]}; continue; fi
+    if [ "$hash" != "$ref" ]; then
+      info "  ^^ DIFFERENT block $cmp than $ref_l - this is a fork, not a timing difference"
+      return 1
     fi
   done
-  return $bad
+  return 0
 }
 
 wait_for_agreement() {
@@ -238,8 +280,8 @@ for b in "${BOXES[@]}"; do
 done
 [ -n "$FIRST_V" ] || die "MATRIX_ROLLOUT_BOXES names no validator"
 
-say "1. Validators must agree before anything is touched"
-check_agreement || die "validators do not agree on head/state root. This must be resolved before a rule change is scheduled."
+say "1. Every validator must be on the same chain before anything is touched"
+check_agreement || die "the validators are not all on the same chain (see the line above: a differing block, a node far behind, or one that did not answer). Resolve it before scheduling a rule change."
 
 say "2. Binary rollout, one box at a time"
 for b in "${BOXES[@]}"; do
@@ -309,7 +351,7 @@ for b in "${BOXES[@]}"; do
   info "$(printf '%-12s %s  sched=%s' "$label" "$(field "$out" 5)" "$(field "$out" 7)")"
   field "$out" 7 | grep -q "height:$TARGET" || die "$label does not carry height $TARGET"
 done
-check_agreement || die "validators disagree after the rollout"
+check_agreement || die "the validators are not all on the same chain after the rollout (see the line above)"
 
 out=$(read_state "$(field "$FIRST_V" 1)" "$(field "$FIRST_V" 2)" "$(field "$FIRST_V" 3)")
 NOW=$(field "$out" 2)
