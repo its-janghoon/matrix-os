@@ -53,9 +53,9 @@ field() { echo "$1" | cut -d"|" -f"$2"; }
 
 # rsh <host> <key> <script> [arg]
 rsh() {
-  local host=$1 key=$2 script=$3 arg=${4:-}
+  local host=$1 key=$2 script=$3 arg=${4:-} arg2=${5:-}
   ssh -i "$key" -o StrictHostKeyChecking=accept-new -o ConnectTimeout=15 \
-      -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" <<< "$script"
+      -o BatchMode=yes "ubuntu@$host" bash -s -- "$arg" "$arg2" <<< "$script"
 }
 
 # ---------------------------------------------------------------- payloads
@@ -118,21 +118,76 @@ echo "OK installed $(matrixd -version 2>&1 | head -1) / $(matrix --version 2>&1 
 '
 
 # SCHEDULE: put protocol_upgrades at height $1, preflight, restart
-R_SCHEDULE="$R_COMMON"'
+# SCHEDULE: add {height, version} to protocol_upgrades, preflight, restart.
+#
+# Written as a heredoc with an awk program in it, because a sed substitution only
+# ever handled the shape a node STARTS in - `protocol_upgrades: []` - and refused
+# every config that already carried an activation. That is fine exactly once. The
+# second upgrade on a live chain has a list to append to, and a tool that cannot
+# do it sends an operator to edit four configs by hand, which is the failure this
+# whole script exists to remove.
+read -r -d "" R_SCHEDULE_BODY <<'EOS'
 H=$1
-[ -z "$H" ] && { echo "ERR no height given"; exit 1; }
-WANT="- height: $H"
-if sudo grep -q "height: $H" "$CFG" && sudo grep -q "version: '"$NEW_PROTOCOL_VERSION"'" "$CFG"; then
-  echo "SKIP schedule already at $H"; exit 0
+V=$2
+[ -z "$H" ] || [ -z "$V" ] && { echo "ERR schedule needs a height and a version"; exit 1; }
+
+if sudo awk -v h="$H" -v v="$V" '
+     /height:[[:space:]]*/ { gsub(/^.*height:[[:space:]]*/, ""); gsub(/[^0-9].*$/, ""); last=$0 }
+     /version:[[:space:]]*/ { gsub(/^.*version:[[:space:]]*/, ""); gsub(/[^0-9].*$/, "");
+                              if (last == h && $0 == v) found=1 }
+     END { exit(found ? 0 : 1) }' "$CFG"; then
+  echo "SKIP schedule already carries version $V at height $H"; exit 0
 fi
-if ! sudo grep -qE "^[[:space:]]*protocol_upgrades:[[:space:]]*\[\][[:space:]]*$" "$CFG"; then
-  echo "ERR protocol_upgrades is not the empty list this expects; refusing to edit"
-  sudo grep -n -A4 "protocol_upgrades" "$CFG"
-  exit 1
-fi
-BK="$CFG.pre-budgets.$(date +%Y%m%d-%H%M%S)"
+
+BK="$CFG.pre-v$V.$(date +%Y%m%d-%H%M%S)"
 sudo cp -p "$CFG" "$BK"
-sudo sed -i "s|^\([[:space:]]*\)protocol_upgrades:[[:space:]]*\[\][[:space:]]*$|\1protocol_upgrades:\n\1  - height: $H\n\1    version: '"$NEW_PROTOCOL_VERSION"'|" "$CFG"
+
+sudo awk -v H="$H" -v V="$V" '
+BEGIN { added = 0; inblock = 0; seen_h = 0; seen_v = 0; dup = 0 }
+{
+  line = $0
+  if (!inblock && line ~ /^[[:space:]]*protocol_upgrades:[[:space:]]*\[\][[:space:]]*$/) {
+    match(line, /^[[:space:]]*/); ind = substr(line, 1, RLENGTH)
+    print ind "protocol_upgrades:"; print ind "  - height: " H; print ind "    version: " V
+    added = 1; next
+  }
+  if (!inblock && line ~ /^[[:space:]]*protocol_upgrades:[[:space:]]*$/) {
+    match(line, /^[[:space:]]*/); ind = substr(line, 1, RLENGTH); keyind = RLENGTH
+    inblock = 1; print line; next
+  }
+  if (inblock) {
+    match(line, /^[[:space:]]*/)
+    if (line ~ /^[[:space:]]*$/ || RLENGTH > keyind) {
+      if (line ~ /height:[[:space:]]*[0-9]+/) {
+        h = line; sub(/^.*height:[[:space:]]*/, "", h); sub(/[^0-9].*$/, "", h)
+        if (h + 0 > seen_h) seen_h = h + 0
+        if (h + 0 == H + 0) dup = 1
+      }
+      if (line ~ /version:[[:space:]]*[0-9]+/) {
+        v = line; sub(/^.*version:[[:space:]]*/, "", v); sub(/[^0-9].*$/, "", v)
+        if (v + 0 > seen_v) seen_v = v + 0
+      }
+      print line; next
+    }
+    print ind "  - height: " H; print ind "    version: " V
+    added = 1; inblock = 0; print line; next
+  }
+  print line
+}
+END {
+  if (inblock && !added) { print ind "  - height: " H; print ind "    version: " V; added = 1 }
+  # A schedule that goes backwards in either field is one normalizeUpgrades
+  # refuses, so the node would fail to start - caught here rather than there.
+  if (!added)            { print "no protocol_upgrades key" > "/dev/stderr"; exit 3 }
+  if (dup)               { print "height " H " is already scheduled" > "/dev/stderr"; exit 4 }
+  if (seen_h >= H + 0)   { print "height " H " is not past the scheduled " seen_h > "/dev/stderr"; exit 5 }
+  if (seen_v >= V + 0)   { print "version " V " is not past the scheduled " seen_v > "/dev/stderr"; exit 6 }
+}' "$BK" > /tmp/cfg.new 2> /tmp/cfg.err
+if [ $? -ne 0 ]; then
+  echo "ERR refused to edit the schedule: $(cat /tmp/cfg.err)"; exit 1
+fi
+sudo cp /tmp/cfg.new "$CFG"
+
 if ! sudo grep -q "height: $H" "$CFG"; then
   sudo cp -p "$BK" "$CFG"; echo "ERR edit did not take; config restored"; exit 1
 fi
@@ -150,8 +205,10 @@ if ! systemctl is-active --quiet matrixd; then
   echo "ERR node did not come back; config restored and node restarted on the old config"
   exit 1
 fi
-echo "OK scheduled version '"$NEW_PROTOCOL_VERSION"' at height $H (backup $BK)"
-'
+echo "OK scheduled version $V at height $H (backup $BK)"
+EOS
+R_SCHEDULE="$R_COMMON
+$R_SCHEDULE_BODY"
 
 read -r -d "" R_BLOCK_BODY <<'EOS'
 # One NAMED height, asked of every node. "The current head" read from four
@@ -171,7 +228,7 @@ $R_BLOCK_BODY"
 
 # UNSCHEDULE: restore the newest backup this script wrote, preflight, restart.
 R_UNSCHEDULE="$R_COMMON"'
-BK=$(sudo find "$(dirname "$CFG")" -maxdepth 1 -name "$(basename "$CFG").pre-budgets.*" 2>/dev/null | sort | tail -1)
+BK=$(sudo find "$(dirname "$CFG")" -maxdepth 1 -name "$(basename "$CFG").pre-v*" 2>/dev/null | sort | tail -1)
 [ -z "$BK" ] && { echo "SKIP no backup here, nothing to undo"; exit 0; }
 sudo cp -p "$BK" "$CFG"
 sudo matrixd -preflight-production -config "$CFG" > /dev/null 2>&1 || { echo "ERR restored config fails preflight"; exit 1; }
@@ -334,7 +391,7 @@ say "5. Write the schedule to every box"
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1); host=$(field "$b" 2); key=$(field "$b" 3); role=$(field "$b" 4)
   say "5.$label"
-  out=$(rsh "$host" "$key" "$R_SCHEDULE" "$TARGET" 2>&1 | tail -5)
+  out=$(rsh "$host" "$key" "$R_SCHEDULE" "$TARGET" "$NEW_PROTOCOL_VERSION" 2>&1 | tail -5)
   case "$out" in
     SKIP*|OK*) info "$out"; SCHEDULED+=("$b") ;;
     *)         rollback_schedule "$label refused the schedule: $out" ;;
@@ -360,7 +417,8 @@ if [ "$TARGET" -le "$NOW" ]; then
 fi
 info "height $NOW, activation at $TARGET, $((TARGET - NOW)) blocks to go"
 
-say "DONE. v0.4.0 on all five boxes; spend budgets activate at height $TARGET ($ETA)."
+say "DONE. $V on every box; protocol version $NEW_PROTOCOL_VERSION activates at height $TARGET ($ETA)."
 echo
 echo "Nothing more to do. Every node switches at that height on its own."
-echo "Until then the chain behaves exactly as it did on v0.3.9."
+echo "Until then the chain behaves exactly as it did before, because the new"
+echo "rules are dormant without a schedule that has arrived."
