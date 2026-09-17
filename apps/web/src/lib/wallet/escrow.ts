@@ -101,6 +101,12 @@ export async function chatEscrowed(
     signature: toBase64(auth.signature),
   };
 
+  // The ONLY call on this path that takes the caller's abort signal. Before the
+  // deposit is funded nothing has been paid and stopping costs nothing; from the
+  // fund onwards an abort that cancelled the request would abandon a funded
+  // reservation to the provider's claim, which is the expensive mistake this
+  // whole file is arranged to avoid. So fund, recover and settle finish whatever
+  // the reader pressed.
   const reserved = await rpc(serving, INFERENCE, 'ReserveInferenceEscrow', {
     buyer: signer.accountId,
     provider: seller.id,
@@ -108,7 +114,7 @@ export async function chatEscrowed(
     messages: wire,
     unitsEstimate: '4096',
     authorization,
-  });
+  }, input.signal ? { signal: input.signal } : {});
 
   const deposit = obj(reserved.payment);
   const jobId = str(deposit.jobId);

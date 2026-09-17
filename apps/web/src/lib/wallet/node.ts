@@ -239,18 +239,22 @@ export async function rpc(
   service: string,
   method: string,
   body: unknown,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<Record<string, unknown>> {
   const url = `${endpoint.replace(/\/$/, '')}/${service}/${method}`;
   const controller = options.timeoutMs ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  // A caller's own signal, when it has one, and the timeout's otherwise. Not
+  // both: a call given a signal is one the caller will stop itself, and a call
+  // that is never made is never given one.
+  const signal = options.signal ?? controller?.signal;
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1' },
       body: JSON.stringify(body ?? {}),
-      ...(controller ? { signal: controller.signal } : {}),
+      ...(signal ? { signal } : {}),
     });
   } catch {
     if (controller?.signal.aborted) {
