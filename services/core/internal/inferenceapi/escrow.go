@@ -67,6 +67,8 @@ func (s *Service) ReserveInferenceEscrow(
 		Job:           jobToProto(current),
 		EscrowAccount: plan.Account,
 		ClaimableAt:   plan.ExpiresAt.Unix(),
+		UnitsReserved: plan.UnitsReserved,
+		PricePerUnit:  plan.PricePerUnit,
 	}, nil
 }
 

@@ -69,6 +69,14 @@ type EscrowPlan struct {
 	Payer string
 	// ExpiresAt is when the provider may claim whatever is left unsettled.
 	ExpiresAt time.Time
+	// UnitsReserved and PricePerUnit are what the deposit is made of.
+	//
+	// Reported because a deposit on its own is a number the buyer cannot check.
+	// With these two they can verify the arithmetic before funding, and convert
+	// the settlement they are later asked to sign back into units - which is the
+	// only way to tell a bill for the work from a bill for the whole cap.
+	UnitsReserved uint64
+	PricePerUnit  uint64
 	// Request is the exact transfer to sign, as fields rather than a built
 	// transaction: the buyer's own public key goes in it, and this node does not
 	// have it. Signing anything else is refused - the account name IS the terms,
@@ -145,13 +153,15 @@ func (s *Service) ReserveEscrow(jobID string, reserveAuth []byte) (*EscrowPlan, 
 	s.mu.Unlock()
 
 	return &EscrowPlan{
-		JobID:     jobID,
-		Account:   terms.Account(),
-		Deposit:   terms.Reserved,
-		Provider:  provider,
-		Payer:     buyer,
-		ExpiresAt: time.Unix(int64(terms.Expiry), 0).UTC(),
-		Request:   pr,
+		JobID:         jobID,
+		Account:       terms.Account(),
+		Deposit:       terms.Reserved,
+		Provider:      provider,
+		Payer:         buyer,
+		ExpiresAt:     time.Unix(int64(terms.Expiry), 0).UTC(),
+		UnitsReserved: mjob.Units,
+		PricePerUnit:  mjob.PricePerUnit,
+		Request:       pr,
 	}, nil
 }
 
