@@ -69,15 +69,27 @@ An activation is a height rather than a time precisely so that every node
 switches together, so the height has to be reached. Nothing else moves it:
 
 ```
-./scripts/advance-height.sh          # aims at the scheduled activation
-./scripts/advance-height.sh 1831     # or a height you name
+read -s -p "passphrase: " MATRIX_WALLET_PASSPHRASE; export MATRIX_WALLET_PASSPHRASE
+./scripts/advance-height.sh                        # aims at the scheduled activation
+./scripts/advance-height.sh 1831                   # or a height you name
+./scripts/advance-height.sh 1831 <64-hex-account>  # and a recipient you name
 ```
 
-It sends one base unit back and forth between two accounts the operator already
-controls, one transfer at a time, and reads the height rather than counting
-transfers - transfers that arrive together share a block, so a count overshoots
-and stops short. It needs **two** accounts: the ledger refuses a self-transfer,
-which moves nothing while consuming a nonce, so a free block is not on offer.
+It sends one base unit at a time from a funded wallet to one other account, and
+reads the height rather than counting transfers - transfers that arrive together
+share a block, so a count overshoots and stops short of the one number that has
+to be right. A couple of hundred blocks costs a couple of hundred base units plus
+fees, so it does not bother sending them back.
+
+It needs a **recipient that is not the sender**: the ledger refuses a
+self-transfer, which moves nothing while consuming a nonce, so the free block is
+not on offer. It looks for one among the other boxes' wallets and then among the
+validator account IDs in the config - those are this operator's own nodes, so a
+base unit sent there has not left the building - and you can name one instead.
+
+The wallet has to be able to SIGN. An encrypted one needs its passphrase in your
+own shell, as above: it travels over ssh's stdin, never in argv where `ps` on the
+box would show it, and it is never printed.
 
 Check where it has got to at any point:
 

@@ -3,7 +3,12 @@
 # arrives.
 #
 #   MATRIX_ROLLOUT_BOXES="label|host|keyfile|role"   (same format as rollout.sh)
-#   ./scripts/advance-height.sh [target-height]
+#   ./scripts/advance-height.sh [target-height] [recipient-account]
+#
+# An encrypted wallet needs its passphrase. Put it in YOUR OWN shell, never on the
+# command line - it travels over ssh's stdin, where `ps` on the box cannot see it:
+#
+#   read -s -p "passphrase: " MATRIX_WALLET_PASSPHRASE; export MATRIX_WALLET_PASSPHRASE
 #
 # WHY THIS IS NEEDED, AND WHY IT IS NOT A HACK. This chain mints a block when
 # there is a transaction to put in one. With no traffic it still escapes, through
@@ -14,17 +19,23 @@
 # height has to be reached; nothing else moves it.
 #
 # So this sends the smallest real transfers it can and lets consensus do the
-# rest. One base unit, back and forth between two accounts the operator already
-# controls, so the money ends up where it started and the only cost is the
-# protocol fee. A self-transfer would be free and is REFUSED by the ledger - it
-# moves nothing while consuming a nonce - which is why this needs two accounts
-# and says so plainly when it can only find one.
+# rest: one base unit at a time, from one funded wallet to one other account the
+# operator already controls. A run of a couple of hundred blocks therefore costs a
+# couple of hundred base units plus fees, against a wallet holding hundreds of
+# millions - which is why it does not bother sending them back.
+#
+# It needs a RECIPIENT and cannot use the sender: the ledger refuses a
+# self-transfer, since it moves nothing while consuming a nonce. One is found
+# among the other boxes' wallets, or among the validator account IDs in the
+# config - those are accounts on this chain that this operator already runs - or
+# you name one as the second argument.
 #
 # It stops the moment the height is reached, and it never touches a config.
 
 set -uo pipefail
 
 TARGET=${1:-}
+RECIPIENT=${2:-}
 : "${MATRIX_ROLLOUT_BOXES:?set MATRIX_ROLLOUT_BOXES to lines of label|host|keyfile|role}"
 
 mapfile -t BOXES <<< "$(echo "$MATRIX_ROLLOUT_BOXES" | sed "s/^[[:space:]]*//;s/[[:space:]]*$//" | grep -v "^$")"
@@ -96,11 +107,15 @@ read -r -d "" R_HEIGHT_BODY <<'EOS'
 # stall recovery is 60 x round_timeout (see consensus/engine.go), and that is the
 # ONLY thing moving a chain with no traffic - so it is what turns "200 blocks" into
 # a number of hours. Reported rather than assumed.
-if [ -z "$RPC" ]; then echo "HEIGHT|0|none"; exit 0; fi
+#
+# round_timeout is read FIRST and unconditionally. It used to sit after an early
+# return taken by any box without eth_rpc - a seller, typically - so that box
+# reported "none" for a field it had never looked at, and the caller believed it.
+RT=$(sudo awk '/^consensus:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/round_timeout:/{print $2; exit}' "$CFG" | tr -d '"')
+if [ -z "$RPC" ]; then echo "HEIGHT|0|${RT:-unset}"; exit 0; fi
 J=$(curl -s --max-time 6 -X POST "http://127.0.0.1:$RPC" -H "content-type: application/json" \
       -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}')
 H=$(echo "$J" | tr "," "\n" | sed -n 's/.*"height":\([0-9]*\).*/\1/p' | head -1)
-RT=$(sudo awk '/^consensus:/{f=1;next} f&&/^[^[:space:]#]/{f=0} f&&/round_timeout:/{print $2; exit}' "$CFG" | tr -d '"')
 echo "HEIGHT|${H:-0}|${RT:-unset}"
 EOS
 R_HEIGHT="$R_COMMON
@@ -119,6 +134,20 @@ END { print "SCHED|" (last=="" ? "none" : last) }
 EOS
 R_SCHED="$R_COMMON
 $R_SCHED_BODY"
+
+# The validator account IDs this node's config names. They are accounts on this
+# chain that this operator already runs, which makes any of them a legitimate
+# place to put a base unit when nothing else is available to receive one.
+read -r -d "" R_VALIDATORS_BODY <<'EOS'
+sudo awk '
+f && /^[[:space:]]*$/ { next }
+f { match($0,/^[[:space:]]*/); if (RLENGTH<=ind) f=0 }
+f && /[0-9a-f]{64}/ { a=$0; sub(/^[^0-9a-f]*/,"",a); sub(/[^0-9a-f].*$/,"",a); if (length(a)==64) print "ACCT|" a }
+/^[[:space:]]*validators:/ { match($0,/^[[:space:]]*/); ind=RLENGTH; f=1 }
+' "$CFG"
+EOS
+R_VALIDATORS="$R_COMMON
+$R_VALIDATORS_BODY"
 
 R_WALLET="$PASS_PREFIX$R_COMMON"'
 if [ ! -f "$HOME/.matrix/wallet.json" ]; then echo "NOWALLET"; exit 0; fi
@@ -146,7 +175,8 @@ for b in "${BOXES[@]}"; do
   case "$out" in HEIGHT\|*) ;; *) info "$(printf '%-12s %s' "$label" "${out:-unreachable}")"; continue;; esac
   h=$(field "$out" 2); rt=$(field "$out" 3)
   [ "$h" -gt "$CUR" ] 2>/dev/null && { CUR=$h; PROBE=$b; }
-  [ "$rt" != unset ] && RT=$rt
+  # A box that could not read it must not overwrite a box that could.
+  [ "$rt" != unset ] && [ "$rt" != none ] && RT=$rt
   info "$(printf '%-12s height=%-7s round_timeout=%s' "$label" "$h" "$rt")"
 done
 [ "$CUR" -gt 0 ] || die "no box reported a height"
@@ -162,46 +192,68 @@ case "$TARGET" in ''|*[!0-9]*) die "target height must be a number, got \"$TARGE
 [ "$TARGET" -gt "$CUR" ] || { say "Already at $CUR, past $TARGET. Nothing to do."; exit 0; }
 
 NEED=$((TARGET - CUR))
-if [ "$RT" != unset ]; then
-  info "with no traffic this chain escapes on stall recovery every 60 x $RT, so $NEED blocks would take that many multiples"
-fi
+[ "$RT" != unset ] && info "with no traffic this chain escapes on stall recovery every 60 x $RT, so $NEED blocks would be about $((NEED * 60 * ${RT%s} / 60)) minutes of waiting"
 info "$NEED blocks to go"
 
-say "1. Two accounts to move one base unit between"
-# TWO, because the ledger REFUSES a self-transfer: it moves nothing while
-# consuming a nonce, so it is rejected rather than accepted as a free block.
-A_BOX=""; A_ID=""; B_BOX=""; B_ID=""
+say "1. A funded wallet to send from, and somewhere to send to"
+SENDER_BOX=""; SENDER_ID=""
+CANDIDATES=()
 for b in "${BOXES[@]}"; do
   label=$(field "$b" 1)
   out=$(verdict "$(rsh "$(field "$b" 2)" "$(field "$b" 3)" "$R_WALLET" 2>&1)" 'WALLET\||NOWALLET|ERR')
   case "$out" in
     WALLET\|*)
       acct=$(field "$out" 2); bal=$(field "$out" 3); psrc=$(field "$out" 4)
-      info "$(printf '%-12s account=%s... balance=%-10s passphrase=%s' "$label" "${acct:0:12}" "$bal" "$psrc")"
-      [ "$psrc" = none ] && { info "  ^^ encrypted with no passphrase available; skipping"; continue; }
+      info "$(printf '%-12s account=%s... balance=%-12s passphrase=%s' "$label" "${acct:0:12}" "$bal" "$psrc")"
+      [ -n "$acct" ] && [ "$acct" != unknown ] && CANDIDATES+=("$acct")
+      [ "$psrc" = none ] && { info "  ^^ encrypted and no passphrase available; it cannot sign"; continue; }
       case "$bal" in ''|*[!0-9]*) continue;; esac
-      [ "$bal" -lt "$NEED" ] && { info "  ^^ holds $bal, needs at least $NEED to fund the run; skipping"; continue; }
-      if   [ -z "$A_ID" ]; then A_BOX=$b; A_ID=$acct
-      elif [ -z "$B_ID" ] && [ "$acct" != "$A_ID" ]; then B_BOX=$b; B_ID=$acct
-      fi ;;
-    *) info "$(printf '%-12s %s' "$label" "$out")" ;;
+      # Enough for one base unit per block, and room for fees on top.
+      [ "$bal" -lt $((NEED * 2)) ] && { info "  ^^ holds $bal, wants at least $((NEED * 2)) for $NEED transfers plus fees"; continue; }
+      [ -z "$SENDER_ID" ] && { SENDER_BOX=$b; SENDER_ID=$acct; } ;;
+    NOWALLET) info "$(printf '%-12s no wallet' "$label")" ;;
+    *)        info "$(printf '%-12s %s' "$label" "${out:-unreachable}")" ;;
   esac
 done
-[ -n "$A_ID" ] && [ -n "$B_ID" ] || die "found fewer than two usable wallets on different accounts.
-   One base unit has to go somewhere, and the ledger refuses a self-transfer - it
-   moves nothing while consuming a nonce - so this needs two. Put a funded wallet
-   on a second box, or drive the height from a laptop with two wallets."
-info "moving 1 base unit back and forth between ${A_ID:0:12}... and ${B_ID:0:12}..."
+
+if [ -z "$SENDER_ID" ]; then
+  die "no box has a wallet that can both sign and cover $NEED transfers.
+   An encrypted wallet needs its passphrase. Put it in YOUR OWN shell and run this
+   again - it travels over ssh's stdin, never in argv, and is never printed:
+     read -s -p \"passphrase: \" MATRIX_WALLET_PASSPHRASE; export MATRIX_WALLET_PASSPHRASE"
+fi
+
+# The recipient. Anything but the sender: the ledger refuses a self-transfer,
+# which moves nothing while consuming a nonce.
+if [ -z "$RECIPIENT" ]; then
+  for a in "${CANDIDATES[@]}"; do
+    [ "$a" != "$SENDER_ID" ] && { RECIPIENT=$a; info "recipient: another box's wallet, ${a:0:12}..."; break; }
+  done
+fi
+if [ -z "$RECIPIENT" ]; then
+  # The validator accounts the config names. They are this operator's own nodes,
+  # so a base unit sent there has not left the building.
+  raw=$(rsh "$(field "$PROBE" 2)" "$(field "$PROBE" 3)" "$R_VALIDATORS" 2>&1)
+  while IFS= read -r line; do
+    case "$line" in ACCT\|*) a=${line#ACCT|};; *) continue;; esac
+    [ "$a" != "$SENDER_ID" ] && { RECIPIENT=$a; info "recipient: a validator account from the config, ${a:0:12}..."; break; }
+  done <<< "$raw"
+fi
+[ -n "$RECIPIENT" ] || die "no account to send to that is not the sender. Name one as the second argument:
+   ./scripts/advance-height.sh $TARGET <64-hex-account-id>"
+[ "$RECIPIENT" != "$SENDER_ID" ] || die "the recipient is the sender; the ledger refuses a self-transfer"
+
+info "sending 1 base unit from ${SENDER_ID:0:12}... ($(field "$SENDER_BOX" 1)) to ${RECIPIENT:0:12}..., $NEED times"
+info "total cost about $NEED base units plus fees, and it lands in an account you run"
 
 say "2. One transfer per block, until $TARGET"
 SENT=0; FAILED=0
 while [ "$CUR" -lt "$TARGET" ]; do
-  if [ $((SENT % 2)) -eq 0 ]; then FROM=$A_BOX; TO=$B_ID; else FROM=$B_BOX; TO=$A_ID; fi
-  out=$(verdict "$(rsh "$(field "$FROM" 2)" "$(field "$FROM" 3)" "$R_SEND" "$TO" 2>&1)" 'SENT|ERR')
+  out=$(verdict "$(rsh "$(field "$SENDER_BOX" 2)" "$(field "$SENDER_BOX" 3)" "$R_SEND" "$RECIPIENT" 2>&1)" 'SENT|ERR')
   case "$out" in
     SENT) SENT=$((SENT + 1)); FAILED=0 ;;
     *)    FAILED=$((FAILED + 1))
-          info "transfer from $(field "$FROM" 1) failed: ${out:-no verdict}"
+          info "transfer $((SENT + 1)) failed: ${out:-no verdict}"
           # Three in a row is a real fault, not a busy moment. Stopping beats
           # hammering a chain that is telling us something.
           [ "$FAILED" -ge 3 ] && die "three transfers in a row failed; stopping rather than hammering the chain" ;;
