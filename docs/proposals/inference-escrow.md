@@ -1,9 +1,29 @@
 # Proposal: escrow and refund, so a self-custody buyer can watch the answer arrive
 
-**Status: decided, being built.** It changes how state is APPLIED and it moves
-money, so the open questions below are answered before any code rather than
-during it. The answers are in **Decisions** and the section that set each one is
-marked where it happens.
+**Status: built, not yet activated.** It changes how state is APPLIED and it
+moves money, so the open questions below were answered before any code rather
+than during it. The answers are in **Decisions** and the section that set each
+one is marked where it happens.
+
+It ships as **protocol version 3** and is dormant until a height names it: see
+[`docs/runbooks/escrow-activation.md`](../runbooks/escrow-activation.md) for
+turning it on and [`scripts/escrow-smoke.sh`](../../scripts/escrow-smoke.sh) for
+proving it took. Three things exist that this document does not describe, because
+they were found while building rather than while designing:
+
+- **A cut-short run is billed, not forfeited.** The settlement rides on the
+  stream's last frame, so a buyer who cancels or disconnects never receives one -
+  and with nothing to sign, the provider claims the whole reservation. So such a
+  job is finalised for the text that reached the buyer, and
+  `RecoverEscrowedInferenceJob` hands the settlement to whoever comes back for
+  it. Without this, a cancel button would charge full price for a partial answer.
+- **The buyer checks the bill before signing it.** `MaxUnitsFor` on the node runs
+  on the SELLER's machine; the browser and `--escrowed` each compute it again on
+  their own side and refuse rather than sign. A signature given to a number the
+  buyer never checked hands back the leverage this design creates.
+- **The reservation reports its own arithmetic.** `units_reserved` and
+  `price_per_unit` come back with the deposit, so a client with no order book to
+  read can still check what it is funding and convert a settlement into units.
 
 ---
 
