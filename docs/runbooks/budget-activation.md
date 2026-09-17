@@ -1,5 +1,10 @@
 # Runbook: turning on spend budgets, at a height everyone agrees on
 
+> This was the chain's first rule change over money, and the procedure below is
+> the one every later one follows. For **inference escrow (protocol version 3)**,
+> read this document for the procedure and
+> [`escrow-activation.md`](escrow-activation.md) for what is different about it.
+
 This is a **rule change over money**, not a bug fix. It changes what a node DOES
 with a transaction rather than only what it refuses, so a node running the old
 rules and a node running the new ones apply the same block and reach different
