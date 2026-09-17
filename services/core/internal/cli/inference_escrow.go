@@ -140,15 +140,22 @@ func runEscrowed(ctx context.Context, ic *inferenceConn, addr string, in escrowe
 	// 3. STREAM. The completion goes to STDOUT as it arrives, so piping this
 	// command into a file gets the answer and nothing else; everything the
 	// operator is being told goes to stderr.
-	settlement, completion, cutShort, err := streamEscrowed(ctx, ic, jobID, wireAuth, in.out, in.errOut)
+	settlement, completion, reasoning, cutShort, err := streamEscrowed(ctx, ic, jobID, wireAuth, in.out, in.errOut)
 	if err != nil {
 		return nil, mapErr(addr, err)
+	}
+	if reasoning != "" {
+		// Shown because it was BILLED. A reasoning model spends most of its
+		// tokens here, the ceiling below counts them, and a buyer charged for
+		// text they were never given cannot check the bill they are signing.
+		fmt.Fprintf(in.errOut, "  the model's working, %d bytes, which you are paying for:\n", len(reasoning))
+		fmt.Fprintf(in.errOut, "  %s\n", reasoning)
 	}
 
 	// 4. SETTLE - but check the bill first. The node computed it and the node is
 	// the seller's; a signature given to a number this side never checked is the
 	// leverage this whole path exists to create, handed straight back.
-	if err := checkEscrowBill(request, completion, settlement.GetAmount(), deposit.GetAmount(), perUnit); err != nil {
+	if err := checkEscrowBill(request, completion, reasoning, settlement.GetAmount(), deposit.GetAmount(), perUnit); err != nil {
 		return nil, fmt.Errorf("%w\nThe reservation is the provider's to claim after %s if this is "+
 			"not settled before then", err, time.Unix(reserved.GetClaimableAt(), 0).UTC().Format(time.RFC3339))
 	}
@@ -199,7 +206,7 @@ func streamEscrowed(
 	jobID string,
 	auth *inferencev1.RunAuthorization,
 	out, errOut io.Writer,
-) (*inferencev1.PaymentRequest, string, bool, error) {
+) (*inferencev1.PaymentRequest, string, string, bool, error) {
 	var completion string
 	stream, err := ic.inference.StreamEscrowedInferenceJob(ctx,
 		&inferencev1.StreamEscrowedInferenceJobRequest{Id: jobID, Authorization: auth})
@@ -224,7 +231,14 @@ func streamEscrowed(
 			// the settlement is on it. So a cut-short run that this side is
 			// still connected for - the provider dropped, not us - arrives here
 			// rather than down the recovery path.
-			return pay, completion, msg.GetCutShort(), nil
+			//
+			// THE REASONING IS TAKEN FROM HERE and not left empty. It never
+			// travels as a delta - onChunk is the completion stream - so this
+			// frame is the only place it appears, and the node BILLED for it.
+			// Checking the bill without it computes a tighter ceiling than the
+			// node's and refuses an honest invoice, which reads to a buyer as
+			// the seller cheating.
+			return pay, completion, msg.GetJob().GetReasoning(), msg.GetCutShort(), nil
 		}
 	}
 	// The stream ended without the settlement on it, which is the same position
@@ -241,7 +255,7 @@ func recoverEscrow(
 	auth *inferencev1.RunAuthorization,
 	seen string,
 	errOut io.Writer,
-) (*inferencev1.PaymentRequest, string, bool, error) {
+) (*inferencev1.PaymentRequest, string, string, bool, error) {
 	fmt.Fprintln(errOut, "\n  the stream ended early; recovering the settlement so the whole "+
 		"reservation is not forfeited")
 	// Fresh, for the reason DefaultSettleTimeout gives: the usual way to get here
@@ -251,7 +265,7 @@ func recoverEscrow(
 	resp, err := ic.inference.RecoverEscrowedInferenceJob(recCtx,
 		&inferencev1.RecoverEscrowedInferenceJobRequest{Id: jobID, Authorization: auth})
 	if err != nil {
-		return nil, seen, false, err
+		return nil, seen, "", false, err
 	}
 	completion := seen
 	// The node's copy only when nothing was seen here: a bill is checked against
@@ -260,7 +274,7 @@ func recoverEscrow(
 	if completion == "" {
 		completion = resp.GetJob().GetCompletion()
 	}
-	return resp.GetPayment(), completion, resp.GetCutShort(), nil
+	return resp.GetPayment(), completion, resp.GetJob().GetReasoning(), resp.GetCutShort(), nil
 }
 
 // checkEscrowBill refuses a settlement the answer cannot account for.
@@ -271,7 +285,7 @@ func recoverEscrow(
 // exists to catch is two orders of magnitude and not a few percent. Running it
 // here is what makes the buyer's signature mean something: the node's own copy
 // runs on the SELLER's machine.
-func checkEscrowBill(req inference.InferenceRequest, completion string, amount, reserved, pricePerUnit uint64) error {
+func checkEscrowBill(req inference.InferenceRequest, completion, reasoning string, amount, reserved, pricePerUnit uint64) error {
 	if amount == 0 {
 		return fmt.Errorf("the node asks to settle nothing, which consensus refuses")
 	}
@@ -284,10 +298,15 @@ func checkEscrowBill(req inference.InferenceRequest, completion string, amount, 
 		// who owes a real bill; the reservation still bounds it.
 		return nil
 	}
-	ceiling := inference.MaxUnitsFor(req, completion, "")
+	ceiling := inference.MaxUnitsFor(req, completion, reasoning)
 	if most := ceiling * pricePerUnit; amount > most {
+		// The inputs, not just the verdict. Both sides compute this from the same
+		// arithmetic over the same text, so a disagreement is one of them holding
+		// different text - and which one is the first thing to find out.
 		return fmt.Errorf("the node asks %d, more than the %d this answer can honestly have cost "+
-			"(%d units at %d each)", amount, most, ceiling, pricePerUnit)
+			"(%d units at %d each).\nChecked against %d bytes of prompt, %d of answer and %d of "+
+			"the model's working", amount, most, ceiling, pricePerUnit,
+			promptBytes(req), len(completion), len(reasoning))
 	}
 	return nil
 }
@@ -310,4 +329,22 @@ func signAs(acct *token.Account, pr *inferencev1.PaymentRequest) (*token.Transac
 		return nil, fmt.Errorf("sign the transfer for job %s: %w", pr.GetJobId(), err)
 	}
 	return tx, nil
+}
+
+// promptBytes is what the ceiling counted on the prompt side.
+//
+// Reported on a refusal because the node counts the same thing, so two different
+// numbers mean the two sides are looking at different text - an empty prompt
+// where one was sent, most often - and that is a different fault from a seller
+// overcharging.
+func promptBytes(req inference.InferenceRequest) int {
+	msgs, err := req.EffectiveMessages()
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, m := range msgs {
+		n += len(m.Role) + len(m.Content)
+	}
+	return n
 }
