@@ -34,8 +34,12 @@ export function Button({ children, href, variant = 'primary', size = 'md', class
   const classes = cn(baseStyles, variants[variant], sizes[size], className);
 
   if (href) {
+    // onClick is forwarded here too. It used to be dropped for the link form,
+    // so a caller that passed one got a button that navigated and silently did
+    // not run their handler - which is how the mobile menu stayed open after
+    // tapping Get started.
     return (
-      <Link href={href} className={classes}>
+      <Link href={href} className={classes} onClick={onClick}>
         {children}
       </Link>
     );
