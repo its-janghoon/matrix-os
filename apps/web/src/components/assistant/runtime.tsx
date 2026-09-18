@@ -9,10 +9,24 @@ import {
 } from '@assistant-ui/react';
 
 import { chatEscrowed, type EscrowPhase } from '@/lib/wallet/escrow';
-import { chat, type SellerChoice } from '@/lib/wallet/node';
+import { chat, reportProblem, type SellerChoice } from '@/lib/wallet/node';
 import { checkReceipt, type ReceiptCheck } from '@/lib/wallet/receipt';
 import type { Message } from '@/lib/wallet/signing';
 import type { Signer } from '@/lib/wallet/signer';
+
+/**
+ * The message a reader sees when a purchase fails.
+ *
+ * A node relays consensus's own words, which are written for someone reading a
+ * transaction. This thread renders whatever is thrown, so without this the chat
+ * window says things like "a draw pays a seller; returning money to the buyer is
+ * a close" - exact, arriving after a minute of waiting, and containing nothing
+ * about what the reader did or what to do instead. reportProblem rewrites the
+ * ones that can be acted on and passes the rest through untouched.
+ */
+function shown(err: unknown): Error {
+  return new Error(reportProblem(err));
+}
 
 /**
  * What a settled message cost and what the seller signed for it.
@@ -197,9 +211,13 @@ export function MatrixRuntimeProvider({
           // and a reader on such a network should get an answer rather than an
           // error naming a protocol version. Only from the first step: past it
           // the reservation is funded and a retry would pay twice.
-          if (phase !== 'reserving') throw failed;
-          if (abortSignal?.aborted) throw failed;
-          settled = await chat(endpoint, signer, { model, messages: history, minBond, chosen });
+          if (phase !== 'reserving') throw shown(failed);
+          if (abortSignal?.aborted) throw shown(failed);
+          try {
+            settled = await chat(endpoint, signer, { model, messages: history, minBond, chosen });
+          } catch (err) {
+            throw shown(err);
+          }
           text = settled.completion;
         }
         if (settled === undefined) throw new Error('the seller produced no answer');

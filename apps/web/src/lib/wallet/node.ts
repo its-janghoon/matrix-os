@@ -685,7 +685,46 @@ export function reportProblem(err: unknown): string {
     if (err.code === 'failed_precondition' && /insufficient funds/i.test(err.message)) {
       return `${err.message}. Fund this account first - the address is above.`;
     }
-    return err.message;
+    return plainly(err.message);
   }
-  return err instanceof Error ? err.message : String(err);
+  return plainly(err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * Rewrites the failures a reader can do something about.
+ *
+ * A node passes consensus's own words through, and those are written for someone
+ * reading a transaction. "a draw pays a seller; returning money to the buyer is
+ * a close" is exact, and it arrived in a chat window after a minute of waiting
+ * with nothing in it about what the reader had done or what to do instead. A
+ * reader who cannot act on an error is a reader who has been told nothing.
+ *
+ * Only the cases where the plain version is actually MORE informative. Anything
+ * else passes through unchanged: a wrapper that paraphrased every error would
+ * eventually paraphrase one it had misread, and an exact message nobody
+ * understands still beats a friendly one that is wrong.
+ */
+function plainly(message: string): string {
+  if (/returning money to the buyer is a close/i.test(message)) {
+    return (
+      'This budget belongs to the same account as the seller, and a budget cannot pay ' +
+      'its own owner - the chain reads that as a refund rather than a purchase. Pick a ' +
+      'different seller, or pay this one directly instead of through a budget.'
+    );
+  }
+  if (/cannot pay its own owner/i.test(message)) return message;
+  if (/only the delegate .* may draw/i.test(message)) {
+    return (
+      'This budget was opened for a different browser key. Clearing site data replaces ' +
+      'that key, so the budget can no longer be drawn on - close it to get the balance ' +
+      'back, and open a new one.'
+    );
+  }
+  if (/a draw of \d+ exceeds the per-job cap/i.test(message)) {
+    return `${message}. Open a budget with a higher per-job cap, or ask for a shorter answer.`;
+  }
+  if (/budget|escrow/i.test(message) && /expired|expiry/i.test(message)) {
+    return `${message}. Close it to get the remaining balance back, then open a new one.`;
+  }
+  return message;
 }

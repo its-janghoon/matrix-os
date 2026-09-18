@@ -28,6 +28,10 @@ var (
 	// the node acting for them, because consensus cannot: a draw is an amount
 	// with no unit count in it to divide by.
 	ErrPriceAboveCeiling = errors.New("inference: the seller charges more than this budget allows")
+	// ErrSelfPurchase reports a budget being asked to pay its own owner, which
+	// consensus reads as a refund rather than a purchase and refuses. Named so
+	// the door above can map it to something a reader can act on.
+	ErrSelfPurchase = errors.New("inference: a budget cannot buy from its own owner")
 )
 
 // Settler is the consensus-backed settlement dependency the inference Service
@@ -347,6 +351,26 @@ func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequ
 			"reserve at least that many, because the charge is capped at the reservation and the "+
 			"provider would otherwise do the rest of the work unpaid",
 			ErrUnderReserved, minUnits, unitsEstimate)
+	}
+
+	// A BUDGET CANNOT PAY ITS OWN OWNER, and finding that out after the model
+	// has run is finding out at the worst possible moment.
+	//
+	// Consensus refuses it: a draw pays a seller, and money going back to the
+	// buyer is a close, which obeys an expiry rule a draw would skip. That
+	// refusal is correct and its message is written for someone reading a
+	// transaction, not for someone who just watched a chat window fail - it
+	// arrived on the live site as "a draw pays a seller; returning money to the
+	// buyer is a close", after the wait, after the GPU time, with nothing in it
+	// about what the reader had done.
+	//
+	// It is knowable here, before capacity is reserved and before anything runs,
+	// from two strings.
+	if terms, err := token.ParseSpendEscrow(buyer); err == nil && terms.Buyer == providerID {
+		return nil, fmt.Errorf("%w: this budget belongs to %s and so does the seller, and a budget "+
+			"cannot pay its own owner - consensus reads that as a refund rather than a purchase. "+
+			"Buy from a different seller, or pay this one directly instead of through a budget",
+			ErrSelfPurchase, terms.Buyer)
 	}
 
 	mjob, err := s.market.SubmitJob(buyer, providerID, unitsEstimate)
