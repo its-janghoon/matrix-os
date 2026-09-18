@@ -5,6 +5,8 @@ import (
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
+
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // newFundCommand builds `matrix fund --account --amount`. It moves native MATRIX
@@ -35,6 +37,14 @@ account balance is printed on success.`,
 			if amount == 0 {
 				return fmt.Errorf("--amount must be greater than 0")
 			}
+			// This one MOVES money, out of the reward pool and into whatever id
+			// it is handed, so the mixed-case form a person pastes would fund a
+			// key nobody controls - and it is genesis supply, which there is
+			// only one of.
+			funded, err := token.CanonicalAccountID(account)
+			if err != nil {
+				return err
+			}
 			cc, err := dial(opts)
 			if err != nil {
 				return err
@@ -44,7 +54,7 @@ account balance is printed on success.`,
 			defer cancel()
 
 			resp, err := cc.market.FundAccount(ctx, &marketv1.FundAccountRequest{
-				Account: account,
+				Account: funded,
 				Amount:  amount,
 			})
 			if err != nil {

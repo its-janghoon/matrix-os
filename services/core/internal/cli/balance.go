@@ -5,6 +5,8 @@ import (
 
 	marketv1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/market/v1"
 	"github.com/spf13/cobra"
+
+	"github.com/ecirlabs/matrix-core/internal/token"
 )
 
 // newBalanceCommand builds `matrix balance --account`.
@@ -18,6 +20,14 @@ func newBalanceCommand(opts *globalOptions) *cobra.Command {
 			if account == "" {
 				return fmt.Errorf("--account is required")
 			}
+			// A read, so nothing is lost by getting it wrong - but asking with
+			// the mixed-case form every wallet displays used to answer 0, which
+			// reads as "your money is gone" rather than "that is not how the
+			// ledger spells it". Same rule as the transfer, so the two agree.
+			queried, err := token.CanonicalAccountID(account)
+			if err != nil {
+				return err
+			}
 			cc, err := dial(opts)
 			if err != nil {
 				return err
@@ -26,7 +36,7 @@ func newBalanceCommand(opts *globalOptions) *cobra.Command {
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
 
-			resp, err := cc.market.GetBalance(ctx, &marketv1.GetBalanceRequest{Account: account})
+			resp, err := cc.market.GetBalance(ctx, &marketv1.GetBalanceRequest{Account: queried})
 			if err != nil {
 				return mapErr(opts.Addr, err)
 			}

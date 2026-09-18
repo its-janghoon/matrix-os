@@ -255,6 +255,16 @@ leaves the local wallet.`,
 			if amount == 0 {
 				return fmt.Errorf("--amount must be greater than 0")
 			}
+			// Settled before the signature, because the recipient is inside it
+			// and no node can correct it afterwards. Every wallet and explorer
+			// shows an ethereum address in its mixed-case EIP-55 form, which is
+			// not the form the ledger keys the account by - so pasting what you
+			// were shown used to credit a key nobody controls, report success,
+			// and be unrecoverable by anyone.
+			recipient, err := token.CanonicalAccountID(to)
+			if err != nil {
+				return err
+			}
 			path, err := resolveWalletPath(walletPath)
 			if err != nil {
 				return err
@@ -279,7 +289,7 @@ leaves the local wallet.`,
 
 			tx := &token.Transaction{
 				From:      acct.PublicKey,
-				To:        to,
+				To:        recipient,
 				Amount:    amount,
 				Nonce:     nonce,
 				Timestamp: time.Now().UnixNano(),
