@@ -95,9 +95,60 @@ type Streamer interface {
 // ProvidersForModel may return its candidates in any order. The route selects
 // among them itself rather than taking the head, so a Router implementation that
 // stops sorting cannot silently change who gets paid.
+//
+// Both methods answer from THIS NODE'S order book. That is the right scope for
+// routing, because this node can only fulfil what it serves - but it is the
+// wrong scope for answering "what does the marketplace sell", which is what a
+// door onto a marketplace is asked. See Directory.
 type Router interface {
 	ProvidersForModel(model string) []market.Provider
 	ListProviders() []market.Provider
+}
+
+// RemoteSeller is one seller this node has heard of but does not host.
+//
+// Spelled out here rather than taken from marketexchange so this package keeps
+// depending on nothing but the market vocabulary, and so the fields are exactly
+// the ones a caller needs to be sent somewhere useful: who, where, and on what
+// terms.
+type RemoteSeller struct {
+	ProviderID   string
+	Endpoint     string
+	Models       []string
+	PricePerUnit uint64
+	Available    uint64
+}
+
+// Directory is the optional view of sellers BEYOND this node.
+//
+// WHY IT EXISTS. The package promise is that a developer reaches the
+// marketplace by changing base_url and nothing else. Routing reads the local
+// order book, which is correct - this node settles and fulfils, so it can only
+// sell what it serves. But the two read-shaped answers were coming from the
+// same place, and that made both of them lie on any node that is not itself a
+// seller:
+//
+//   - GET /v1/models returned {"data": []}, which reads as "this network has no
+//     models" rather than "this node hosts none". A validator is exactly the
+//     address a newcomer is given, and it is exactly the node that hosts none.
+//   - A chat request answered "no provider ON THIS NETWORK is serving model X",
+//     which was a statement about the network made after looking only at one
+//     node's own shelf. It was frequently false.
+//
+// So the directory is read for the ANSWERS, never for the routing. A model only
+// a remote seller has is listed, and named as theirs, with the address to buy it
+// from - and a request for it is refused with that address rather than with a
+// denial that the model exists.
+//
+// It is optional because a node with no exchange has no directory to consult,
+// and that node's local-only answers are then the whole truth it has.
+//
+// WHAT THIS IS NOT. It is not brokering. This node does not reserve, fulfil or
+// settle on a remote seller's behalf; doing that means becoming an inference
+// client of another node, with its own escrow and streaming, and it is the
+// larger piece of work this makes the case for rather than does.
+type Directory interface {
+	RemoteSellers() []RemoteSeller
 }
 
 // Authenticator resolves the caller's credential.
@@ -114,6 +165,12 @@ type Config struct {
 	Inference Inference
 	// Router selects a provider by model. Required.
 	Router Router
+	// Directory, when set, is what this node has heard of the rest of the
+	// market. It never routes - see Directory - but without it /v1/models and a
+	// routing refusal describe this node's own shelf while sounding like they
+	// describe the network. Nil on a node with no exchange, where the local
+	// answer is the whole truth available.
+	Directory Directory
 	// Idempotency, when set, deduplicates requests that carry an
 	// Idempotency-Key header so a retried POST is not a second charge. Nil
 	// disables it, which is the behaviour this endpoint had.
@@ -261,9 +318,13 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if len(candidates) == 0 {
 		guard.release()
 		// 404 naming the model, which is what OpenAI answers for an unknown model
-		// and what a client library reports usefully.
-		writeError(w, http.StatusNotFound, "invalid_request_error",
-			fmt.Sprintf("no provider on this network is serving model %q with capacity to spare", req.Model))
+		// and what a client library reports usefully. What the message SAYS
+		// depends on whether the model exists elsewhere, because the old wording
+		// - "no provider on this network is serving" - was a claim about the
+		// network made after reading one node's own shelf, and it was wrong
+		// exactly when it mattered: a caller pointed at a validator, asking for a
+		// model a real seller was serving that minute.
+		writeError(w, http.StatusNotFound, "invalid_request_error", h.unroutable(req.Model))
 		return
 	}
 	provider := cheapest(candidates)
@@ -337,12 +398,75 @@ type modelInfo struct {
 	// choosing a model on a market actually wants to see.
 	Providers    int    `json:"providers"`
 	PricePerUnit uint64 `json:"price_per_unit"`
+	// Servable says whether THIS node can fulfil this model, and Endpoint names
+	// where to go when it cannot.
+	//
+	// A model nobody here hosts is listed rather than hidden, because hiding it
+	// answers "the network has no such model" to a question that was about the
+	// network. Listing it without saying where to buy it would be worse than
+	// hiding it - a name that 404s on use is a dead end - so the two fields
+	// always travel together.
+	Servable bool   `json:"servable"`
+	Endpoint string `json:"endpoint,omitempty"`
 }
 
-// models answers /v1/models with the distinct models the order book advertises,
-// each with how many providers serve it and the cheapest price among them. A
-// developer calling client.models.list() is asking what this network can do,
-// and on a market that answer changes as providers come and go.
+// unroutable explains why a model cannot be served HERE, and where it can be.
+//
+// The distinction this draws is the whole point. "Nobody sells this" and "you
+// asked the wrong node" are different facts with different remedies, and
+// answering the first when the second is true sends a developer away believing
+// the marketplace is empty. When a seller has it, the message is their address,
+// because that is the entire remaining step.
+func (h *Handler) unroutable(model string) string {
+	if h.cfg.Directory != nil {
+		var (
+			endpoint string
+			price    uint64
+			sellers  int
+		)
+		for _, seller := range h.cfg.Directory.RemoteSellers() {
+			if seller.Endpoint == "" || seller.Available == 0 || !servesModel(seller, model) {
+				continue
+			}
+			sellers++
+			if endpoint == "" || seller.PricePerUnit < price {
+				endpoint, price = seller.Endpoint, seller.PricePerUnit
+			}
+		}
+		if endpoint != "" {
+			return fmt.Sprintf(
+				"this node does not serve model %q, but %d seller(s) on the network do. "+
+					"Point base_url at %s, which is the cheapest of them at %d base units per unit. "+
+					"This node can tell you who is selling; it cannot buy on your behalf.",
+				model, sellers, endpoint, price)
+		}
+	}
+	return fmt.Sprintf("no seller this node has heard of is serving model %q with capacity to spare", model)
+}
+
+// servesModel matches a seller's advertisement the way the order book does:
+// model names are case-insensitive across the vendors we proxy, so "Qwen3-32B"
+// and "qwen3-32b" must not be two different routing targets.
+func servesModel(seller RemoteSeller, model string) bool {
+	want := market.NormalizeModel(model)
+	for _, m := range seller.Models {
+		if market.NormalizeModel(m) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// models answers /v1/models with the distinct models THE MARKET advertises, each
+// with how many sellers serve it, the cheapest price among them, and whether
+// this node is one of them.
+//
+// A developer calling client.models.list() is asking what this network can do.
+// It used to answer from the local order book alone, so on any node that is not
+// itself a seller it returned an empty list - and a validator is both the
+// address a newcomer is given and the node that hosts nothing. "This network has
+// no models" is a very discouraging answer to be given wrongly, and it is
+// indistinguishable from the true one.
 func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, http.StatusMethodNotAllowed, "invalid_request_error",
@@ -359,18 +483,51 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 	type agg struct {
 		providers int
 		cheapest  uint64
+		// Set by a local provider only. It decides whether a request for this
+		// model can be served here or has to be sent elsewhere.
+		servable bool
+		// The cheapest REMOTE seller's address, which is where a caller is sent
+		// for a model this node cannot serve. Cheapest so the advice matches the
+		// choice the router would make if it could.
+		endpoint      string
+		endpointPrice uint64
 	}
 	byModel := map[string]*agg{}
+	see := func(model string, price uint64, local bool, endpoint string) {
+		a, ok := byModel[model]
+		if !ok {
+			a = &agg{cheapest: price}
+			byModel[model] = a
+		}
+		a.providers++
+		if price < a.cheapest {
+			a.cheapest = price
+		}
+		if local {
+			a.servable = true
+			return
+		}
+		if endpoint != "" && (a.endpoint == "" || price < a.endpointPrice) {
+			a.endpoint, a.endpointPrice = endpoint, price
+		}
+	}
+
 	for _, p := range h.cfg.Router.ListProviders() {
 		for _, m := range p.Models {
-			a, ok := byModel[m]
-			if !ok {
-				byModel[m] = &agg{providers: 1, cheapest: p.PricePerUnit}
+			see(m, p.PricePerUnit, true, "")
+		}
+	}
+	// Then the rest of the market, which this node can describe but not fulfil.
+	// A seller with no endpoint to publish is skipped rather than listed as
+	// unreachable: naming a model a caller has no way to buy is the dead end
+	// this is here to remove.
+	if h.cfg.Directory != nil {
+		for _, seller := range h.cfg.Directory.RemoteSellers() {
+			if seller.Endpoint == "" || seller.Available == 0 {
 				continue
 			}
-			a.providers++
-			if p.PricePerUnit < a.cheapest {
-				a.cheapest = p.PricePerUnit
+			for _, m := range seller.Models {
+				see(m, seller.PricePerUnit, false, seller.Endpoint)
 			}
 		}
 	}
@@ -383,13 +540,19 @@ func (h *Handler) models(w http.ResponseWriter, r *http.Request) {
 
 	data := make([]modelInfo, 0, len(ids))
 	for _, id := range ids {
-		data = append(data, modelInfo{
+		a := byModel[id]
+		info := modelInfo{
 			ID:           id,
 			Object:       "model",
 			OwnedBy:      "matrix-marketplace",
-			Providers:    byModel[id].providers,
-			PricePerUnit: byModel[id].cheapest,
-		})
+			Providers:    a.providers,
+			PricePerUnit: a.cheapest,
+			Servable:     a.servable,
+		}
+		if !a.servable {
+			info.Endpoint = a.endpoint
+		}
+		data = append(data, info)
 	}
 	writeJSON(w, http.StatusOK, modelsResponse{Object: "list", Data: data})
 }
