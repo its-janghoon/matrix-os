@@ -206,8 +206,14 @@ func mapInferenceError(err error) error {
 		return status.Error(codes.NotFound, err.Error())
 	case errors.Is(err, market.ErrInsufficientFunds), errors.Is(err, market.ErrInsufficientCapacity):
 		return status.Error(codes.FailedPrecondition, err.Error())
-	case errors.Is(err, market.ErrSelfDealing):
+	case errors.Is(err, market.ErrSelfDealing), errors.Is(err, inference.ErrSelfPurchase):
+		// Self-dealing catches buyer == provider. A BUDGET buying from its own
+		// owner is the same mistake one step removed - the budget account never
+		// equals the provider id, so it sailed past that check and was caught by
+		// consensus after the model had run.
 		return status.Error(codes.InvalidArgument, err.Error())
+	case errors.Is(err, inference.ErrPriceAboveCeiling):
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, token.ErrInvalidSignature),
 		errors.Is(err, token.ErrUnsignedTransaction),
 		errors.Is(err, token.ErrInvalidTransaction),

@@ -16,7 +16,7 @@ import { fromBase64, toBase64 } from './signing';
 import type { Message, Signer } from './signer';
 
 const MARKET = 'matrix.market.v1.MarketService';
-const INFERENCE = 'matrix.inference.v1.InferenceService';
+export const INFERENCE = 'matrix.inference.v1.InferenceService';
 
 /**
  * A node on this machine. Offered as a choice, never assumed.
@@ -167,6 +167,19 @@ export interface Settled {
   receipt: string;
   /** Who served it, so a UI can name the seller rather than just the account. */
   seller: Seller;
+  /**
+   * True when the run stopped before the model was done - the reader cancelled,
+   * or the connection dropped - so the completion is what arrived rather than a
+   * finished answer.
+   *
+   * Only the escrowed path can report this. On the other two the answer is
+   * withheld until it is paid for, so a cut-short run produces no completion and
+   * no bill at all. Here the money moved first, and a partial answer with a
+   * partial bill is the honest outcome: the reader is charged for what arrived,
+   * and a page that presented it as a finished answer would be hiding the one
+   * thing they need to know before they read it.
+   */
+  cutShort?: boolean;
 }
 
 export interface NativeTransaction {
@@ -221,23 +234,27 @@ export interface BridgeReconciliation {
   blockHeight: bigint;
 }
 
-async function rpc(
+export async function rpc(
   endpoint: string,
   service: string,
   method: string,
   body: unknown,
-  options: { timeoutMs?: number } = {},
+  options: { timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<Record<string, unknown>> {
   const url = `${endpoint.replace(/\/$/, '')}/${service}/${method}`;
   const controller = options.timeoutMs ? new AbortController() : undefined;
   const timer = controller ? setTimeout(() => controller.abort(), options.timeoutMs) : undefined;
+  // A caller's own signal, when it has one, and the timeout's otherwise. Not
+  // both: a call given a signal is one the caller will stop itself, and a call
+  // that is never made is never given one.
+  const signal = options.signal ?? controller?.signal;
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Connect-Protocol-Version': '1' },
       body: JSON.stringify(body ?? {}),
-      ...(controller ? { signal: controller.signal } : {}),
+      ...(signal ? { signal } : {}),
     });
   } catch {
     if (controller?.signal.aborted) {
@@ -264,22 +281,22 @@ async function rpc(
   return text === '' ? {} : (JSON.parse(text) as Record<string, unknown>);
 }
 
-function str(value: unknown): string {
+export function str(value: unknown): string {
   return typeof value === 'string' ? value : '';
 }
 
-function big(value: unknown): bigint {
+export function big(value: unknown): bigint {
   if (typeof value === 'bigint') return value;
   if (typeof value === 'string' && value !== '') return BigInt(value);
   if (typeof value === 'number') return BigInt(Math.trunc(value));
   return 0n;
 }
 
-function num(value: unknown): number {
+export function num(value: unknown): number {
   return typeof value === 'number' ? value : Number(value ?? 0) || 0;
 }
 
-function obj(value: unknown): Record<string, unknown> {
+export function obj(value: unknown): Record<string, unknown> {
   return value && typeof value === 'object' ? (value as Record<string, unknown>) : {};
 }
 
@@ -561,6 +578,12 @@ export async function sellerFor(
  * Streaming is not available here, and that is a consequence rather than an
  * omission: streaming the answer out before the payment is signed would hand
  * over the very thing being withheld.
+ *
+ * BOTH SIGNATURES ARE THE DELEGATE'S when the buyer is a spend budget, and it is
+ * worth saying because a reader who assumes a human is behind them will write
+ * copy telling people to approve something nobody is going to be asked about.
+ * The COUNT does not change and neither does the withholding - what changes is
+ * that no dialog opens.
  */
 export async function chat(
   endpoint: string,
@@ -662,7 +685,46 @@ export function reportProblem(err: unknown): string {
     if (err.code === 'failed_precondition' && /insufficient funds/i.test(err.message)) {
       return `${err.message}. Fund this account first - the address is above.`;
     }
-    return err.message;
+    return plainly(err.message);
   }
-  return err instanceof Error ? err.message : String(err);
+  return plainly(err instanceof Error ? err.message : String(err));
+}
+
+/**
+ * Rewrites the failures a reader can do something about.
+ *
+ * A node passes consensus's own words through, and those are written for someone
+ * reading a transaction. "a draw pays a seller; returning money to the buyer is
+ * a close" is exact, and it arrived in a chat window after a minute of waiting
+ * with nothing in it about what the reader had done or what to do instead. A
+ * reader who cannot act on an error is a reader who has been told nothing.
+ *
+ * Only the cases where the plain version is actually MORE informative. Anything
+ * else passes through unchanged: a wrapper that paraphrased every error would
+ * eventually paraphrase one it had misread, and an exact message nobody
+ * understands still beats a friendly one that is wrong.
+ */
+function plainly(message: string): string {
+  if (/returning money to the buyer is a close/i.test(message)) {
+    return (
+      'This budget belongs to the same account as the seller, and a budget cannot pay ' +
+      'its own owner - the chain reads that as a refund rather than a purchase. Pick a ' +
+      'different seller, or pay this one directly instead of through a budget.'
+    );
+  }
+  if (/cannot pay its own owner/i.test(message)) return message;
+  if (/only the delegate .* may draw/i.test(message)) {
+    return (
+      'This budget was opened for a different browser key. Clearing site data replaces ' +
+      'that key, so the budget can no longer be drawn on - close it to get the balance ' +
+      'back, and open a new one.'
+    );
+  }
+  if (/a draw of \d+ exceeds the per-job cap/i.test(message)) {
+    return `${message}. Open a budget with a higher per-job cap, or ask for a shorter answer.`;
+  }
+  if (/budget|escrow/i.test(message) && /expired|expiry/i.test(message)) {
+    return `${message}. Close it to get the remaining balance back, then open a new one.`;
+  }
+  return message;
 }

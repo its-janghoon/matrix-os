@@ -249,6 +249,16 @@ const ProtocolVersionGenesis uint32 = 1
 // every height, including the ones already committed.
 const ProtocolVersionSpendBudgets uint32 = 2
 
+// ProtocolVersionInferenceEscrow is the version from which an inference
+// reservation is a thing consensus applies rather than a string it credits.
+//
+// It changes how state is APPLIED and not merely what is refused: an
+// un-upgraded node reading `infer/escrow/...` sees an ordinary account name,
+// credits it as if it were a seller, and never splits it between the provider
+// and the refund. Its ledger and an upgraded node's diverge from the first
+// reservation anyone opens, which is why this needs a height and not a restart.
+const ProtocolVersionInferenceEscrow uint32 = 3
+
 // BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
 // the validating node's own clock, in either direction.
 //

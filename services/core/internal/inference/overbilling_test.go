@@ -2,8 +2,10 @@ package inference
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/kv"
 	"github.com/ecirlabs/matrix-core/internal/market"
@@ -219,4 +221,42 @@ func TestBothBuyerDoorsApplyTheBillingCeiling(t *testing.T) {
 				"a buyer would be asked to sign for the whole reservation", pr.Amount)
 		}
 	})
+}
+
+// A BUDGET CANNOT BUY FROM ITS OWN OWNER, and it has to be told so before the
+// model runs.
+//
+// Consensus refuses the draw: money going back to the buyer is a close, which
+// obeys an expiry rule a draw would skip. But the market's own self-dealing
+// check compares buyer against provider, and a budget account is never equal to
+// a provider id - so this sailed through, the provider spent the GPU time, the
+// reader waited, and the failure arrived as raw consensus text about draws and
+// closes. That happened on the live site.
+func TestABudgetIsRefusedBeforeItBuysFromItsOwnOwner(t *testing.T) {
+	fs := &fakeSettler{committed: true, applied: true}
+	svc, _, providerID := newTestService(t, fs, 1, 1000)
+
+	// A budget whose OWNER is the seller. The delegate is a key nobody needs to
+	// hold for this: the refusal happens before anything is signed.
+	delegate, _ := token.GenerateAccount()
+	budget := token.SpendEscrow{
+		Buyer:           providerID,
+		Delegate:        delegate.AccountID(),
+		PerJobCap:       10000,
+		MaxPricePerUnit: 10000,
+		Expiry:          time.Now().Add(time.Hour).Unix(),
+	}.Account()
+
+	_, err := svc.SubmitInferenceJob(budget, providerID,
+		InferenceRequest{Prompt: "hello world"}, 8)
+	if !errors.Is(err, ErrSelfPurchase) {
+		t.Fatalf("submitting got %v, want ErrSelfPurchase - and it must be refused HERE, before "+
+			"capacity is reserved and before the model runs", err)
+	}
+	// The message has to name what the reader did, not what consensus calls it.
+	for _, want := range []string{"cannot pay its own owner", "different seller"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal does not say %q: %v", want, err)
+		}
+	}
 }

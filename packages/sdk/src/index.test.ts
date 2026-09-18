@@ -360,6 +360,11 @@ describe('coverage against the served surface', () => {
       'RunInferenceJobProgress',
       'SettleInferenceJob',
       'StreamInferenceJob',
+      'ReserveInferenceEscrow',
+      'FundInferenceEscrow',
+      'StreamEscrowedInferenceJob',
+      'SettleEscrowedInferenceJob',
+      'RecoverEscrowedInferenceJob',
     ],
     'matrix.agent.v1.AgentService': ['DeployAgent', 'ListAgents', 'GetAgent'],
   };
