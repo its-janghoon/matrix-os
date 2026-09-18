@@ -1,6 +1,32 @@
 # Proposal: escrow and refund, so a self-custody buyer can watch the answer arrive
 
-**Status: proposed, not built.** It changes how state is APPLIED and it moves money, so it is written down and approved before any code.
+**Status: LIVE on chain 8170 since height 1831, 2026-09-17.** One answer bought
+through it: 4,000,000 reserved, 337,000 paid, 3,663,000 returned. The evidence,
+including the four bugs the live chain found that the tests did not, is in
+[`docs/evidence/escrow-activation-2026-09-17.md`](../evidence/escrow-activation-2026-09-17.md). It changes how state is APPLIED and it
+moves money, so the open questions below were answered before any code rather
+than during it. The answers are in **Decisions** and the section that set each
+one is marked where it happens.
+
+It ships as **protocol version 3** and is dormant until a height names it: see
+[`docs/runbooks/escrow-activation.md`](../runbooks/escrow-activation.md) for
+turning it on and [`scripts/escrow-smoke.sh`](../../scripts/escrow-smoke.sh) for
+proving it took. Three things exist that this document does not describe, because
+they were found while building rather than while designing:
+
+- **A cut-short run is billed, not forfeited.** The settlement rides on the
+  stream's last frame, so a buyer who cancels or disconnects never receives one -
+  and with nothing to sign, the provider claims the whole reservation. So such a
+  job is finalised for the text that reached the buyer, and
+  `RecoverEscrowedInferenceJob` hands the settlement to whoever comes back for
+  it. Without this, a cancel button would charge full price for a partial answer.
+- **The buyer checks the bill before signing it.** `MaxUnitsFor` on the node runs
+  on the SELLER's machine; the browser and `--escrowed` each compute it again on
+  their own side and refuse rather than sign. A signature given to a number the
+  buyer never checked hands back the leverage this design creates.
+- **The reservation reports its own arithmetic.** `units_reserved` and
+  `price_per_unit` come back with the deposit, so a client with no order book to
+  read can still check what it is funding and convert a settlement into units.
 
 ---
 
@@ -63,7 +89,72 @@ Today the buyer signs the EXACT amount. Under this, they sign a CAP and the prov
 
 That is strictly less control, and it is the model every metered API already uses: you authorise a limit, they bill what they used. It should be said out loud rather than discovered, because the current design's selling point is that the buyer signs the real number.
 
-## Open questions, which are the decisions
+## Decisions
+
+Four questions had to be settled before this could be written, and one of them
+turned out to decide the shape of everything else.
+
+### Who signs the settlement: the BUYER's side
+
+The obvious reading of "the provider has been paid up front" is that the
+provider then tells consensus what the job actually cost. That is wrong, and
+reading the code is what shows it.
+
+There is no check on the buyer's side today. The browser signs whatever invoice
+the node returns - it does not compute a ceiling, it does not compare the bill to
+the text it received, it submits the number it was given. `MaxUnitsFor` runs on
+the SELLER's node, bounding the seller's own model server. That is worth having
+and it is not a buyer's protection: an operator who wants to overcharge controls
+the node running the check.
+
+So the only thing that has ever stood between a buyer and an inflated bill is
+their power to WITHHOLD THE SIGNATURE. Hand settlement to the provider and that
+disappears, and what remains bounding the bill is the reservation - which is
+generous by design, which is the exact hole `MaxUnitsFor` was written to close.
+
+The settlement is therefore signed by the buyer's side, which under a spend
+budget is the delegate and needs no prompt. Streaming still works, because what
+frees the text is the money already sitting in escrow rather than a signature
+still to come.
+
+**This makes a second change non-optional: the CLIENT must compute the ceiling
+before signing.** A buyer-signed settlement that rubber-stamps the node's number
+is the same design with extra steps.
+
+### What expiry does: pays the PROVIDER, in full
+
+Answers open question 1, and 2 with it.
+
+An expiry that refunds the buyer makes "receive the answer and never settle"
+free, which is worse than today - today the seller at least still holds the text.
+By the time expiry arrives the provider has spent the GPU time and delivered, so
+expiry pays them the whole reservation.
+
+The buyer is then strictly better off settling honestly, because the actual is by
+construction at most the reservation. Hanging up mid-stream costs the buyer the
+difference rather than the provider their work, which is the honest allocation:
+the bytes were delivered.
+
+The timeout has to clear a slow reasoning run by a wide margin. Refunding a
+provider's fee out from under them while they are still working would be the same
+mistake pointed the other way.
+
+### What parks the money: the BUDGET, not the wallet
+
+Answers open question 3. The reservation moves real money for the length of a
+run, and on a raw wallet that is felt. Funded from a spend budget it is not: the
+escrow is opened from the budget account, inside an amount the buyer has already
+approved and bounded. The two proposals compose here rather than merely shipping
+together.
+
+### Is it worth it
+
+Answers open question 4, and the live network answered it. A buyer can now hold
+their own key and pay without a prompt per message, and the one thing they still
+cannot do is watch the answer arrive. That is the last item on the list that
+made this work worth doing.
+
+## The questions these answered
 
 1. **What happens to escrow when the run never finishes?** A node that dies mid-run leaves `R` sitting in escrow. An expiry that refunds the buyer is the obvious answer, but it has to be a consensus rule too, and its timeout is a policy: too short and a slow legitimate run is refunded out from under a provider that is still working; too long and a buyer's money is parked.
 

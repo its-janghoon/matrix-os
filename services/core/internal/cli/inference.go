@@ -78,6 +78,7 @@ The inference API listens on its own address (default 127.0.0.1:9092), set with
 	cmd.AddCommand(
 		newInferenceSubmitCommand(opts, &inferenceAddr),
 		newInferenceGetCommand(opts, &inferenceAddr),
+		newInferenceRecoverCommand(opts, &inferenceAddr),
 	)
 	return cmd
 }
@@ -91,6 +92,7 @@ func newInferenceSubmitCommand(opts *globalOptions, inferenceAddr *string) *cobr
 		units        uint64
 		fulfill      bool
 		clientSigned bool
+		escrowed     bool
 		walletPath   string
 		progress     bool
 	)
@@ -109,7 +111,15 @@ Pass --client-signed to pay with the local wallet's key instead: the node runs
 the model, returns the exact transfer to sign and withholds the completion, this
 command signs it, and the node settles and hands the completion over. That is
 the path a public endpoint or a dApp uses, where the node holding your key would
-make its operator a custodian of your balance.`,
+make its operator a custodian of your balance.
+
+Pass --escrowed to keep your key AND watch the answer arrive. The wallet funds
+the reservation - units x price - before the model starts, so the provider
+already holds the most the job can cost and the completion has nothing left to
+withhold: it streams to stdout as it is produced. The settlement then names what
+it really cost and consensus returns the change. Interrupting settles for what
+arrived rather than forfeiting the reservation. It needs a node whose chain has
+activated the inference-escrow rules.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if buyer == "" {
@@ -143,6 +153,21 @@ make its operator a custodian of your balance.`,
 			ctx, cancel := callContext(cmd.Context(), opts)
 			defer cancel()
 
+			if escrowed && clientSigned {
+				return fmt.Errorf("--escrowed and --client-signed are two different ways to pay " +
+					"without handing over a key; pick one")
+			}
+			if escrowed {
+				job, err := runEscrowed(ctx, ic, *inferenceAddr, escrowedInput{
+					buyer: buyer, provider: provider, model: model, prompt: prompt,
+					units: units, walletPath: walletPath,
+					out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
+				})
+				if err != nil {
+					return err
+				}
+				return printInferenceJob(cmd.OutOrStdout(), opts.JSON, job)
+			}
 			if clientSigned {
 				job, err := runClientSigned(ctx, ic, *inferenceAddr, clientSignedInput{
 					progress: progress,
@@ -189,6 +214,8 @@ make its operator a custodian of your balance.`,
 		"report how far the run has got while it works (client-signed only; no completion text travels)")
 	cmd.Flags().BoolVar(&clientSigned, "client-signed", false,
 		"pay with the local wallet's key instead of letting the node sign for you")
+	cmd.Flags().BoolVar(&escrowed, "escrowed", false,
+		"fund the reservation up front and stream the answer, paying with the local wallet's key")
 	cmd.Flags().StringVar(&walletPath, "wallet", "",
 		"wallet file to sign with when --client-signed is set (default ~/.matrix/wallet.json)")
 	return cmd

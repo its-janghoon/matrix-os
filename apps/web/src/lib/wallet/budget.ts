@@ -219,6 +219,39 @@ export function rememberBudget(budget: Budget): void {
   }
 }
 
+/**
+ * Reads back the remembered budget WITHOUT knowing whose it is.
+ *
+ * A page reloads holding no wallet: MetaMask needs an explicit connect, because
+ * silently reading an account nobody authorised is what a wallet prompt exists
+ * to stop. So on the first render there is no owner to check a budget against -
+ * and a page that showed nothing until the reader reconnected showed nothing
+ * about an account with their money in it. The Close button simply vanished.
+ *
+ * The terms are not a secret. They are an account NAME: they appear in the
+ * owner's own transaction history, and anyone who can read this browser's
+ * storage can already read the delegate key that spends the budget. What is
+ * secret is the WALLET, and closing still needs it - so this only makes the
+ * budget visible and namable, never spendable.
+ */
+export function recallAnyBudget(): Budget | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const stored = JSON.parse(raw) as StoredBudget;
+    return {
+      buyer: stored.buyer,
+      delegate: stored.delegate,
+      perJobCap: BigInt(stored.perJobCap),
+      maxPricePerUnit: BigInt(stored.maxPricePerUnit),
+      expiry: BigInt(stored.expiry),
+      nonce: BigInt(stored.nonce),
+    };
+  } catch {
+    return null;
+  }
+}
+
 /** Reads back the remembered budget for an owner, if it is theirs. */
 export function recallBudget(buyer: string): Budget | null {
   try {

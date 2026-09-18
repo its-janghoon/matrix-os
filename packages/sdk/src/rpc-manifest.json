@@ -13,10 +13,15 @@
       "name": "matrix.inference.v1.InferenceService",
       "methods": [
         "FulfillInferenceJob",
+        "FundInferenceEscrow",
         "GetInferenceJob",
+        "RecoverEscrowedInferenceJob",
+        "ReserveInferenceEscrow",
         "RunInferenceJob",
         "RunInferenceJobProgress",
+        "SettleEscrowedInferenceJob",
         "SettleInferenceJob",
+        "StreamEscrowedInferenceJob",
         "StreamInferenceJob",
         "SubmitInferenceJob"
       ]

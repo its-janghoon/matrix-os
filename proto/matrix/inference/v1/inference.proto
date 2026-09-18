@@ -33,6 +33,11 @@ enum InferenceJobStatus {
     // pre-sign a transfer for it. The completion is WITHHELD until the payment
     // is signed; the reservation is released if it never is.
     INFERENCE_JOB_STATUS_AWAITING_PAYMENT = 6;
+    // A reservation has been named and the buyer has not funded it yet. Where
+    // the ESCROWED path parks BEFORE anything runs, which is the difference that
+    // lets that path stream: by the time a model starts, the provider already
+    // holds the most the job can cost.
+    INFERENCE_JOB_STATUS_AWAITING_DEPOSIT = 7;
 }
 
 // ChatRole enumerates the standard chat message roles for chat-style inference.
@@ -253,6 +258,189 @@ message RunInferenceJobResponse {
     InferenceJob job = 2;
 }
 
+// ReserveInferenceEscrowRequest submits a job and names the reservation that
+// pays for it, WITHOUT running anything. It takes the same inputs as
+// RunInferenceJob because it is the same job; what differs is when the money
+// moves.
+message ReserveInferenceEscrowRequest {
+    // Identical in meaning to RunInferenceJobRequest's fields.
+    string buyer = 1;
+    string provider = 2;
+    string model = 3;
+    string prompt = 4;
+    repeated ChatMessage messages = 5;
+    uint32 max_tokens = 6;
+    double temperature = 7;
+    uint64 units_estimate = 8;
+    // Required for the same reason RunInferenceJob requires it: without it,
+    // `buyer` is just a string anyone could type.
+    RunAuthorization authorization = 9;
+}
+
+// ReserveInferenceEscrowResponse returns the deposit to sign.
+message ReserveInferenceEscrowResponse {
+    // The transfer that funds the reservation. Its recipient is the escrow
+    // ACCOUNT, whose name carries every term of the agreement - so signing this
+    // one transfer is agreeing to all of them.
+    PaymentRequest payment = 1;
+    // The job, in AWAITING_DEPOSIT. Nothing has run and nothing is charged.
+    InferenceJob job = 2;
+    // The escrow account, repeated out of the payment for a client that wants to
+    // show or parse the terms before signing.
+    string escrow_account = 3;
+    // Unix seconds at and after which the provider may claim whatever is left
+    // unsettled. A client should treat this as the real deadline: it is enforced
+    // by consensus rather than by this node.
+    int64 claimable_at = 4;
+    // What the reservation is made of: units held, and what each one costs.
+    //
+    // Sent because the deposit alone is a number a buyer cannot check. With
+    // these two they can verify `payment.amount == units_reserved *
+    // price_per_unit` BEFORE funding, and - more to the point - convert the
+    // settlement they are later asked to sign back into units, which is the only
+    // way to tell an honest bill from a seller billing the whole cap. A browser
+    // reads the price from the order book; a client talking straight to the
+    // seller's node has no order book to read.
+    uint64 units_reserved = 5;
+    uint64 price_per_unit = 6;
+}
+
+// FundInferenceEscrowRequest submits the buyer's signed deposit. Every signable
+// field must match the payment request, for the reason SettleInferenceJob gives.
+message FundInferenceEscrowRequest {
+    string id = 1;
+    bytes from_public_key = 2;
+    string to = 3;
+    uint64 amount = 4;
+    uint64 nonce = 5;
+    int64 timestamp = 6;
+    bytes prev_hash = 7;
+    bytes signature = 8;
+}
+
+// FundInferenceEscrowResponse confirms the reservation is funded and the job may
+// now be streamed.
+message FundInferenceEscrowResponse {
+    // The job, back in PENDING - an ordinary job that may run, differing only in
+    // that the provider has already been paid the most it can cost.
+    InferenceJob job = 1;
+}
+
+// StreamEscrowedInferenceJobRequest streams a funded job.
+message StreamEscrowedInferenceJobRequest {
+    // The job whose reservation has been funded.
+    string id = 1;
+    // The SAME authorization that opened the reservation, presented again.
+    //
+    // Required on a node that serves this without an API key, and it is the one
+    // call on this path that would otherwise have no credential at all: the
+    // other three each carry a signature over what they do, and this one takes a
+    // job id. An id is not a secret - it appears in logs, in a URL, in a
+    // client's own storage - so without this, anyone who learned one could race
+    // the buyer for an answer the buyer paid for.
+    //
+    // Compared against what the reservation was opened with rather than
+    // re-verified, because a RunAuthorization is single-use by design: verifying
+    // it twice would refuse the legitimate caller as a replay.
+    RunAuthorization authorization = 2;
+}
+
+// StreamEscrowedInferenceJobResponse carries the answer as it is produced and,
+// at the end, the settlement to sign.
+message StreamEscrowedInferenceJobResponse {
+    // The next piece of the completion. Concatenating every delta gives the
+    // whole completion, byte for byte.
+    string delta = 1;
+    string job_id = 2;
+    // Set on the FINAL chunk only: the transfer that settles what the job really
+    // cost. Consensus pays it to the provider and returns the rest.
+    PaymentRequest payment = 3;
+    // Set on the final chunk only.
+    InferenceJob job = 4;
+    bool streamed_one_shot = 5;
+    // Set on the final chunk: the run stopped before the model was done - the
+    // provider dropped, or this connection did - so the delta stream above is
+    // what was produced rather than a finished answer, and the settlement is
+    // for that much.
+    //
+    // The final chunk is still SENT in that case, rather than the stream ending
+    // in an error, because the settlement is on it: a buyer who receives an
+    // error instead of a payment has nothing to sign and forfeits the whole
+    // reservation to the provider's claim. When the connection is the thing that
+    // died, this send fails harmlessly and RecoverEscrowedInferenceJob is how
+    // the buyer comes back for it.
+    bool cut_short = 6;
+}
+
+// RecoverEscrowedInferenceJobRequest asks for the settlement of a funded job
+// whose stream the buyer is no longer holding open.
+message RecoverEscrowedInferenceJobRequest {
+    string id = 1;
+    // The SAME authorization that opened the reservation, for the same reason
+    // StreamEscrowedInferenceJob needs it: a job id is not a credential, and the
+    // answer comes back on this call.
+    //
+    // A client whose own stream just died still holds this and should send it.
+    RunAuthorization authorization = 2;
+    // OR a fresh signature over the job id, for the caller who does not.
+    //
+    // A crashed process, a closed tab, an operator returning to a bill their own
+    // ceiling check refused - none of them still has the authorization above,
+    // and telling them to keep one on disk would be telling them to persist a
+    // credential so a later run could replay it. This proves the same thing
+    // without that: you hold the key that will sign the settlement. Whoever can
+    // produce it could settle this job anyway.
+    RecoverAuthorization recover_authorization = 3;
+}
+
+// RecoverAuthorization is a fresh signature over one job id, by the key that
+// settles it. Ed25519 only: an Ethereum wallet signs typed data rather than
+// arbitrary bytes, and a browser buyer recovers in-flight with the
+// authorization above rather than needing this.
+message RecoverAuthorization {
+    // The ed25519 public key of the account that settles - the buyer, or a
+    // budget's delegate.
+    bytes public_key = 1;
+    // Unix nanoseconds at signing time, bounded by a short window.
+    int64 timestamp = 2;
+    // Over a domain-separated, length-prefixed encoding of the key, the job id
+    // and the timestamp.
+    bytes signature = 3;
+}
+
+// RecoverEscrowedInferenceJobResponse returns what the job produced and the
+// settlement to sign for it.
+message RecoverEscrowedInferenceJobResponse {
+    // The settlement, identical to the one the stream's last frame carried.
+    PaymentRequest payment = 1;
+    // The job, INCLUDING its completion. It is not withheld on this path: the
+    // provider already holds the reservation, so the text is not leverage, and a
+    // buyer who cannot see what was produced cannot check the bill against it.
+    InferenceJob job = 2;
+    // True when the run was cut short - the buyer hung up, or the provider
+    // stopped - so the completion is what arrived rather than a finished answer.
+    bool cut_short = 3;
+}
+
+// SettleEscrowedInferenceJobRequest submits the buyer's signed settlement.
+message SettleEscrowedInferenceJobRequest {
+    string id = 1;
+    bytes from_public_key = 2;
+    string to = 3;
+    uint64 amount = 4;
+    uint64 nonce = 5;
+    int64 timestamp = 6;
+    bytes prev_hash = 7;
+    bytes signature = 8;
+}
+
+// SettleEscrowedInferenceJobResponse returns the completed job.
+message SettleEscrowedInferenceJobResponse {
+    // The job in COMPLETED state. Its completion is already in the caller's
+    // hands - it streamed - so this carries the settled charge and the receipt.
+    InferenceJob job = 1;
+}
+
 // SettleInferenceJobRequest submits the buyer's signed transfer for a job that is
 // awaiting payment. Every signable field must match the PaymentRequest the job
 // is waiting for, or the settlement is refused: a signature that verifies is not
@@ -447,4 +635,68 @@ service InferenceService {
     // then releases the reservation. A transfer that does not match the payment
     // request exactly is refused.
     rpc SettleInferenceJob(SettleInferenceJobRequest) returns (SettleInferenceJobResponse) {}
+
+    // The ESCROWED path: the only one on which a buyer keeps their own key AND
+    // watches the answer arrive.
+    //
+    // RunInferenceJob cannot stream, and that is a consequence rather than an
+    // omission: the charge is unknowable until the work is done, so the node
+    // runs first and invoices second, and withholding the completion until the
+    // invoice is signed is the only enforcement left once the GPU time is spent.
+    // Streaming would hand over the very thing being withheld.
+    //
+    // The amount is unknowable. The RESERVATION is not. So the buyer signs for
+    // the reservation before anything runs, the provider holds the most the job
+    // can cost before the first token, and consensus returns the difference when
+    // the settlement names the actual. There is nothing left to withhold.
+    //
+    // Four calls, in this order. Skipping the second is the one mistake that
+    // matters: a deposit sitting in the mempool is not money in escrow.
+
+    // ReserveInferenceEscrow submits a job and names its reservation. Input: the
+    // same fields as RunInferenceJob. Output: the deposit to sign and the job in
+    // AWAITING_DEPOSIT. Side effects: reserves capacity and checks
+    // affordability. Nothing runs and no token moves.
+    rpc ReserveInferenceEscrow(ReserveInferenceEscrowRequest) returns (ReserveInferenceEscrowResponse) {}
+
+    // FundInferenceEscrow submits the signed deposit and waits for it to COMMIT
+    // AND APPLY. Input: the job ID and the signed transfer. Output: the job in
+    // PENDING. Side effects: the reservation is paid into escrow.
+    //
+    // The wait is not politeness. A deposit that is only submitted may still be
+    // skipped as unaffordable when it is applied, and a provider that streamed
+    // against one would have given the answer away.
+    rpc FundInferenceEscrow(FundInferenceEscrowRequest) returns (FundInferenceEscrowResponse) {}
+
+    // StreamEscrowedInferenceJob runs a FUNDED job and streams the answer as it
+    // is produced. Input: the job ID. Output: a stream of deltas whose last
+    // message carries the settlement to sign. Side effects: runs the model.
+    //
+    // Refused for a job whose deposit has not applied, which is the check the
+    // whole path rests on.
+    rpc StreamEscrowedInferenceJob(StreamEscrowedInferenceJobRequest) returns (stream StreamEscrowedInferenceJobResponse) {}
+
+    // SettleEscrowedInferenceJob submits the signed settlement. Input: the job ID
+    // and the signed transfer. Output: the COMPLETED job. Side effects:
+    // consensus pays the actual to the provider and returns the rest to the
+    // payer.
+    //
+    // A buyer who never calls this does not get the money back: the provider
+    // claims the whole reservation once its expiry passes. That is what made
+    // streaming safe, and it means settling honestly is always the cheaper move.
+    rpc SettleEscrowedInferenceJob(SettleEscrowedInferenceJobRequest) returns (SettleEscrowedInferenceJobResponse) {}
+
+    // RecoverEscrowedInferenceJob returns the settlement for a funded job the
+    // buyer is no longer streaming. Input: the job ID and the authorization its
+    // reservation was opened with. Output: what the job produced and the
+    // transfer that settles it. Side effects: none - it reads.
+    //
+    // WHY THIS EXISTS. The settlement rides on the stream's last frame, so a
+    // buyer who cancels, reloads, or loses their connection mid-answer never
+    // receives it - and without it they cannot settle, which means the provider
+    // claims the WHOLE reservation at the expiry instead of the fraction the run
+    // actually cost. Streaming without this turns every cancelled request into a
+    // full-price one. It is idempotent and reads nothing the buyer has not paid
+    // for.
+    rpc RecoverEscrowedInferenceJob(RecoverEscrowedInferenceJobRequest) returns (RecoverEscrowedInferenceJobResponse) {}
 }

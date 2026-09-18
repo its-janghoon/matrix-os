@@ -1,5 +1,10 @@
 # Runbook: turning on spend budgets, at a height everyone agrees on
 
+> This was the chain's first rule change over money, and the procedure below is
+> the one every later one follows. For **inference escrow (protocol version 3)**,
+> read this document for the procedure and
+> [`escrow-activation.md`](escrow-activation.md) for what is different about it.
+
 This is a **rule change over money**, not a bug fix. It changes what a node DOES
 with a transaction rather than only what it refuses, so a node running the old
 rules and a node running the new ones apply the same block and reach different
@@ -36,14 +41,81 @@ without.**
 
 - [ ] **Four validators, all healthy.** Three tolerates zero failures, so the
       upgrade itself would pause block production. With four, one node lagging is
-      survivable. Check with the validator-join runbook's liveness gate, not with
-      "the height is going up" - an idle chain produces no blocks.
+      survivable.
+
+      Health here is **not** "the height is going up". A chain with no
+      transactions produces no blocks - an idle proposer returns nil rather than
+      minting an empty one - so a perfectly healthy quiet network looks stalled
+      by that test, and an operator who believes it will go looking for a fault
+      that is not there. The property this upgrade actually depends on is that
+      every validator has applied the same blocks to the same balances, and
+      `matrix_getChainInfo` reports exactly that:
+
+      ```
+      curl -s -X POST http://127.0.0.1:9095 -H "content-type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"matrix_getChainInfo","params":[]}'
+      ```
+
+      Run it on every validator - but do NOT compare the heads it returns.
+      Reading four machines takes time, a block committing in between leaves the
+      last one a height ahead, and a node at a different height legitimately has
+      a different head. Comparing those reports a fork that is not there, which
+      on this network it duly did, minutes after an activation. The engine knows
+      the rule and states it plainly:
+
+      ```go
+      // Only comparable at the same height: a peer one block ahead legitimately
+      // has a different head and a different ledger.
+      if ann.Height != e.height { return "" }
+      ```
+
+      So compare a NAMED height instead. Take the lowest height any validator
+      reports, and ask every one of them for that block by number:
+
+      ```
+      curl -s -X POST http://127.0.0.1:9095 -H "content-type: application/json" \
+        -d '{"jsonrpc":"2.0","id":1,"method":"eth_getBlockByNumber","params":["0x5f0",false]}'
+      ```
+
+      Every validator must return the same `hash` for it. Same height asked of
+      every node means an identical hash is required, and a different one is a
+      real fork rather than a timing artefact - which is the one condition under
+      which a rule change must not be scheduled at all. A spread of a block or
+      two between nodes is the sweep taking time; a large one is a node that has
+      stopped keeping up, and past an activation that is what a node missing the
+      new rules looks like.
 - [ ] **Every validator on the new binary**, verified individually. Not "the
       release is out".
-- [ ] **A height chosen with room.** Current height plus enough blocks that the
-      slowest operator has hours, not minutes. At a 3s round timeout a thousand
-      blocks is about fifty minutes of chain time, and rather more of wall clock
-      on an idle network.
+- [ ] **A height chosen from this chain's measured block rate.** A lead quoted
+      in blocks means nothing on its own: the round timeout is a floor, not a
+      cadence, and a network whose traffic is a handful of jobs a day spends most
+      of its time producing no blocks at all. The same 2000 blocks is under an
+      hour on a busy chain and over a day on a quiet one - pick one from the
+      first number and the activation lands two days out without anyone noticing.
+
+      Sample the height twice, a couple of minutes apart, and derive the lead
+      from what comes back. Aim the activation at about an hour of WALL CLOCK,
+      with a floor of a couple of hundred blocks so a sudden burst of traffic
+      cannot overtake the rollout itself.
+
+## The script that does all of this
+
+[`scripts/rollout.sh`](../../scripts/rollout.sh) performs every step below with
+the gates already wired in - agreement before it starts, agreement after each
+node rejoins, the block rate measured rather than assumed, `-preflight-production`
+before any restart, and an automatic undo if a schedule lands on some nodes and
+not others. That last state is the one that splits a chain, so the script never
+stops in the middle of it: it either finishes everywhere or reverts everywhere.
+
+```
+export MATRIX_ROLLOUT_BOXES="validator-1|host|keyfile|validator
+validator-2|host|keyfile|validator
+gpu|host|keyfile|seller"
+./scripts/rollout.sh v0.4.0 2
+```
+
+The rest of this document is what it does and why, which is what you need when
+it refuses to proceed.
 
 ## Order, and why it is this order
 

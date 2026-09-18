@@ -58,14 +58,23 @@ node's `eth_rpc.addr`.
 Two ways to buy, and the difference is who holds your key. This is the decision
 that shapes your integration, so make it before writing code rather than after.
 
-| | Hosted wallet | Self-custody |
-| --- | --- | --- |
-| Protocol | OpenAI-compatible HTTP: `POST /v1/chat/completions` | `RunInferenceJob` over Connect |
-| Your credential | An API key the node operator issued you | Your own signing key |
-| Who can settle for you | The node, using a key it holds for your account | Only you |
-| Client libraries | Every OpenAI SDK, unchanged | The Matrix client or generated Connect stubs |
-| Streaming | Yes, SSE, as the SDKs expect | Yes |
-| Right for | An app whose operator also runs the node | A dApp, or any buyer who is not the operator |
+| | A. Hosted wallet | B. Self-custody | C. Self-custody, escrowed |
+| --- | --- | --- | --- |
+| Protocol | OpenAI-compatible HTTP: `POST /v1/chat/completions` | `RunInferenceJob` over Connect | Reserve, fund, stream, settle over Connect |
+| Your credential | An API key the node operator issued you | Your own signing key | Your own signing key |
+| Who can settle for you | The node, using a key it holds for your account | Only you | Only you |
+| Client libraries | Every OpenAI SDK, unchanged | The Matrix client or generated Connect stubs | The Matrix client or generated Connect stubs |
+| Signatures per request | None beyond the key | Two: authorise, then pay | Three: authorise, fund the cap, settle the actual |
+| Streaming | Yes, SSE, as the SDKs expect | **No** - the completion is withheld until you pay | Yes: the cap is already paid, so nothing is withheld |
+| Needs | Nothing | `connect.signed_writes` | `connect.signed_writes` and protocol version 3 |
+| Right for | An app whose operator also runs the node | A dApp, or any buyer who is not the operator | The same, when someone is watching the answer |
+
+**The streaming row is the whole difference between B and C**, and it is not a
+feature that was missing from B. The charge is unknowable until the work is done,
+so on B the node must run first and invoice second - and withholding the
+completion until the invoice is signed is the only thing that holds a buyer to
+the bargain. C gets around it by making you pay the most the job can cost BEFORE
+it starts, which leaves the text with nothing to protect.
 
 **The OpenAI-compatible route is custodial, and there is no signed variant of
 it.** That protocol identifies a caller by the API key alone and carries no
@@ -75,8 +84,8 @@ attached can drive every other surface and cannot buy inference.
 
 So the comfortable door is only open to you if the node operator custodies an
 account for you. If you are buying from a GPU owner you have never met, that is
-not a reasonable thing to ask of either of you, and the second door is the one
-you want.
+not a reasonable thing to ask of either of you, and one of the other two doors is
+the one you want.
 
 ## Path A: the OpenAI SDK, unchanged
 
@@ -202,6 +211,51 @@ matrix inference submit \
 Drop `--client-signed` and the node signs the payment with a key it holds for
 you, which is Path A's trust model wearing a different interface. If you are
 implementing Path B, `--client-signed` is the flag you are reproducing.
+
+**What it costs you: the answer cannot stream.** The charge is not knowable until
+the work is done, so the node runs first and invoices second, and the completion
+is WITHHELD until the invoice is signed. That withholding is the only thing
+holding you to the bargain - handing the text over early would hand over the
+leverage - so it is by construction, not by oversight. A reasoning model can
+spend a minute on working nobody is allowed to see yet, which is why
+`--progress` exists to say how far it has got. No completion text travels on
+that stream.
+
+## Path C: self-custody AND streaming, by paying the cap first
+
+Path B's silence has one cause: the amount is unknowable in advance. The
+RESERVATION is not. So you sign for `units x price` BEFORE the model starts, the
+provider holds the most the job can cost, and the answer streams because there is
+nothing left to withhold. The settlement then names what it really cost and
+consensus returns the difference.
+
+It needs a chain running **protocol version 3** and the same
+`connect.signed_writes: true` Path B does.
+
+```sh
+matrix inference submit --escrowed   --inference-addr <the SELLER's node>:9092   --buyer eth:0x<your-address>   --provider <the provider's id>   --model <model>   --prompt "hello"   --units 200   --wallet <path to your wallet file>
+```
+
+Four things to know before you implement it:
+
+- **Inference is served by the node that OWNS the provider.** A reserve sent
+  anywhere else is refused by a node that has never heard of the job. Reads can
+  go to any node; this cannot.
+- **Check the settlement before you sign it.** The node computes it and the node
+  is the seller's. Both the CLI and the browser recompute the ceiling from the
+  text that actually arrived and refuse rather than sign; a client that signs
+  whatever it is handed has given back the only leverage this path creates. The
+  reserve response carries `units_reserved` and `price_per_unit` so you can do
+  the conversion without an order book.
+- **Settle, or the provider claims the lot.** An unsettled reservation is the
+  provider's at its expiry (30 minutes by default). Settling honestly is always
+  cheaper, which is exactly why streaming is safe to offer.
+- **If you hang up, come back for the settlement.** It rides on the stream's last
+  frame, so a cancelled or dropped connection never receives one - and with
+  nothing to sign you pay the whole cap. `RecoverEscrowedInferenceJob` returns it
+  for a job you are no longer streaming, and the run is billed for the text that
+  reached you. Call it on restart rather than writing off the reservation. Ctrl-C
+  in the CLI does this for you.
 
 ## Step 3: check it before you ship it
 
