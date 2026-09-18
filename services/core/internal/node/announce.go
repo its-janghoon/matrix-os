@@ -68,8 +68,33 @@ func (n *Node) announceLoop(ctx context.Context, interval time.Duration) {
 }
 
 // announceOnce publishes every local provider that is currently sellable.
+//
+// It renews expiring quotes first, and that order is the point rather than a
+// detail. A quote's validity window is stamped once and never moved, so a
+// provider whose window ran out is no longer sellable: it drops out of
+// ListProviders below, which means this loop would stop announcing the very
+// provider it is here to keep visible, and every other node would then age it
+// out. Renewing first is what makes the re-announcing described above actually
+// self-healing, instead of self-healing right up until the first day elapses.
+//
+// Renewal runs even when there is nothing to announce to. A node with no
+// exchange still sells to buyers who reach it directly, and its order book
+// expires exactly the same way.
 func (n *Node) announceOnce(ctx context.Context) {
-	if n.exchange == nil || n.market == nil {
+	if n.market == nil {
+		return
+	}
+	// Logged because the absence of it is what hid the bug for a day. A
+	// renewal happens twice per window - twice a day on the default - so it is
+	// rare enough to say out loud, and an operator reading "restated its quote"
+	// is reading the one line that says this node is still on the market.
+	for _, id := range n.market.RenewProviderQuotes(time.Now().UTC()) {
+		if p, ok := n.market.GetProvider(id); ok {
+			fmt.Printf("Market: provider %s restated its quote at %d/unit, good until %s.\n",
+				id, p.PricePerUnit, p.ValidUntil.Format(time.RFC3339))
+		}
+	}
+	if n.exchange == nil {
 		return
 	}
 	node := n.announcingAccount()

@@ -436,6 +436,114 @@ func (m *Market) UpdateProviderQuote(id string, quote Provider) error {
 	return nil
 }
 
+// RenewProviderQuotes restates this node's own standing offers before they
+// expire, and returns the IDs it renewed.
+//
+// THE FAILURE IT FIXES. A quote carries a validity window - ObservedAt and
+// ValidUntil - stamped once, when the provider is registered or its price is
+// updated. Nothing moved it afterwards. The window's stated purpose is that
+// "providers refresh their quote through config or registration at least once
+// per day", and on a running node nothing performed that refresh: only a
+// restart did, because a restart re-applies the configured quote.
+//
+// So a seller that stayed up for a day disappeared. Past ValidUntil,
+// validateProviderQuoteForUse rejects the record, which takes it out of
+// ListProviders and ProvidersForModel - so the node stops offering it to
+// buyers, stops routing to it by model, and, because the announce loop walks
+// ListProviders, stops announcing it at all. Every other node then ages it out
+// when its receipts go stale. A healthy seller with a live backend, funded and
+// answering, left the entire network including its own order book, silently and
+// without logging a word. It came back only on the next restart, which is why
+// every rollout hid it.
+//
+// WHAT IT RENEWS AND WHAT IT WILL NOT. Only the window moves. Price, cost,
+// markup and quote identity are copied across untouched, so this can never put
+// terms on the market that the operator did not set - it restates the offer
+// already there rather than forming a new one.
+//
+// It leaves alone:
+//
+//   - A SUSPENDED provider. Suspension is the health check's word that the
+//     backend behind it stopped answering, and renewing would hold a dead
+//     seller in the directory. Falling out is the correct outcome there, and it
+//     is the one case where the old behaviour was right.
+//   - A record with no complete quote identity. Those are deliberately
+//     ineligible, and inventing a QuoteID or a version for one would
+//     misrepresent what the buyer is being offered.
+//   - A window that is still mostly ahead of it. Renewal is not free: a
+//     reservation names the exact window it accepted, so ReserveRemoteJob
+//     refuses a request built against a superseded one. Renewing on every
+//     announce - forty seconds apart - would reject buyers who read the
+//     directory a moment too early. Half the window spent is the trigger, which
+//     leaves a buyer the other half to act on what they read and renews twice
+//     per window however long the operator set it.
+//
+// The new window is the same LENGTH as the one it replaces, not the default, so
+// an operator who configured a short quote_ttl keeps getting a short one.
+//
+// QuoteVersion is bumped because the protocol requires it: a listener accepts a
+// moved validity window only under a strictly newer version, and treats an
+// equal-version announcement whose window differs as a contradiction to ignore.
+// The version is what carries the restatement across the network.
+func (m *Market) RenewProviderQuotes(now time.Time) []string {
+	now = now.UTC()
+
+	m.providersMu.Lock()
+	defer m.providersMu.Unlock()
+
+	var renewed []string
+	for id, p := range m.providers {
+		window, ok := quoteDueForRenewal(p, now)
+		if !ok {
+			continue
+		}
+		next := p
+		next.ObservedAt = now
+		next.ValidUntil = now.Add(window)
+		if p.QuoteVersion == ^uint64(0) {
+			// Nothing to bump to, and an equal version with a moved window is
+			// exactly what listeners refuse. Leaving it is honest: the operator
+			// has to restate the price to get a usable version again.
+			continue
+		}
+		next.QuoteVersion = p.QuoteVersion + 1
+		if err := m.persistProvider(next); err != nil {
+			// The record on disk still says what it said. Skipping keeps memory
+			// and store agreeing, and the next pass tries again while there is
+			// still half a window left to do it in.
+			continue
+		}
+		m.providers[id] = next
+		renewed = append(renewed, id)
+	}
+	sort.Strings(renewed)
+	return renewed
+}
+
+// quoteDueForRenewal reports whether a provider's window is more than half spent
+// and returns the length to restate it for.
+//
+// A window that has already fully elapsed is still renewable. The provider is
+// ineligible to sell in that state, not retired: this is the path that brings it
+// back, and refusing it would mean the one case that needs fixing is the one
+// case left broken.
+func quoteDueForRenewal(p Provider, now time.Time) (time.Duration, bool) {
+	if p.Suspended {
+		return 0, false
+	}
+	if p.PricePerUnit == 0 || p.QuoteID == "" || p.QuoteVersion == 0 || p.ObservedAt.IsZero() || p.ValidUntil.IsZero() {
+		return 0, false
+	}
+	window := p.ValidUntil.Sub(p.ObservedAt)
+	if window <= 0 {
+		return 0, false
+	}
+	if now.Before(p.ObservedAt.Add(window / 2)) {
+		return 0, false
+	}
+	return window, true
+}
+
 // SetProviderSuspended takes a provider off the market, or puts it back on. It
 // reports whether the flag actually changed, so a caller polling on an interval
 // can log a transition rather than the same state every tick.
