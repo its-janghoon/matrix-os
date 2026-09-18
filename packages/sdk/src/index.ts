@@ -1390,6 +1390,245 @@ export class MatrixClient {
     return decodeInferenceJob(record(out.job));
   }
 
+  // --- the ESCROWED path -----------------------------------------------------
+  //
+  // Four calls, and the order is the design: reserve, fund, stream, settle.
+  //
+  // It is the only path where a buyer keeps their own key AND watches the answer
+  // arrive. The other two each give up one of those. On the hosted path the node
+  // holds a key that can move everything in the account. On the client-signed
+  // path the buyer keeps their key and waits in silence, because the charge is
+  // unknowable until the work is done - so the node runs first, invoices second,
+  // and WITHHOLDS the completion until the invoice is signed. That withholding
+  // is the only enforcement there, which is why that path cannot stream.
+  //
+  // The amount is unknowable; the RESERVATION is not. Here the buyer funds
+  // `units x price` before the model starts, so the provider already holds the
+  // most the job can cost, the answer streams because there is nothing left to
+  // withhold, and consensus returns the difference at settlement.
+  //
+  // It needs a chain running protocol version 3.
+
+  /**
+   * Submits a job and names the reservation that will pay for it. Nothing runs
+   * and no token moves.
+   *
+   * The returned payment is the deposit to sign. Its recipient is the escrow
+   * ACCOUNT, whose name carries every term of the agreement - so signing that
+   * one transfer is agreeing to all of them, and signing anything else is
+   * refused.
+   *
+   * `unitsReserved` and `pricePerUnit` come back so you can check the deposit's
+   * arithmetic before funding it, and convert the settlement you are later asked
+   * to sign back into units. Without them a deposit is a number you cannot
+   * check.
+   */
+  async reserveInferenceEscrow(input: {
+    buyer: string;
+    provider: string;
+    model: string;
+    prompt?: string;
+    messages?: ChatMessage[];
+    maxTokens?: number;
+    temperature?: number;
+    unitsEstimate?: bigint | number;
+    /** The same shape runInferenceJob takes, and required for the same reason. */
+    authorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
+  }): Promise<{
+    payment: PaymentRequest;
+    job: InferenceJob;
+    escrowAccount: string;
+    claimableAt: bigint;
+    unitsReserved: bigint;
+    pricePerUnit: bigint;
+  }> {
+    const out = await this.call(INFERENCE, 'ReserveInferenceEscrow', {
+      buyer: input.buyer,
+      provider: input.provider,
+      model: input.model,
+      prompt: input.prompt ?? '',
+      messages: input.messages ?? [],
+      maxTokens: input.maxTokens ?? 0,
+      temperature: input.temperature ?? 0,
+      unitsEstimate: String(input.unitsEstimate ?? 0),
+      ...(input.authorization
+        ? {
+            authorization: {
+              publicKey: toBase64(input.authorization.publicKey),
+              timestamp: String(input.authorization.timestamp),
+              signature: toBase64(input.authorization.signature),
+            },
+          }
+        : {}),
+    });
+    return {
+      payment: decodePaymentRequest(record(out.payment)),
+      job: decodeInferenceJob(record(out.job)),
+      escrowAccount: str(out.escrowAccount),
+      claimableAt: big(out.claimableAt),
+      unitsReserved: big(out.unitsReserved),
+      pricePerUnit: big(out.pricePerUnit),
+    };
+  }
+
+  /**
+   * Submits the signed deposit and waits for it to COMMIT AND APPLY.
+   *
+   * The wait is the safety of this path, not a nicety. A deposit sitting in the
+   * mempool may still be skipped as unaffordable when it is applied, and a
+   * provider that started streaming against one would be giving the answer away.
+   */
+  async fundInferenceEscrow(input: {
+    payment: PaymentRequest;
+    fromPublicKey: Uint8Array;
+    signature: Uint8Array;
+  }): Promise<InferenceJob> {
+    const out = await this.call(INFERENCE, 'FundInferenceEscrow', {
+      id: input.payment.jobId,
+      fromPublicKey: toBase64(input.fromPublicKey),
+      to: input.payment.to,
+      amount: String(input.payment.amount),
+      nonce: String(input.payment.nonce),
+      timestamp: String(input.payment.timestamp),
+      prevHash: toBase64(input.payment.prevHash),
+      signature: toBase64(input.signature),
+    });
+    return decodeInferenceJob(record(out.job));
+  }
+
+  /**
+   * Runs a funded job and streams the answer as it is produced, ending with the
+   * settlement to sign.
+   *
+   * CHECK THE SETTLEMENT BEFORE SIGNING IT. The node computed it and the node is
+   * the seller's; signing the number you were handed gives back the one piece of
+   * leverage this path creates. Compute the ceiling from the text that actually
+   * arrived - the completion AND the working, because the bill counts both - and
+   * refuse a bill the answer cannot account for.
+   *
+   * The authorization is the SAME one the reservation was opened with, presented
+   * again. Streaming otherwise takes a job id and nothing else, and a job id is
+   * not a secret: it appears in logs, in a URL, in a client's own storage.
+   *
+   * `cutShort` on the final frame means the run stopped before the model was
+   * done - you hung up, or the provider dropped - so the text is what arrived
+   * and the settlement is for that much. The frame is still sent in that case,
+   * because the settlement is on it.
+   */
+  async *streamEscrowedInferenceJob(input: {
+    id: string;
+    authorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
+  }): AsyncGenerator<
+    {
+      delta: string;
+      jobId: string;
+      streamedOneShot: boolean;
+      cutShort: boolean;
+      payment?: PaymentRequest;
+      job?: InferenceJob;
+    },
+    void,
+    undefined
+  > {
+    const frames = this.callStreaming(INFERENCE, 'StreamEscrowedInferenceJob', {
+      id: input.id,
+      ...(input.authorization
+        ? {
+            authorization: {
+              publicKey: toBase64(input.authorization.publicKey),
+              timestamp: String(input.authorization.timestamp),
+              signature: toBase64(input.authorization.signature),
+            },
+          }
+        : {}),
+    });
+    for await (const raw of frames) {
+      const hasJob = raw.job !== undefined && raw.job !== null;
+      const hasPayment = raw.payment !== undefined && raw.payment !== null;
+      yield {
+        delta: str(raw.delta),
+        jobId: str(raw.jobId),
+        streamedOneShot: raw.streamedOneShot === true,
+        cutShort: raw.cutShort === true,
+        ...(hasPayment ? { payment: decodePaymentRequest(record(raw.payment)) } : {}),
+        ...(hasJob ? { job: decodeInferenceJob(record(raw.job)) } : {}),
+      };
+    }
+  }
+
+  /**
+   * Submits the signed settlement: consensus pays the actual to the provider and
+   * returns the rest to the payer.
+   *
+   * A buyer who never calls this does not keep the money. The provider claims
+   * the whole reservation once its expiry passes, which is what made streaming
+   * safe to offer - and it means settling honestly is always the cheaper move.
+   */
+  async settleEscrowedInferenceJob(input: {
+    payment: PaymentRequest;
+    fromPublicKey: Uint8Array;
+    signature: Uint8Array;
+  }): Promise<InferenceJob> {
+    const out = await this.call(INFERENCE, 'SettleEscrowedInferenceJob', {
+      id: input.payment.jobId,
+      fromPublicKey: toBase64(input.fromPublicKey),
+      to: input.payment.to,
+      amount: String(input.payment.amount),
+      nonce: String(input.payment.nonce),
+      timestamp: String(input.payment.timestamp),
+      prevHash: toBase64(input.payment.prevHash),
+      signature: toBase64(input.signature),
+    });
+    return decodeInferenceJob(record(out.job));
+  }
+
+  /**
+   * Collects the settlement for a funded job you are no longer streaming.
+   *
+   * The settlement rides on the stream's last frame, so a client that crashed,
+   * hung up, or refused the bill never received one - and without it the
+   * provider claims the WHOLE reservation at the expiry rather than the fraction
+   * the run cost. Call this on restart rather than writing the reservation off.
+   *
+   * It reads, it is idempotent, and it takes either credential: the
+   * authorization the reservation was opened with, if you still hold it, or a
+   * fresh ed25519 signature over the job id by the key that settles. Both prove
+   * the only thing this needs - that you are the party who will sign - and
+   * whoever can prove it could settle the job anyway.
+   */
+  async recoverEscrowedInferenceJob(input: {
+    id: string;
+    authorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
+    recoverAuthorization?: { publicKey: Uint8Array; timestamp: bigint | number; signature: Uint8Array };
+  }): Promise<{ payment: PaymentRequest; job: InferenceJob; cutShort: boolean }> {
+    const out = await this.call(INFERENCE, 'RecoverEscrowedInferenceJob', {
+      id: input.id,
+      ...(input.authorization
+        ? {
+            authorization: {
+              publicKey: toBase64(input.authorization.publicKey),
+              timestamp: String(input.authorization.timestamp),
+              signature: toBase64(input.authorization.signature),
+            },
+          }
+        : {}),
+      ...(input.recoverAuthorization
+        ? {
+            recoverAuthorization: {
+              publicKey: toBase64(input.recoverAuthorization.publicKey),
+              timestamp: String(input.recoverAuthorization.timestamp),
+              signature: toBase64(input.recoverAuthorization.signature),
+            },
+          }
+        : {}),
+    });
+    return {
+      payment: decodePaymentRequest(record(out.payment)),
+      job: decodeInferenceJob(record(out.job)),
+      cutShort: out.cutShort === true,
+    };
+  }
+
   async fulfillInferenceJob(id: string): Promise<InferenceJob> {
     const out = await this.call(INFERENCE, 'FulfillInferenceJob', { id });
     return decodeInferenceJob(record(out.job));
