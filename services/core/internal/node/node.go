@@ -1836,6 +1836,12 @@ func (n *Node) Start() error {
 		openAI, err := openaiapi.NewHandler(openaiapi.Config{
 			Inference: n.inferenceSvc,
 			Router:    n.market,
+			// What the rest of the market sells. It never routes - this node
+			// fulfils only what it serves - but without it both read-shaped
+			// answers describe this node's own shelf in words that sound like
+			// they describe the network, which is wrong on exactly the node a
+			// newcomer is pointed at: a validator, which hosts nothing.
+			Directory: exchangeDirectory{node: n},
 			Auth:      openAIAuth(marketAuth),
 			// Persisted, because the failure it prevents outlives a process: a node
 			// that restarted between a charge and the retry of it would forget the
