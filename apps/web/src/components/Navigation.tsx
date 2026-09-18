@@ -98,16 +98,22 @@ export default function Navigation() {
     return () => window.removeEventListener('scroll', onScroll);
   }, []);
 
-  // Close desktop dropdowns on outside click or Escape.
+  // Close dropdowns AND the mobile menu on outside click or Escape.
+  //
+  // The mobile menu used to be exempt from both. It closed on a link tap and on
+  // the toggle, and on nothing else - so tapping the page behind it, or pressing
+  // Escape on a keyboard, left it open over the content it was covering.
   useEffect(() => {
     const onClickOutside = (event: MouseEvent) => {
       if (navRef.current && !navRef.current.contains(event.target as Node)) {
         setOpenMenu(null);
+        setIsMenuOpen(false);
       }
     };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpenMenu(null);
+        setIsMenuOpen(false);
       }
     };
     document.addEventListener('mousedown', onClickOutside);
@@ -118,18 +124,52 @@ export default function Navigation() {
     };
   }, []);
 
+  // The page must not scroll behind an open menu.
+  //
+  // It did, and on a phone that is the whole screen moving under a panel that
+  // stays put - a swipe meant to scroll the menu scrolled the page instead, and
+  // closing it left the reader somewhere they had not chosen to be.
+  useEffect(() => {
+    if (!isMenuOpen) return;
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, [isMenuOpen]);
+
+  // A route change closes it. Every link inside calls closeAll, but the back
+  // button does not, and neither does anything that navigates from elsewhere.
+  //
+  // Adjusted DURING RENDER rather than in an effect, which is React's own
+  // pattern for state that has to follow a changing input: an effect would
+  // paint the menu once over the new page and then close it.
+  const [lastPath, setLastPath] = useState(pathname);
+  if (pathname !== lastPath) {
+    setLastPath(pathname);
+    setIsMenuOpen(false);
+    setOpenMenu(null);
+    setOpenMobileGroup(null);
+  }
+
   const closeAll = () => {
     setIsMenuOpen(false);
     setOpenMenu(null);
     setOpenMobileGroup(null);
   };
 
+  // The bar is OPAQUE WHENEVER THE MENU IS OPEN, not only once the page has
+  // scrolled. At the top of a page it is transparent by design, and the mobile
+  // menu lives inside it - so opening the menu rendered nine product links
+  // straight over the hero headline, each reading through the other. The
+  // condition was never about scrolling; it is about whether the bar has content
+  // behind it that needs separating from.
   return (
     <nav
       ref={navRef}
       className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
-        scrolled
-          ? 'bg-black/70 backdrop-blur-xl border-b border-white/10 shadow-md'
+        scrolled || isMenuOpen
+          ? 'bg-black/95 backdrop-blur-xl border-b border-white/10 shadow-md'
           : 'bg-transparent border-b border-transparent'
       }`}
     >
@@ -236,7 +276,12 @@ export default function Navigation() {
 
         {/* Mobile Menu */}
         {isMenuOpen && (
-          <div className='lg:hidden py-4 border-t border-white/10'>
+          // BOUNDED AND SCROLLABLE. Four groups with the tallest expanded runs
+          // past a short phone's viewport, and an unbounded panel simply cuts
+          // off - the last links and the Get started button are there and
+          // unreachable. dvh rather than vh because a mobile browser's own
+          // chrome is part of what is left.
+          <div className='lg:hidden max-h-[calc(100dvh-4rem)] overflow-y-auto overscroll-contain py-4 border-t border-white/10'>
             <div className='flex flex-col gap-1'>
               {menus.map((menu) =>
                 menu.links ? (
@@ -278,19 +323,23 @@ export default function Navigation() {
                 )
               )}
 
-              <div className='mt-3 flex items-center gap-4 border-t border-white/10 pt-4'>
-                <a
-                  href={GITHUB_URL}
-                  className='text-grayscale-300 hover:text-white transition-colors'
-                  target='_blank'
-                  rel='noopener noreferrer'
-                  aria-label='GitHub'
-                >
-                  <GitHubIcon className='w-6 h-6' />
-                </a>
-                <Button href='/download' variant='primary' size='sm' className='w-full'>
+              {/* The button was `w-full` next to an icon in the same flex row,
+                  so it pushed the icon to the edge and overhung the panel. It
+                  gets the row; the icon sits under it. */}
+              <div className='mt-3 flex flex-col gap-4 border-t border-white/10 pt-4'>
+                <Button href='/download' variant='primary' size='sm' className='w-full' onClick={closeAll}>
                   Get started
                 </Button>
+                <a
+                  href={GITHUB_URL}
+                  className='inline-flex items-center gap-2 text-sm text-grayscale-300 transition-colors hover:text-white'
+                  target='_blank'
+                  rel='noopener noreferrer'
+                  onClick={closeAll}
+                >
+                  <GitHubIcon className='w-5 h-5' />
+                  GitHub
+                </a>
               </div>
             </div>
           </div>
