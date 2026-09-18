@@ -17,6 +17,7 @@ import {
   wholeMatrixToNativeBaseUnits,
   type PendingBridgeLock,
 } from '@/lib/bridge/lock';
+import { accountIdProblem, canonicalAccountId } from '@/lib/wallet/account';
 import { connectMetamask, metamaskAvailable, type EvmSigner } from '@/lib/wallet/metamask';
 import { getBalance, reportProblem } from '@/lib/wallet/node';
 import { ATTESTOR_THRESHOLD, FOUNDER_ALLOCATION_WHOLE, addressUrl, launchFacts, txUrl } from '@/lib/launch';
@@ -174,16 +175,27 @@ export default function BridgePage() {
     }
   };
 
+  // Derived rather than stored: it is a pure function of the field, so it can
+  // never fall out of step with what is on screen.
+  const recipientProblem = accountIdProblem(nativeRecipient);
+
   const onBurn = async () => {
     if (!wallet || !config || chainId !== config.chain.id) return;
     setBusy('burn');
     setProblem('');
     try {
+      // Settled here because the next step is irreversible. The burn destroys
+      // the wrapped token on Base and names this account for the native
+      // release, so a recipient nobody controls loses the money on both chains
+      // at once, with no retry. An ethereum address is displayed in its
+      // mixed-case EIP-55 form and keyed in lowercase, so the string a person
+      // pastes is not the string the ledger looks up.
+      const releaseTo = canonicalAccountId(nativeRecipient);
       const hash = await simulateAndWriteBurn(
         wallet,
         config,
         wholeMatrixToErc20BaseUnits(burnAmount),
-        nativeRecipient,
+        releaseTo,
       );
       setBurnTx(hash);
       setStatus('Burn transaction submitted. Native release follows the validator-observed Burned event.');
@@ -342,8 +354,21 @@ export default function BridgePage() {
             <label className='mt-4 block text-sm text-gray-300' htmlFor='burn-amount'>Whole wMATRIX to burn</label>
             <input id='burn-amount' className={`${FIELD} mt-1`} inputMode='numeric' value={burnAmount} onChange={(event) => setBurnAmount(event.target.value)} />
             <label className='mt-4 block text-sm text-gray-300' htmlFor='native-recipient'>Native recipient account</label>
-            <input id='native-recipient' className={`${FIELD} mt-1 font-mono`} value={nativeRecipient} onChange={(event) => setNativeRecipient(event.target.value)} spellCheck={false} />
-            <button className={`${PRIMARY} mt-4`} disabled={!wallet || wrongChain || busy !== '' || !burnAmount || !nativeRecipient.trim()} onClick={() => void onBurn()}>
+            <input
+              id='native-recipient'
+              className={`${FIELD} mt-1 font-mono`}
+              value={nativeRecipient}
+              onChange={(event) => setNativeRecipient(event.target.value)}
+              spellCheck={false}
+              aria-invalid={recipientProblem !== null}
+              aria-describedby={recipientProblem ? 'native-recipient-problem' : undefined}
+            />
+            {/* Said here rather than thrown after the click, because after the
+                click there is a burned token on Base and nothing to retry. */}
+            {recipientProblem ? (
+              <p id='native-recipient-problem' role='alert' className='mt-2 text-sm text-red-300'>{recipientProblem}</p>
+            ) : null}
+            <button className={`${PRIMARY} mt-4`} disabled={!wallet || wrongChain || busy !== '' || !burnAmount || !nativeRecipient.trim() || recipientProblem !== null} onClick={() => void onBurn()}>
               {busy === 'burn' ? 'Simulating and submitting…' : 'Simulate and burn (you pay gas)'}
             </button>
             {burnTx ? <ExplorerLink explorer={config.chain.explorerUrl} hash={burnTx} label='View burn transaction' /> : null}
