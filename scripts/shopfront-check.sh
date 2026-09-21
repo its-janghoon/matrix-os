@@ -104,9 +104,27 @@ except ValueError:
     print("UNREACHABLE\t" + raw.splitlines()[0][:120])
     sys.exit(0)
 
+# A refusal is not an empty shop.
+#
+# Connect errors come back as JSON too - {"code":"resource_exhausted",
+# "message":"too many requests: slow down and retry"} - and that object has no
+# "providers" key, so reading it with .get(...) or [] turned every refusal into
+# "this node has no sellers". That is the exact false emptiness this script
+# exists to catch, reproduced one level down, and it is how a node that was
+# rate-limiting a too-eager checker got reported as a dead marketplace.
+#
+# So the distinction is drawn on the key, not on the count. An answer with no
+# providers key never described a directory at all.
+if "code" in doc and "providers" not in doc:
+    print("REFUSED\t{}: {}".format(doc.get("code"), (doc.get("message") or "")[:100]))
+    sys.exit(0)
+if "providers" not in doc:
+    print("REFUSED\tthe answer carried no directory: " + raw[:90])
+    sys.exit(0)
+
 providers = doc.get("providers") or []
 if not providers:
-    print("EMPTY\tthe node answered, and named no sellers")
+    print("EMPTY\tthe node answered with a directory, and it names no sellers")
     sys.exit(0)
 
 lines = []
@@ -149,6 +167,13 @@ for node in "${NODES[@]}"; do
     EMPTY)
       info "$detail"
       empty=$((empty + 1))
+      ;;
+    REFUSED)
+      # Counted with unreachable, not with empty. A node that declined to answer
+      # said NOTHING about whether a seller exists, and filing it under "no
+      # sellers" is how a rate limit becomes an outage report.
+      info "$detail"
+      unreachable=$((unreachable + 1))
       ;;
     *)
       info "$detail"
