@@ -1056,6 +1056,12 @@ func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
 	if err := e.rejectNonCanonicalRecipient(tx); err != nil {
 		return err
 	}
+	// Refuse a budget close this node can already see will move nothing, so the
+	// submitter is told instead of watching a valid transaction commit and do
+	// nothing. Submit-time only; see rejectUnauthorizedBudgetClose.
+	if err := rejectUnauthorizedBudgetClose(tx, time.Now().UTC().Unix()); err != nil {
+		return err
+	}
 	key := mempoolKey(tx)
 	e.mu.Lock()
 	publishMembership := false
