@@ -8,8 +8,7 @@ what to know before changing consensus - see
 [`docs/handoff-archive.md`](docs/handoff-archive.md). That file is history and
 says so. Operating procedure lives in [`docs/runbooks/`](docs/runbooks/).
 
-**State of `main`: `9b5957d`, plus the script fixes on
-`claude/gpu-model-serving-provider-k9ohci`.**
+**State of `main`: `3fbe110`. Nothing is waiting on a branch.**
 Last verified 2026-09-21.
 
 ---
