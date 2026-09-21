@@ -116,32 +116,48 @@ string as `tx.To` and credited it. The recipient is inside the signature, so a
 node cannot rewrite it - refusal is the only move, and refusal changes block
 validity, which is why this needed a version and a height rather than a restart.
 
-### 2. A provider that has fallen off consensus keeps selling
+### 2. A provider that has fallen off consensus keeps selling - CLOSED
 
-A seller keeps announcing and taking reservations when its node has stopped
-participating in consensus. Settlement goes through consensus, so a buyer is
-routed to a seller that cannot complete the transaction.
+A seller kept announcing and taking reservations when its node had stopped
+participating in consensus. Settlement goes through consensus, so a buyer was
+routed to a seller that could not complete the transaction.
 
-Not the same as `node/inference_health.go`, which watches the MODEL SERVER and
-is already correct and fail-closed. Nothing watches the node's own consensus
-participation.
+**The signal is round-level, not height.** `Height()` is the obvious candidate and
+is the wrong one, for the idle-chain reason above: no blocks are minted on a quiet
+network, so a height-watching seller takes itself off the market for being unbusy.
+A round times out every `round_timeout` and rotates the leader, so proposals and
+votes flow whether or not anything commits. The engine now records when a verified
+proposal or vote from ANOTHER validator last arrived, and
+`ParticipatingInConsensus()` reads it against four worst-case rounds of silence,
+floored at 10s because `round_timeout` is configurable down to milliseconds.
 
-**Why it is not a small fix.** The engine exposes no participation signal.
-`Height()` is the obvious candidate and is the wrong one, for the idle-chain
-reason above. The right signal is round-level: a round times out every
-`round_timeout` and rotates the leader, so consensus messages flow even when no
-block is minted. "I have not heard a vote or proposal in N rounds" means
-partitioned. That means adding a last-heard timestamp to the engine's receive
-path and having `announceable()` and the reservation path consult it.
+Recorded after verification and after the author is confirmed to be in the set, so
+a peer cannot forge it, and never for this node's own messages, since a node alone
+in a partition still proposes to itself and votes for its own proposals.
 
-**Decided: stop selling immediately, on the first missed signal.** Same answer
-`inference_health.go` reached for the backend case, and for the same reason: the
-cost of the two mistakes is not symmetric. Refusing to sell while partitioned
-loses a sale; selling while partitioned takes a buyer's money for work that
-cannot settle. A grace window is the option that has to justify itself, and
-"partitions are often transient" is an argument about frequency, not about who
-pays when it happens. Announcing resumes by itself once votes are heard again,
-so the seller's own recovery is the grace window.
+Consulted in two places. `announceOnce` falls silent, which is already the signal
+a dead node sends and the one every listener ages a provider out on. The
+reservation path refuses through a settlement guard the node installs on the
+inference service, checked before capacity is held - so a buyer who reached the
+node directly is told before they have committed anything.
+
+Two deliberate non-behaviours. A validator set of ONE is always participating:
+there is nobody to hear from, so silence carries no information, and a devnet
+would otherwise never sell. A node that has heard nothing YET is not
+participating: a fresh start is indistinguishable from a dead network, so it fails
+closed and sells within a round of hearing one.
+
+Work already reserved is never cancelled. A partition cannot be told apart from a
+node that was mid-settlement, and abandoning funded reservations on that evidence
+is the more expensive mistake - the same conclusion `inference_health.go` reached
+about killing live jobs.
+
+**Decided: immediately, on the first missed signal, and no grace window.** The two
+mistakes do not cost the same. Refusing to sell while partitioned loses a sale;
+selling while partitioned takes a buyer's money for work that cannot settle.
+"Partitions are usually transient" is a claim about how often the mistake happens,
+not about who pays when it does. The seller's own recovery is the grace window:
+announcing resumes on the next tick after one message is heard.
 
 ### 3. Let the OpenAI door actually buy from a remote seller
 
@@ -169,6 +185,20 @@ Steps 3-5 are the substantial part, including what happens when the seller dies
 mid-stream after the reservation is funded. Comparable in size to the escrow work.
 
 ### 4. Smaller, self-contained
+
+Closed in this pass: **an expired budget now comes back by itself.** "At and after
+the expiry anyone may close a budget" was a rule nobody acted on, so a remaining
+balance sat in escrow until its buyer happened to return to `/chat`. Every node now
+scans the ledger each minute for `spend/escrow/` accounts past their expiry with a
+balance, and submits the close the rules already allow. It needs no protocol
+version: the refund destination is inside the account's NAME, so the sweeper
+chooses nothing but when to ask. The nonce and timestamp are derived from the terms
+rather than from the clock, which is what makes running it every minute idempotent
+- every tick produces byte-identical bytes, so the mempool dedups them and the
+committed set refuses the rest as a replay. Watch it with
+`journalctl -u matrixd | grep 'submitted a close'`.
+
+Still open:
 
 - **A buyer's default deadline silently overrides the provider's
   `request_timeout`.** A buyer who sets nothing gets a default that can be

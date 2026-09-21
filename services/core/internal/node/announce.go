@@ -97,6 +97,18 @@ func (n *Node) announceOnce(ctx context.Context) {
 	if n.exchange == nil {
 		return
 	}
+	// A node that has fallen off consensus cannot settle, so it must not be in
+	// anybody's directory. Checked once per tick rather than per provider: it is
+	// a property of this NODE, and asking per provider would suggest otherwise.
+	//
+	// Falling silent rather than un-announcing, because that is already the
+	// signal a dead node sends and every listener already ages a provider out on
+	// it. There is nothing to invent.
+	if participating, silence := n.participatingInConsensus(); !participating {
+		n.reportConsensusSilence(silence)
+		return
+	}
+	n.clearConsensusSilence()
 	node := n.announcingAccount()
 	if node == nil {
 		// Nothing to sign with. A node with no consensus identity is not one a
