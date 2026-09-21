@@ -134,6 +134,50 @@ func verifySpendTx(tx *token.Transaction) error {
 	return fmt.Errorf("%w: %q is not a budget operation", ErrInvalidMessage, tx.To)
 }
 
+// rejectUnauthorizedBudgetClose refuses, AT SUBMIT ONLY, a close that this node
+// can already see will move nothing.
+//
+// THE SILENCE IT REPLACES. Before expiry only the buyer may close a budget, and
+// applySpendOperation enforces that by returning no effect. So a close signed by
+// any other key - the delegate, most plausibly, since that is the key a page
+// holds - is a perfectly valid transaction: it is gossiped, proposed, committed,
+// and does nothing. The submitter is told it succeeded, the balance does not
+// move, and there is no error anywhere to explain why. "The money will not come
+// back and nothing says why" is the worst shape a money path can have.
+//
+// WHY SUBMIT AND NOT BLOCK VALIDATION. Refusing it in block validation would
+// change which blocks are valid, which needs a protocol version and an
+// activation height - a large change to report a mistake nobody benefits from
+// making. At submit it is mempool policy: this node declines to carry the
+// transaction and says why, while a block that contains one stays exactly as
+// valid as it was. The apply-time rule is unchanged and remains the one that
+// actually protects the balance.
+//
+// Wall clock rather than a block timestamp, for the same reason: this is advice
+// to a submitter, not a consensus judgement. A close sitting within a round of
+// the expiry is accepted either way, because at and after expiry ANYONE may
+// close - that is what stops a balance being stranded by a buyer who has lost
+// their key, and it must not be narrowed here.
+func rejectUnauthorizedBudgetClose(tx *token.Transaction, now int64) error {
+	if !strings.HasPrefix(tx.To, token.SpendClosePrefix) {
+		return nil
+	}
+	terms, err := token.ParseSpendClose(tx.To)
+	if err != nil {
+		// A close nobody can parse is refused by verifySpendTx already, and
+		// answering here too would report the wrong reason for it.
+		return nil
+	}
+	if now >= terms.Expiry {
+		return nil
+	}
+	if tx.SenderID() == terms.Buyer {
+		return nil
+	}
+	return fmt.Errorf("%w: until the budget expires only %s may close it, and this is signed by %s",
+		ErrInvalidMessage, terms.Buyer, tx.SenderID())
+}
+
 // applySpendOperation performs one budget operation against the ledger.
 //
 // blockTime is the BLOCK's timestamp and never this node's clock. Four nodes
