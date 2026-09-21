@@ -1,6 +1,7 @@
 package token
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -30,8 +31,10 @@ import (
 // protects anybody. Canonicalizing before signing needs neither: the signed
 // payload carries the right id from the start, every node applies it unchanged,
 // and no honest client can build the broken transaction in the first place. A
-// consensus refusal is still worth having against a hand-rolled client, and is
-// the follow-up rather than the thing that has to land first.
+// consensus refusal is still worth having against a hand-rolled client, and it
+// is RequireCanonicalEthRecipient below, gated on
+// consensus.ProtocolVersionCanonicalEthRecipient - the client rule is what
+// protects people, and the chain rule is what closes the client nobody wrote.
 //
 // WHY A WRONG CHECKSUM IS REFUSED RATHER THAN LOWERCASED. Lowercasing a
 // mistyped address would strand the money just as completely, at a different
@@ -75,6 +78,46 @@ func CanonicalAccountID(id string) (string, error) {
 		}
 	}
 	return EthAccountID(addr), nil
+}
+
+// ErrNonCanonicalRecipient marks an id that names an Ethereum-controlled account
+// in a form the ledger does not key that account by. It is a distinct sentinel
+// because consensus refuses such a transaction and has to be able to say which
+// rule refused it.
+var ErrNonCanonicalRecipient = errors.New("token: recipient is not the id the ledger keys that account by")
+
+// RequireCanonicalEthRecipient reports whether an id is already EXACTLY the form
+// the ledger keys the account by, for the one family of ids where the difference
+// strands money: Ethereum-controlled accounts.
+//
+// This is the consensus-side half of CanonicalAccountID, and it is deliberately
+// the same function rather than a second reading of the same rule. Anything
+// CanonicalAccountID returns is accepted here; anything it would have changed or
+// rejected is refused. So a client that canonicalizes before signing cannot
+// produce a transaction the chain then refuses, and no third reading of "which
+// account does this string name" can drift away from the other two.
+//
+// It answers only about `eth:` ids. An ed25519 id is raw hex with one form
+// already, and a reserved recipient carries its terms in the name, where case is
+// meaning rather than notation - checking those would refuse transactions that
+// have always been valid and cannot strand anything.
+//
+// The prefix is tested on the TRIMMED id, so " eth:0x…" is caught too: it does
+// not start with the prefix literally, but it keys an account nobody holds a key
+// for just as completely as a mixed-case address does.
+func RequireCanonicalEthRecipient(id string) error {
+	if !IsEthAccountID(strings.TrimSpace(id)) {
+		return nil
+	}
+	canonical, err := CanonicalAccountID(id)
+	if err != nil {
+		return err
+	}
+	if canonical != id {
+		return fmt.Errorf("%w: %q would be credited verbatim, but that address's account is keyed %q",
+			ErrNonCanonicalRecipient, id, canonical)
+	}
+	return nil
 }
 
 // MustCanonicalAccountID is CanonicalAccountID for ids this code built itself

@@ -91,23 +91,30 @@ what would have to be decided.
 
 ### 1. Consensus-side refusal of a non-canonical `eth:` recipient
 
-PR #23 closed every client path, but a hand-rolled client can still strand money:
-consensus accepts any string as `tx.To` and credits it.
+**The rule is written and gated; what remains is scheduling it.**
+`ProtocolVersionCanonicalEthRecipient = 4` refuses a transaction whose recipient
+names an Ethereum-controlled account in any form but the one the ledger keys it
+by - at block validation, at proposal selection, and at submit, where the sender
+is actually told. The rule itself is `token.RequireCanonicalEthRecipient`, which
+calls `CanonicalAccountID` rather than restating it, so the client and the chain
+cannot come to different conclusions about which account a string names.
 
-The recipient is inside the signature, so a node cannot rewrite it - the only
-option is to refuse the transaction. **That changes block validity, so it needs
-a protocol version and an activation height**, scheduled the way version 3 was:
+To activate it, pick a height far enough out that every validator is on the new
+binary, and schedule it the way version 3 was:
 
 ```bash
-./scripts/rollout.sh <tag> <protocol-version>
+./scripts/rollout.sh <tag> 4
 ```
 
-Rule shape: if `tx.To` starts with `eth:` and is not exactly `eth:0x` plus 40
-lowercase hex, the transaction is invalid. Mirror `token.CanonicalAccountID` so
-the client and the chain cannot disagree about which account a string names.
+**Re-run the outside transfer audit before the height lands.** Afterwards a
+stranded balance can only have arrived before activation, so the audit stops
+being repeatable and becomes history.
 
-The audit above means this is preventive. Re-run it before the rule activates,
-since afterwards a stranded balance can only have arrived before activation.
+The background, for whoever schedules it: PR #23 closed every client path, but a
+hand-rolled client could still strand money, because consensus accepted any
+string as `tx.To` and credited it. The recipient is inside the signature, so a
+node cannot rewrite it - refusal is the only move, and refusal changes block
+validity, which is why this needed a version and a height rather than a restart.
 
 ### 2. A provider that has fallen off consensus keeps selling
 
@@ -127,19 +134,30 @@ block is minted. "I have not heard a vote or proposal in N rounds" means
 partitioned. That means adding a last-heard timestamp to the engine's receive
 path and having `announceable()` and the reservation path consult it.
 
-**Decision needed before implementing:** should a seller that has lost consensus
-stop selling immediately, or keep selling through a grace window?
-`inference_health.go` faces the same asymmetry for the backend case and chose
-fail-closed on the first failure, with the reasoning written out - but consensus
-partitions are more often transient than a dead model server.
+**Decided: stop selling immediately, on the first missed signal.** Same answer
+`inference_health.go` reached for the backend case, and for the same reason: the
+cost of the two mistakes is not symmetric. Refusing to sell while partitioned
+loses a sale; selling while partitioned takes a buyer's money for work that
+cannot settle. A grace window is the option that has to justify itself, and
+"partitions are often transient" is an argument about frequency, not about who
+pays when it happens. Announcing resumes by itself once votes are heard again,
+so the seller's own recovery is the grace window.
 
 ### 3. Let the OpenAI door actually buy from a remote seller
+
+**Decided: no. A validator stays a node that tells you who is selling.**
+Brokering would make it an intermediary holding a buyer's money in flight, which
+is a different trust and custody story than this network has agreed to, and
+steps 3-5 below are where a seller dying mid-stream turns into somebody else's
+funded reservation. `/v1` names the seller and the caller points at it. The
+sketch stays here because declining it is a decision that can be revisited, not
+a gap nobody noticed.
 
 PR #24 made `/v1` tell the truth about what the market sells and where to buy it,
 but a caller pointed at a validator still has to change `base_url` themselves.
 The door names the seller; it does not broker the purchase.
 
-Brokering means the node becomes an inference client of another node:
+Brokering would mean the node becomes an inference client of another node:
 
 1. pick a remote seller for the model - `exchange.ListRemoteProviders`, exists
 2. reserve against it - `marketexchange.SubmitRemoteJob`, exists, gossip-based
@@ -149,11 +167,6 @@ Brokering means the node becomes an inference client of another node:
 
 Steps 3-5 are the substantial part, including what happens when the seller dies
 mid-stream after the reservation is funded. Comparable in size to the escrow work.
-
-**Decide deliberately rather than drifting into it:** it changes what a
-validator IS. Today it is a node that can tell you who is selling. Brokering
-makes it an intermediary holding a buyer's money in flight, which is a different
-trust and custody story.
 
 ### 4. Smaller, self-contained
 
@@ -169,8 +182,12 @@ trust and custody story.
   path bills the seller for its own work. Needs a look on the GPU box.
 - **Re-encrypt or retire `prod-smoke-buyer.json`**, a plaintext key on the GPU
   box from an early smoke test.
-- **Tool calls do not exist in the protocol**, only in the UI's ambition. Either
-  build them or stop implying them.
+- **Tool calls do not exist in the protocol**, only in the UI's ambition.
+  **Decided: build them.** So the UI's claim stops being false by being made
+  true, rather than by being removed. Nothing is designed yet - the first
+  question is whether a tool call is a protocol-level field on the inference
+  job or something the seller's own model server handles behind the door, and
+  that answer decides whether this needs a protocol version at all.
 
 ### 5. Open questions with no owner
 

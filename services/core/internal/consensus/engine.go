@@ -1049,6 +1049,13 @@ func (e *Engine) submit(tx *token.Transaction, gossip bool) error {
 	if err := isPermanentlyInvalidReserved(tx); err != nil {
 		return err
 	}
+	// Refuse a recipient that names an Ethereum account in a form the ledger
+	// does not key it by, once the rules have that version in them. The transfer
+	// would succeed and land at an id no key controls, so telling the sender now
+	// is the only point at which anybody can still do something about it.
+	if err := e.rejectNonCanonicalRecipient(tx); err != nil {
+		return err
+	}
 	key := mempoolKey(tx)
 	e.mu.Lock()
 	publishMembership := false
@@ -1626,6 +1633,14 @@ func (e *Engine) buildProposalLocked() (*Block, *PolkaCertificate) {
 		if err := e.verifyReservedRecipientLocked(&e.mempool[i], e.height); err != nil {
 			continue
 		}
+		// Same reason, for the other rule that makes a block invalid: proposing a
+		// non-canonical `eth:` recipient after the activation height would get the
+		// whole block refused by every honest validator. Anything already in the
+		// mempool when the height arrives is skipped from here on rather than
+		// removed, which is the same shape as every other rule in this loop.
+		if err := e.verifyCanonicalRecipientLocked(&e.mempool[i], e.height); err != nil {
+			continue
+		}
 		if e.membershipMode == MembershipBondedOpen {
 			if _, identity, ok := openMembershipSlot(&e.mempool[i]); ok {
 				if _, exists := seenMembershipIdentities[identity]; exists {
@@ -1974,6 +1989,12 @@ func (e *Engine) verifyBlockForHeightLocked(b *Block, origin blockOrigin) error 
 		// the block and ErrNotValidator (or the parse error) to say why, so the
 		// reason is not flattened into a string.
 		if err := e.verifyReservedRecipientLocked(&b.Txs[i], b.Height); err != nil {
+			return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
+		}
+		// The rule that makes a stranded recipient a block-validity question
+		// rather than a client-side courtesy. Judged at b.Height, so a node
+		// syncing old blocks reaches the same verdict the network did.
+		if err := e.verifyCanonicalRecipientLocked(&b.Txs[i], b.Height); err != nil {
 			return fmt.Errorf("%w: tx %d: %w", ErrInvalidMessage, i, err)
 		}
 		if e.membershipMode == MembershipBondedOpen {
