@@ -18,7 +18,7 @@ repository root. For operating procedure, see [`runbooks/`](runbooks/).
 > **Launch-policy supersession (current).** This is a chronological engineering
 > handoff, so many later sections preserve claims that were true or proposed at
 > an earlier commit. All launch/operator claims below are superseded by
-> [`docs/runbooks/base-launch.md`](docs/runbooks/base-launch.md). Current policy
+> [`docs/runbooks/base-launch.md`](runbooks/base-launch.md). Current policy
 > is Base Sepolia (`84532`) before Base production (`8453`); 100 MATRIX minimum
 > lock; immutable 60M/6% cap; exact-backed immutable 50M/5% founder vault with a
 > 1-year cliff and 5-year total linear vesting (20% at cliff); fee 100 bp; an
@@ -462,7 +462,7 @@ bridge over its ledger.
 ## Launch decisions (supersedes earlier policy in this handoff)
 
 The authoritative values are documented and ordered in
-[`docs/runbooks/base-launch.md`](docs/runbooks/base-launch.md):
+[`docs/runbooks/base-launch.md`](runbooks/base-launch.md):
 
 - **Fee:** 100 basis points.
 - **Maintainer:** an explicit real Matrix account receives 5000 basis points of
