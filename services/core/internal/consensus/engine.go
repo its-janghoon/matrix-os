@@ -336,6 +336,13 @@ type Engine struct {
 	// outside e.mu. Read it with Load, never directly.
 	isValidator atomic.Bool
 
+	// lastHeardUnixNano is when a verified proposal or vote from ANOTHER
+	// validator last arrived. It is the round-level participation signal a
+	// seller consults before announcing or taking a reservation; see
+	// participation.go for why height is the wrong one. Written on the receive
+	// path outside e.mu, so it is atomic rather than guarded.
+	lastHeardUnixNano atomic.Int64
+
 	proposeInterval      time.Duration
 	disableTxGossip      bool
 	roundTimeout         time.Duration
@@ -1810,6 +1817,11 @@ func (e *Engine) handleProposal(ctx context.Context, msg transport.Message) {
 	if err := e.verifyProposalEnvelope(&p); err != nil {
 		return
 	}
+	// The envelope check has already established that the proposer is a validator
+	// and the leader for the round it claims, so this is a message only a real
+	// peer could have produced. A proposal for a FUTURE height still counts: it
+	// says the network is talking, which is the whole question.
+	e.noteConsensusHeard(p.ProposerID)
 	b := p.Block
 	support, err := e.acceptProposal(&b, p.Round, p.Justify)
 	if err != nil {
@@ -3026,6 +3038,9 @@ func (e *Engine) handleVote(ctx context.Context, msg transport.Message) {
 	if !e.vset().Contains(v.VoterID) {
 		return
 	}
+	// Recorded HERE and not earlier: a signal taken before Verify and the set
+	// check is one any peer could forge to keep a partitioned seller selling.
+	e.noteConsensusHeard(v.VoterID)
 	e.tallyVote(&v)
 	e.onVotes(ctx)
 }

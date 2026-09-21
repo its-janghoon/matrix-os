@@ -219,6 +219,16 @@ type Service struct {
 	// replayed into a second run of free work.
 	runAuth *runAuthSeen
 
+	// settlementGuard is asked, before capacity is reserved, whether a
+	// settlement could complete at all right now. Nil means unguarded.
+	//
+	// Injected by the node rather than read from here, because the answer is a
+	// property of the NODE - whether it is still part of consensus - and this
+	// service deliberately knows nothing about consensus. It is the same shape
+	// as RequireRunAuthorization: the node owns the policy, the service enforces
+	// it at the one place that matters.
+	settlementGuard func() error
+
 	mu   sync.Mutex
 	jobs map[string]*InferenceJob
 	// nonce is the next nonce this Service has HANDED OUT per buyer, which is not
@@ -326,6 +336,17 @@ func NewService(cfg Config) (*Service, error) {
 // providers (register a provider on the market and its backend here).
 func (s *Service) Registry() *Registry { return s.registry }
 
+// SetSettlementGuard installs the check asked before capacity is reserved.
+//
+// The guard returns an error when a settlement could not complete right now, and
+// that error is handed to the buyer unchanged - so it has to read as a reason,
+// not as a code. Passing nil removes the guard.
+//
+// Set once at startup, before the service serves anything, which is why it takes
+// no lock: a guard swapped under a live reservation would be a policy change
+// nobody asked for at a moment nobody chose.
+func (s *Service) SetSettlementGuard(guard func() error) { s.settlementGuard = guard }
+
 // SubmitInferenceJob reserves capacity for an inference job and records it in a
 // PENDING state. It reserves `units` capacity on the provider through
 // market.SubmitJob (which performs the affordability check against the buyer's
@@ -333,6 +354,15 @@ func (s *Service) Registry() *Registry { return s.registry }
 // the request will cost. No token moves at submit time; settlement happens on
 // FulfillJob. The provider must have a registered inference backend.
 func (s *Service) SubmitInferenceJob(buyer, providerID string, req InferenceRequest, unitsEstimate uint64) (*InferenceJob, error) {
+	// FIRST, because everything below holds something. A node that cannot settle
+	// must not reserve a buyer's capacity or take their funding: the whole point
+	// of refusing here is that the buyer is told before they have committed
+	// anything, rather than after the wait and the GPU time.
+	if s.settlementGuard != nil {
+		if err := s.settlementGuard(); err != nil {
+			return nil, err
+		}
+	}
 	if _, err := req.EffectiveMessages(); err != nil {
 		return nil, err
 	}

@@ -817,26 +817,29 @@ type Node struct {
 	config *Config
 	// configPath is the file this node was loaded from, kept so a reload reads
 	// the same file rather than a path passed in again from somewhere else.
-	configPath            string
-	p2pHost               *p2p.Host
-	transport             *transport.Transport
-	eventBus              *transport.EventBus
-	kvStore               *kv.Store
-	market                *market.Market
-	tokenChain            *token.Chain
-	treasury              *token.Treasury
-	exchange              *marketexchange.Exchange
-	consensus             *consensus.Engine
-	consensusAccount      *token.Account
-	evidence              *consensus.EvidenceStore
-	metrics               *metrics.Collector
-	adminServer           *admin.Server
-	marketServer          *marketapi.Server
-	ethRPCServer          *http.Server
-	inferenceHealthChecks []inferenceHealthCheck
-	inferenceSvc          *inference.Service
-	inferenceServer       *inferenceapi.Server
-	agentServer           *agentapi.Server
+	configPath       string
+	p2pHost          *p2p.Host
+	transport        *transport.Transport
+	eventBus         *transport.EventBus
+	kvStore          *kv.Store
+	market           *market.Market
+	tokenChain       *token.Chain
+	treasury         *token.Treasury
+	exchange         *marketexchange.Exchange
+	consensus        *consensus.Engine
+	consensusAccount *token.Account
+	// consensusSilenceReported keeps the partition log a transition rather than
+	// a line per announce tick. See consensus_participation.go.
+	consensusSilenceReported atomic.Bool
+	evidence                 *consensus.EvidenceStore
+	metrics                  *metrics.Collector
+	adminServer              *admin.Server
+	marketServer             *marketapi.Server
+	ethRPCServer             *http.Server
+	inferenceHealthChecks    []inferenceHealthCheck
+	inferenceSvc             *inference.Service
+	inferenceServer          *inferenceapi.Server
+	agentServer              *agentapi.Server
 	// unhealthy is why this node cannot serve, or nil when it can.
 	//
 	// It is here rather than inside a subsystem because two surfaces have to
@@ -1655,6 +1658,10 @@ func (n *Node) Start() error {
 		return fmt.Errorf("failed to create inference service: %w", err)
 	}
 	n.inferenceSvc = inferenceSvc
+	// Refuse a reservation this node could not settle. The announce gate keeps a
+	// partitioned node out of the directory; this catches the buyer who reached
+	// it directly, or who is acting on a listing from before the partition.
+	inferenceSvc.SetSettlementGuard(n.refuseIfNotInConsensus)
 
 	// Register the GPU-free echo backend for the configured demo provider so the
 	// node can fulfill inference jobs locally out of the box. This mirrors what
@@ -1725,6 +1732,10 @@ func (n *Node) Start() error {
 	// provider's capacity until this process restarts, which is a free way to
 	// take a competitor off the market, so sweep expired ones.
 	go n.expireUnpaidInferenceJobs()
+	// Return expired budgets to their owners. "Anyone may close an expired
+	// budget" was a rule nobody acted on, so the balance stayed in escrow until
+	// its buyer happened to come back. This is what makes the rule do something.
+	go n.sweepExpiredBudgets()
 	// Watch the ledger for a hold that never ends. It costs one atomic load
 	// every few seconds and is the difference between a wedged node that says
 	// so and one that keeps answering SERVING while it does nothing.
