@@ -19,6 +19,11 @@
 # actually reads. A node that is up but selling nothing is a FAILURE here, which
 # is the whole point - "the process is running" was never the question.
 #
+# EXIT CODES. 0 every node offers a seller. 1 the marketplace is genuinely
+# empty, or only part of the network can hear the seller. 2 this says nothing -
+# a node could not be reached at all. 3 there is stock, and a node asked the
+# checker to slow down; nothing is wrong.
+#
 # WHAT IT DOES NOT CHECK. Whether a seller can actually serve a prompt. That
 # costs money and needs a wallet, and escrow-smoke.sh is where it belongs. This
 # answers the cheaper question that comes first: is there anything to buy?
@@ -153,6 +158,7 @@ info "(include_remote, the same call the marketplace page makes)"
 selling=0
 empty=0
 unreachable=0
+refused=0
 for node in "${NODES[@]}"; do
   out=$(ask "$node" | summarize)
   verdict=$(printf '%s' "$out" | head -1 | cut -f1)
@@ -171,9 +177,12 @@ for node in "${NODES[@]}"; do
     REFUSED)
       # Counted with unreachable, not with empty. A node that declined to answer
       # said NOTHING about whether a seller exists, and filing it under "no
-      # sellers" is how a rate limit becomes an outage report.
+      # sellers" is how a rate limit becomes an outage report. Tracked separately
+      # as well, because "it turned me away" and "it never spoke" need different
+      # advice: one is a checker being too eager, the other is a broken address.
       info "$detail"
       unreachable=$((unreachable + 1))
+      refused=$((refused + 1))
       ;;
     *)
       info "$detail"
@@ -224,8 +233,17 @@ fi
 # a visitor sent to it sees nothing - but it is a different one, and calling it
 # out separately keeps "the marketplace is empty" meaning only that.
 if [ "$unreachable" -gt 0 ]; then
-  info "FAIL: every node that answered offers a seller, but $unreachable did not answer."
-  info "The marketplace has stock. Check DNS, TLS and the address for the ones that are silent."
+  info "The marketplace has stock: every node that answered offers a seller."
+  if [ "$refused" -eq "$unreachable" ]; then
+    # Nothing is wrong with the network. This is the node telling the checker to
+    # slow down, which running it on a loop during a rollout will do.
+    info "$refused node(s) turned this check away rather than failing to answer."
+    info "That is a rate limit, not an outage - wait a few minutes and run it again."
+    exit 3
+  fi
+  info "$unreachable node(s) did not answer at all."
+  [ "$refused" -gt 0 ] && info "($refused of those turned the check away, which is a rate limit and not an outage.)"
+  info "Check DNS, TLS and the address for the ones that are silent."
   exit 2
 fi
 
