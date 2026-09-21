@@ -33,6 +33,8 @@ import { connectMetamask, isEvmSigner, MetamaskSigner, metamaskAvailable } from 
 import type { Signer } from '@/lib/wallet/signer';
 import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
 
+import { StrandedBudget } from './ui';
+
 /**
  * A chat client that holds its own key.
  *
@@ -111,9 +113,25 @@ function Chat() {
   // after mount. The window guard is for the server render, where the first
   // paint is the "looking for a wallet" branch on both sides - so there is
   // nothing here to mismatch on.
-  const [stranded, setStranded] = useState<Budget | null>(() =>
+  const [knownBudget, setKnownBudget] = useState<Budget | null>(() =>
     typeof window === 'undefined' ? null : recallAnyBudget(),
   );
+
+  // Whether to show that card is DERIVED, not stored.
+  //
+  // THE FAULT THIS FIXES. It used to be its own state, read from storage once at
+  // mount and cleared the moment a budget became spendable - and clearing was a
+  // one-way door. Switch MetaMask account, or disconnect, and `budget` went to
+  // null while the cleared flag stayed cleared, leaving a page with money in a
+  // budget and no card naming it, no Close button, and nothing to say either had
+  // ever been there. Refreshing brought it back, because a refresh is the only
+  // thing that re-read storage. That is the whole of "the button does not come
+  // up, and a refresh revives it".
+  //
+  // Derived, the question is asked again on every render, so there is no moment
+  // to be on the wrong side of. `knownBudget` changes only when this page writes
+  // storage - opening one, or closing it - and a wallet change cannot touch it.
+  const stranded = budget ? null : knownBudget;
 
   // Parsed here rather than where it is used, because a half-typed figure is an
   // ordinary state of a text field and must not throw during a render. An
@@ -185,7 +203,6 @@ function Chat() {
         // closable; only the spending path is gated.
         const spendable = remembered !== null && remembered.delegate === d.accountId;
         setBudget(spendable ? remembered : null);
-        setStranded(spendable ? null : (remembered ?? recallAnyBudget()));
       })
       .catch(() => {
         if (live) setDelegate(null);
@@ -261,7 +278,7 @@ function Chat() {
               budget={stranded}
               endpoint={endpoint}
               wallet={signer}
-              onClosed={() => setStranded(null)}
+              onClosed={() => setKnownBudget(null)}
               onChanged={reload}
               setProblem={setProblem}
             />
@@ -351,7 +368,13 @@ function Chat() {
                   wallet={signer}
                   delegate={delegate}
                   budget={budget}
-                  setBudget={setBudget}
+                  setBudget={(b) => {
+                    // The card opens and closes budgets, which is exactly when
+                    // storage changes, so both states move together here and
+                    // nowhere else.
+                    setBudget(b);
+                    setKnownBudget(b);
+                  }}
                   onChanged={reload}
                   setProblem={setProblem}
                 />
@@ -596,104 +619,6 @@ function CopyableAccount({ account }: { account: string }) {
  * Everything else about the design is a detail; those two are what a reader is
  * actually deciding.
  */
-/**
- * A budget this browser knows about but cannot SPEND from.
- *
- * WHY IT EXISTS. Reloading /chat with a budget open made the card - and with it
- * the only Close button and the only copy of the account's NAME - disappear.
- * MetaMask needs an explicit connect, so the first render has no owner to check
- * a budget against, and the card was gated on that owner. From the reader's
- * chair an account holding their money had simply gone.
- *
- * WHY IT NOW CLOSES. Telling the reader to connect the owning wallet was only
- * half true: connecting it brought back nothing, because the Close button lived
- * on a card gated on the DELEGATE key rather than the owner. A browser that had
- * lost that key - cleared data, another profile - could therefore see the budget,
- * be told what to do, do it, and still have no way to get the money out. Closing
- * never needed the delegate; the owner signs it. So the button is here, on the
- * one condition that actually governs it: the connected wallet owns the budget.
- */
-function StrandedBudget({
-  budget,
-  endpoint,
-  wallet,
-  onClosed,
-  onChanged,
-  setProblem,
-}: {
-  budget: Budget;
-  endpoint: string;
-  wallet: Signer | null;
-  onClosed: () => void;
-  onChanged: () => void;
-  setProblem: (s: string) => void;
-}) {
-  const account = budgetAccount(budget);
-  const dead = budgetExpired(budget);
-  // The only thing that decides whether this page can close the budget. Not the
-  // delegate, which spends it, and not whether this browser opened it.
-  const owned = wallet !== null && wallet.accountId === budget.buyer;
-  const [busy, setBusy] = useState(false);
-  return (
-    <section className={`${CARD} border-amber-500/40`}>
-      <p className='text-sm text-amber-200'>
-        {dead
-          ? 'A budget you opened here has expired. Nothing more can be spent from it, and the rest is still yours.'
-          : 'A budget you opened here is still open, and this browser cannot spend from it.'}
-      </p>
-      <p className='mt-2 text-sm text-gray-400'>
-        {owned ? (
-          <>
-            This browser no longer holds the key that spends it, so messages cannot be paid from it here. Closing it
-            does not need that key - only <span className='text-gray-100'>{budget.buyer}</span>, which is connected.
-          </>
-        ) : (
-          <>
-            Connect <span className='text-gray-100'>{budget.buyer}</span> above, and the button to close it and take
-            back what is left comes back with it.
-          </>
-        )}
-      </p>
-      <p className='mt-3 break-all font-mono text-xs text-gray-500'>{account}</p>
-      <p className='mt-2 text-xs text-gray-500'>
-        That is the budget&apos;s name. Closing it means naming it, so keep the line if you keep anything - expiry does
-        not lose the balance, it only stops further spending.
-      </p>
-      <div className='mt-4 flex flex-wrap gap-3'>
-        {owned ? (
-          <button
-            className='rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black disabled:opacity-40'
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true);
-              setProblem('');
-              try {
-                await closeBudget(endpoint, wallet, budget);
-                forgetBudget();
-                onClosed();
-                onChanged();
-              } catch (err) {
-                setProblem(reportProblem(err));
-              } finally {
-                setBusy(false);
-              }
-            }}
-          >
-            {busy ? 'closing...' : 'close and take back what is left'}
-          </button>
-        ) : null}
-        <button
-          className='rounded-lg border border-gray-600 px-4 py-2 text-sm font-semibold text-gray-100'
-          onClick={() => {
-            void navigator.clipboard?.writeText(account);
-          }}
-        >
-          copy the budget&apos;s name
-        </button>
-      </div>
-    </section>
-  );
-}
 
 function BudgetCard({
   endpoint,
