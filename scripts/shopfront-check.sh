@@ -49,7 +49,29 @@ need() {
   command -v "$1" >/dev/null 2>&1 || { echo "ABORT: $1 is required but not installed" >&2; exit 2; }
 }
 need curl
-need python3
+
+# The JSON reader, chosen by RUNNING it rather than by finding its name.
+#
+# command -v is not enough on Windows. Git Bash inherits the Store's "App
+# Execution Alias" for python3: a stub that sits on PATH, satisfies command -v,
+# and then prints "Python was not found; run without arguments to install from
+# the Microsoft Store" to stdout instead of interpreting anything. That text
+# then flows into the parser below as if it were a node's answer, and every node
+# reads as UNREACHABLE - so the script reports a total outage on a network that
+# is fine, which is the one wrong answer a checker must never give.
+PY=""
+for candidate in python3 python; do
+  command -v "$candidate" >/dev/null 2>&1 || continue
+  if [ "$("$candidate" -c 'print("ok")' 2>/dev/null)" = "ok" ]; then PY=$candidate; break; fi
+done
+if [ -z "$PY" ]; then
+  echo "ABORT: no working python was found." >&2
+  echo "  A name on PATH is not enough - this checked that it RUNS, and it did not." >&2
+  echo "  On Windows this is usually the Microsoft Store alias rather than Python:" >&2
+  echo "    Settings > Apps > Advanced app settings > App execution aliases, turn off python/python3," >&2
+  echo "    then install Python, or run this from WSL." >&2
+  exit 2
+fi
 
 # Count the sellers a node will tell a browser about, and describe them.
 #
@@ -67,7 +89,7 @@ ask() {
 }
 
 summarize() {
-  python3 -c '
+  "$PY" -c '
 import json, sys
 
 raw = sys.stdin.read().strip()

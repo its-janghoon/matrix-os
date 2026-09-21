@@ -50,7 +50,18 @@ SCHEDULING=yes
 [ -n "$NEW_PROTOCOL_VERSION" ] || SCHEDULING=no
 : "${MATRIX_ROLLOUT_BOXES:?set MATRIX_ROLLOUT_BOXES to lines of label|host|keyfile|role}"
 
-REPO=${MATRIX_ROLLOUT_REPO:-savagemanage/matrix-os}
+# The CANONICAL owner, not whatever the remote happens to be called locally.
+#
+# The repository was renamed, and GitHub's redirect for a renamed repo covers
+# the repository page and git operations but NOT release asset downloads:
+# github.com/<old-owner>/<repo>/releases/download/... answers 404. Every box
+# then fails at step 2 with "ERR download failed" while the release is sitting
+# there, perfectly published, under the new name.
+#
+# It is easy to miss from a machine whose HTTP goes through a proxy that
+# attaches GitHub credentials - there both names answer 200, so the failure
+# reproduces only on the boxes.
+REPO=${MATRIX_ROLLOUT_REPO:-its-janghoon/matrix-os}
 MIN_LEAD=200              # never schedule closer than this many blocks
 TARGET_LEAD_SECONDS=3600  # aim for about an hour of wall clock
 
