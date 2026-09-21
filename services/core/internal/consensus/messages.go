@@ -259,6 +259,31 @@ const ProtocolVersionSpendBudgets uint32 = 2
 // reservation anyone opens, which is why this needs a height and not a restart.
 const ProtocolVersionInferenceEscrow uint32 = 3
 
+// ProtocolVersionCanonicalEthRecipient is the version from which a transaction
+// whose recipient names an Ethereum-controlled account in any form but the one
+// the ledger keys it by is INVALID rather than merely unwise.
+//
+// It refuses more and applies nothing differently, which makes it the first
+// version here that is not about divergence in the ledger. It still needs a
+// height, for the other reason a version exists: it changes BLOCK VALIDITY. An
+// un-upgraded node votes for a block an upgraded node refuses, and the two
+// disagree about whether the chain has a head - which is a worse failure than
+// the transfer this rule is trying to prevent.
+//
+// WHY REFUSE AT ALL, GIVEN THE CLIENT ALREADY CANONICALIZES.
+// token.CanonicalAccountID settles the recipient before it is signed, so no
+// client in this repository can build the broken transaction. But the recipient
+// is inside the signature: a hand-rolled client can sign
+// "eth:0xAbC…" directly, and consensus today credits the string verbatim to an
+// account no private key controls. Nobody can undo it afterwards, because there
+// is nothing to sign with. Refusal is the only move the chain has - it cannot
+// rewrite the recipient without invalidating the signature it just verified.
+//
+// BEFORE THIS ACTIVATES, re-run the outside audit of committed transfers. After
+// activation a stranded balance can only have arrived before the height, so the
+// audit stops being repeatable and starts being history.
+const ProtocolVersionCanonicalEthRecipient uint32 = 4
+
 // BlockTimestampSkew bounds how far a proposed block's timestamp may sit from
 // the validating node's own clock, in either direction.
 //
