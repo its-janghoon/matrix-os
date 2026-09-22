@@ -137,6 +137,19 @@ def digest(transfers: list[dict]) -> str:
     return h.hexdigest()[:16]
 
 
+def top_block(transfers: list[dict]) -> int:
+    """The highest block a committed transfer sits in.
+
+    A LOWER BOUND on the chain head, not the head itself. An idle chain mints no
+    blocks, and a busy one mints blocks with no transfers in them, so this only
+    ever says "the chain has reached at least here". That is still the useful
+    number when watching for a protocol-version activation from outside: once a
+    transfer appears at or past the activation height, the new rules were in force
+    when it was applied.
+    """
+    return max((int(t.get("blockHeight", 0)) for t in transfers), default=0)
+
+
 def stranded(transfers: list[dict]) -> list[dict]:
     """Transfers whose recipient is an eth id in a form no key controls."""
     bad = []
@@ -168,7 +181,8 @@ def main() -> int:
             print(f"   {node:<42} UNREADABLE  {exc}")
             continue
         read[node] = transfers
-        print(f"   {node:<42} {len(transfers)} transfers  digest={digest(transfers)}")
+        print(f"   {node:<42} {len(transfers)} transfers  digest={digest(transfers)}"
+              f"  top block={top_block(transfers)}")
 
     if not read:
         print("\n== Verdict\n   No node answered with a history. Nothing was audited.")

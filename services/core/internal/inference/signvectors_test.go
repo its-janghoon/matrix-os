@@ -28,6 +28,8 @@ type signVector struct {
 	// JavaScript. See cmd/signvectors.
 	Timestamp       string              `json:"timestamp"`
 	Messages        []map[string]string `json:"messages"`
+	MaxTokens       int                 `json:"maxTokens"`
+	Temperature     float64             `json:"temperature"`
 	SigningBytesHex string              `json:"signingBytesHex"`
 }
 
@@ -63,7 +65,12 @@ func TestTheCommittedSignVectorsMatchThisCode(t *testing.T) {
 			Model:     v.Model,
 			Timestamp: ts,
 		}
-		got := hex.EncodeToString(auth.SigningBytes(InferenceRequest{Model: v.Model, Messages: msgs}))
+		got := hex.EncodeToString(auth.SigningBytes(InferenceRequest{
+			Model:       v.Model,
+			Messages:    msgs,
+			MaxTokens:   v.MaxTokens,
+			Temperature: v.Temperature,
+		}))
 		if got != v.SigningBytesHex {
 			t.Errorf("%s (%s): the committed vector no longer matches this code.\n"+
 				"  want %s\n   got %s\n"+

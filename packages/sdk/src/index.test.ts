@@ -508,8 +508,13 @@ describe('run authorization signing bytes', () => {
   // Taken from inference.RunAuthorization.SigningBytes on the node. Same reason
   // as the payment vector: a one-byte drift rejects every signature and looks
   // like a bad key rather than a bad encoding.
+  //
+  // Updated for v0.5.8, which put max_tokens and temperature inside the digest.
+  // This one constant pins one input; the broad guarantee is sign-vectors.test.ts,
+  // where Go generates the cases and both TypeScript copies are checked against
+  // them. Keep this because it covers a provider and model those vectors do not.
   const GOLDEN =
-    'AAAAJW1hdHJpeC9pbmZlcmVuY2UvcnVuLWF1dGhvcml6YXRpb24vdjEAAAAgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8AAAAFZ3B1LTEAAAANbGxhbWEtMy4zLTcwYgAAACC5plUi18KqH5VVzrz5BlHYN9SQ1bcVKQ66LcPWFJUKBxjS/CK7csUV';
+    'AAAAJW1hdHJpeC9pbmZlcmVuY2UvcnVuLWF1dGhvcml6YXRpb24vdjEAAAAgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8AAAAFZ3B1LTEAAAANbGxhbWEtMy4zLTcwYgAAACBdsflfOl8pPGxY8YncDd6bv9V3o+wsAQWN8Uv60qxQoxjS/CK7csUV';
 
   const key = (() => {
     const k = new Uint8Array(32);

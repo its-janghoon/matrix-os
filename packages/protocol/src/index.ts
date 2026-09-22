@@ -124,6 +124,22 @@ export interface RunAuthorizationSigningInput {
   model: string;
   timestamp: bigint;
   messages: Message[];
+  /**
+   * The token budget and sampling temperature, in the digest since v0.5.8.
+   *
+   * They used to sit outside it, and that was not cosmetic: max_tokens is what the
+   * meter counts, so a node able to raise it on a signed request decided how much
+   * of the reservation was spent. Omitting them here produces a signature a
+   * v0.5.8 node accepts only through its compatibility arm, and rejects once that
+   * is removed.
+   *
+   * Absent means zero, which is exactly how the Go side reads an unset field - so
+   * a caller that sets neither still produces the same digest as one that sets
+   * both to zero. They are hashed rather than skipped, because skipping would make
+   * "no budget" and "a budget of zero" the same signature.
+   */
+  maxTokens?: number;
+  temperature?: number;
 }
 
 /**
@@ -145,7 +161,7 @@ export interface RunAuthorizationSigningInput {
 export async function runAuthorizationSigningBytes(
   input: RunAuthorizationSigningInput,
 ): Promise<Uint8Array> {
-  const digest = await messagesDigest(input.messages);
+  const digest = await messagesDigest(input.messages, input.maxTokens ?? 0, input.temperature ?? 0);
   return concat([
     lp(utf8(RUN_AUTH_DOMAIN)),
     lp(input.fromPublicKey),
@@ -157,15 +173,32 @@ export async function runAuthorizationSigningBytes(
 }
 
 /**
- * SHA-256 over the turn count followed by the length-prefixed role/content
- * pairs. The prefixes are why "ab" and "a"+"b" do not hash the same, which
- * would let one signature authorize either conversation.
+ * SHA-256 over the turn count, the length-prefixed role/content pairs, then the
+ * token budget and the temperature. The prefixes are why "ab" and "a"+"b" do not
+ * hash the same, which would let one signature authorize either conversation.
+ *
+ * THE TWO BOUNDS ARE A SUFFIX, appended after the transcript, so the framing of
+ * the part that already existed is untouched and this digest differs from the
+ * pre-v0.5.8 one only by what follows the turns.
+ *
+ * TEMPERATURE IS HASHED AS ITS IEEE-754 BITS, not as text. A decimal rendering
+ * would need Go and JavaScript to agree about digit count, trailing zeros and the
+ * exponent form; the bits are the value and have one spelling. A JavaScript number
+ * IS a float64, so setFloat64 is exact and matches Go's math.Float64bits.
  */
-export async function messagesDigest(messages: Message[]): Promise<Uint8Array> {
+export async function messagesDigest(
+  messages: Message[],
+  maxTokens = 0,
+  temperature = 0,
+): Promise<Uint8Array> {
   const parts: Uint8Array[] = [u64(BigInt(messages.length))];
   for (const m of messages) {
     parts.push(lp(utf8(m.role)), lp(utf8(m.content)));
   }
+  parts.push(u64(BigInt(maxTokens)));
+  const temp = new Uint8Array(8);
+  new DataView(temp.buffer).setFloat64(0, temperature, false);
+  parts.push(temp);
   const hash = await crypto.subtle.digest('SHA-256', concat(parts) as BufferSource);
   return new Uint8Array(hash);
 }

@@ -11,8 +11,11 @@ import { fromBase64, messagesDigest, paymentSigningBytes, runAuthorizationSignin
 const GOLDEN_PAYMENT =
   'AAAAIAABAgMEBQYHCAkKCwwNDg8QERITFBUWFxgZGhscHR4fAAAACnByb3ZpZGVyLTEAAAAAB1vNFQAAAAAAAAAHGNL8IrtyxRUAAAAE3q2+7w==';
 
+// Updated for v0.5.8, which put max_tokens and temperature inside the digest.
+// One input pinned here; the broad Go-versus-TypeScript guarantee is
+// packages/sdk/src/sign-vectors.test.ts.
 const GOLDEN_RUN_AUTH =
-  'AAAAJW1hdHJpeC9pbmZlcmVuY2UvcnVuLWF1dGhvcml6YXRpb24vdjEAAAAgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8AAAAFZ3B1LTEAAAANbGxhbWEtMy4zLTcwYgAAACC5plUi18KqH5VVzrz5BlHYN9SQ1bcVKQ66LcPWFJUKBxjS/CK7csUV';
+  'AAAAJW1hdHJpeC9pbmZlcmVuY2UvcnVuLWF1dGhvcml6YXRpb24vdjEAAAAgAAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8AAAAFZ3B1LTEAAAANbGxhbWEtMy4zLTcwYgAAACBdsflfOl8pPGxY8YncDd6bv9V3o+wsAQWN8Uv60qxQoxjS/CK7csUV';
 
 const KEY = (() => {
   const k = new Uint8Array(32);

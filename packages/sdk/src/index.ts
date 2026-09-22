@@ -844,6 +844,16 @@ export async function runAuthorizationSigningBytes(input: {
   timestamp: bigint | number;
   prompt?: string;
   messages?: ChatMessage[];
+  /**
+   * The token budget and sampling temperature, in the digest since v0.5.8.
+   *
+   * They used to sit outside it, and that was not cosmetic: max_tokens is what the
+   * meter counts, so a node able to raise it on a signed request decided how much
+   * of the reservation was spent. Absent means zero, which is how an unset field
+   * reads on the Go side too.
+   */
+  maxTokens?: number;
+  temperature?: number;
 }): Promise<Uint8Array> {
   const messages: ChatMessage[] =
     input.messages && input.messages.length > 0
@@ -852,7 +862,7 @@ export async function runAuthorizationSigningBytes(input: {
         ? [{ role: 'CHAT_ROLE_USER', content: input.prompt }]
         : [];
 
-  const digest = await messagesDigest(messages);
+  const digest = await messagesDigest(messages, input.maxTokens ?? 0, input.temperature ?? 0);
 
   const domain = utf8(RUN_AUTH_DOMAIN);
   const provider = utf8(input.provider);
@@ -888,7 +898,11 @@ const RUN_AUTH_DOMAIN = 'matrix/inference/run-authorization/v1';
  * The prefixes are what stop two different transcripts hashing the same, which
  * would let one signature cover both.
  */
-async function messagesDigest(messages: ChatMessage[]): Promise<Uint8Array> {
+async function messagesDigest(
+  messages: ChatMessage[],
+  maxTokens = 0,
+  temperature = 0,
+): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
   const count = new Uint8Array(8);
   new DataView(count.buffer).setBigUint64(0, BigInt(messages.length), false);
@@ -901,6 +915,20 @@ async function messagesDigest(messages: ChatMessage[]): Promise<Uint8Array> {
       parts.push(len, field);
     }
   }
+
+  // The two bounds, as a SUFFIX after the transcript, so this digest differs from
+  // the pre-v0.5.8 one only by what follows the turns.
+  //
+  // Temperature is hashed as its IEEE-754 bits rather than formatted: a decimal
+  // rendering would need Go and JavaScript to agree about digits, trailing zeros
+  // and the exponent form, while the bits are the value and have one spelling. A
+  // JavaScript number IS a float64, so this matches Go's math.Float64bits exactly.
+  const budget = new Uint8Array(8);
+  new DataView(budget.buffer).setBigUint64(0, BigInt(maxTokens), false);
+  parts.push(budget);
+  const temp = new Uint8Array(8);
+  new DataView(temp.buffer).setFloat64(0, temperature, false);
+  parts.push(temp);
 
   let size = 0;
   for (const p of parts) size += p.length;

@@ -6,8 +6,10 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
@@ -121,10 +123,25 @@ func (a *RunAuthorization) Sign(req InferenceRequest, priv ed25519.PrivateKey) e
 	return nil
 }
 
-// requestDigest hashes the effective messages of a request, so the digest does
+// requestDigest hashes what the buyer is actually asking for, so the digest does
 // not depend on whether a caller sent `prompt` or an equivalent one-message
-// transcript. Role and content are length-prefixed for the same
-// no-collisions reason as everything else here.
+// transcript. Everything is length-prefixed for the same no-collisions reason as
+// the rest of this file.
+//
+// WHY MaxTokens AND Temperature ARE IN HERE. They were not, and the omission was
+// not cosmetic: the authorization's whole job is to say "I am the buyer and I am
+// asking for THIS work". A node could raise MaxTokens on a request the buyer
+// signed and the signature still verified, and MaxTokens is what the meter counts
+// - so it decided how much of the reservation was spent. The reservation capped
+// the loss, but the buyer had signed for one job and paid for a larger one.
+//
+// Temperature changes the answer rather than the price, which is a smaller thing
+// to be able to alter silently and still not the node's call to make.
+//
+// Temperature is hashed as its IEEE-754 bits, big-endian, rather than formatted.
+// A decimal rendering has to agree across two languages about trailing zeros, the
+// exponent form and how many digits to emit; the bits are the value and have one
+// spelling. JavaScript numbers are float64, so this is exact on both sides.
 func requestDigest(req InferenceRequest) [32]byte {
 	msgs, err := req.EffectiveMessages()
 	if err != nil {
@@ -140,9 +157,96 @@ func requestDigest(req InferenceRequest) [32]byte {
 		writeLenPrefixed(h, []byte(m.Role))
 		writeLenPrefixed(h, []byte(m.Content))
 	}
+	// Appended AFTER the transcript, so the framing of the part that already
+	// existed is untouched and the two digests differ only by this suffix.
+	var tokens [8]byte
+	binary.BigEndian.PutUint64(tokens[:], uint64(req.MaxTokens))
+	_, _ = h.Write(tokens[:])
+	var temp [8]byte
+	binary.BigEndian.PutUint64(temp[:], math.Float64bits(req.Temperature))
+	_, _ = h.Write(temp[:])
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+// legacyRequestDigest is requestDigest as it was before MaxTokens and Temperature
+// were covered: the transcript and nothing else.
+//
+// WHY IT STILL EXISTS. The nodes on the live network verify with the old rule and
+// the browser signs with whatever it was served. Shipping only the new rule breaks
+// every /chat run in the window between the web deploying and the last node being
+// upgraded - and apps/web deploys on merge while a node rollout is a deliberate
+// operator step, so that window is guaranteed, not hypothetical.
+//
+// So a signature is accepted under either rule for ONE release. That does not
+// reopen the hole for anyone who has upgraded: a client signing the new digest is
+// checked against it, and only a client still signing the old one falls through to
+// the legacy arm.
+//
+// DELETE THIS, AND acceptsLegacyDigest, once every client is on the new rule. The
+// node logs the first legacy acceptance per process, which is how an operator can
+// tell when that has happened rather than guessing.
+func legacyRequestDigest(req InferenceRequest) [32]byte {
+	msgs, err := req.EffectiveMessages()
+	if err != nil {
+		msgs = nil
+	}
+	h := sha256.New()
+	var count [8]byte
+	binary.BigEndian.PutUint64(count[:], uint64(len(msgs)))
+	_, _ = h.Write(count[:])
+	for _, m := range msgs {
+		writeLenPrefixed(h, []byte(m.Role))
+		writeLenPrefixed(h, []byte(m.Content))
+	}
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+// legacyDigestReported makes the transition observable with one line rather than
+// one per request: an operator needs to know THAT old clients are still signing,
+// not how many times.
+var legacyDigestReported atomic.Bool
+
+func reportLegacyDigestAccepted() {
+	if legacyDigestReported.Swap(true) {
+		return
+	}
+	fmt.Println("Inference: accepted a run authorization signed under the PRE-v0.5.8 digest, " +
+		"which does not cover max_tokens or temperature. This is the compatibility window; " +
+		"once no client does this, legacyRequestDigest can be deleted.")
+}
+
+// acceptsEitherDigest checks a signature against the current authorization bytes
+// and, failing that, against the pre-v0.5.8 ones.
+//
+// Current FIRST, so an upgraded client never touches the legacy arm and the log
+// line below means what it says: some client is still signing the old digest.
+func acceptsEitherDigest(a *RunAuthorization, req InferenceRequest, verify func([]byte) bool) bool {
+	if verify(a.SigningBytes(req)) {
+		return true
+	}
+	if verify(a.legacySigningBytes(req)) {
+		reportLegacyDigestAccepted()
+		return true
+	}
+	return false
+}
+
+// legacySigningBytes is the authorization payload built over the old digest.
+func (a *RunAuthorization) legacySigningBytes(req InferenceRequest) []byte {
+	digest := legacyRequestDigest(req)
+
+	buf := make([]byte, 0, 256)
+	buf = appendLenPrefixed(buf, []byte(runAuthDomain))
+	buf = appendLenPrefixed(buf, a.PublicKey)
+	buf = appendLenPrefixed(buf, []byte(a.Provider))
+	buf = appendLenPrefixed(buf, []byte(a.Model))
+	buf = appendLenPrefixed(buf, digest[:])
+	buf = binary.BigEndian.AppendUint64(buf, uint64(a.Timestamp))
+	return buf
 }
 
 func appendLenPrefixed(buf, b []byte) []byte {
@@ -263,7 +367,9 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 			return fmt.Errorf("%w: authorized by %s, but this budget names %s",
 				ErrRunUnauthorized, got, terms.Delegate)
 		}
-		if !ed25519.Verify(auth.PublicKey, auth.SigningBytes(req), auth.Signature) {
+		if !acceptsEitherDigest(auth, req, func(bytes []byte) bool {
+			return ed25519.Verify(auth.PublicKey, bytes, auth.Signature)
+		}) {
 			return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
 		}
 		return nil
@@ -283,20 +389,25 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 			return fmt.Errorf("%w: an ethereum signature must be %d bytes, got %d",
 				ErrRunUnauthorized, ethsig.SignatureLen, len(auth.Signature))
 		}
-		digest := requestDigest(req)
-		message, err := token.EthRunAuthorizationDigest(addr, auth.Provider, auth.Model, digest[:], auth.Timestamp)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrRunUnauthorized, err)
+		// Either digest, for the compatibility window. The EIP-712 struct is
+		// unchanged; only what promptDigest covers moved.
+		recoversTo := func(d [32]byte) bool {
+			message, err := token.EthRunAuthorizationDigest(addr, auth.Provider, auth.Model, d[:], auth.Timestamp)
+			if err != nil {
+				return false
+			}
+			recovered, err := ethsig.RecoverAddress(message, auth.Signature)
+			return err == nil && recovered == addr
 		}
-		recovered, err := ethsig.RecoverAddress(message, auth.Signature)
-		if err != nil {
-			return fmt.Errorf("%w: %v", ErrRunUnauthorized, err)
+		if recoversTo(requestDigest(req)) {
+			return nil
 		}
-		if recovered != addr {
-			return fmt.Errorf("%w: signed by %s, but the authorization claims %s",
-				ErrRunUnauthorized, recovered.Hex(), addr.Hex())
+		if recoversTo(legacyRequestDigest(req)) {
+			reportLegacyDigestAccepted()
+			return nil
 		}
-		return nil
+		return fmt.Errorf("%w: signed by a different key than the authorization claims (%s)",
+			ErrRunUnauthorized, addr.Hex())
 	}
 
 	if len(auth.PublicKey) != ed25519.PublicKeySize {
@@ -309,7 +420,9 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 	if got := auth.BuyerID(); !strings.EqualFold(got, buyer) {
 		return fmt.Errorf("%w: authorized by %s, but the buyer is %s", ErrRunUnauthorized, got, buyer)
 	}
-	if !ed25519.Verify(auth.PublicKey, auth.SigningBytes(req), auth.Signature) {
+	if !acceptsEitherDigest(auth, req, func(bytes []byte) bool {
+		return ed25519.Verify(auth.PublicKey, bytes, auth.Signature)
+	}) {
 		return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
 	}
 	return nil

@@ -57,6 +57,11 @@ type vector struct {
 	// the market API returns amounts and totals that way.
 	Timestamp string              `json:"timestamp"`
 	Messages  []map[string]string `json:"messages"`
+	// MaxTokens and Temperature joined the digest in v0.5.8. Carried explicitly so
+	// the vectors exercise them rather than only their zero values - a field hashed
+	// as zero everywhere is indistinguishable from a field nobody hashes.
+	MaxTokens   int     `json:"maxTokens"`
+	Temperature float64 `json:"temperature"`
 	// SigningBytesHex is the whole authorization payload, so a difference in the
 	// digest and a difference in the framing around it are told apart.
 	SigningBytesHex string `json:"signingBytesHex"`
@@ -73,6 +78,8 @@ func main() {
 	cases := []struct {
 		name, why, provider, model string
 		timestamp                  int64
+		maxTokens                  int
+		temperature                float64
 		messages                   []inference.Message
 	}{
 		{
@@ -135,6 +142,34 @@ func main() {
 				{Role: inference.RoleUser, Content: "b"},
 			},
 		},
+		{
+			name:      "bounds-set",
+			why:       "max_tokens and temperature are in the digest from v0.5.8; a node could otherwise raise the token budget on a signed request and the meter would charge the buyer for it",
+			provider:  "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+			model:     "qwen3.6-27b",
+			timestamp: 1790059598000000000,
+			maxTokens: 4096,
+			// A value with no exact short decimal, hashed as its IEEE-754 bits
+			// rather than formatted: a decimal rendering would need two languages
+			// to agree about digits and trailing zeros, and the bits have one
+			// spelling.
+			temperature: 0.7,
+			messages: []inference.Message{
+				{Role: inference.RoleUser, Content: "write a haiku"},
+			},
+		},
+		{
+			name:        "bounds-edge",
+			why:         "a whole-number temperature and a token budget of one, so the two fields are exercised at their small end as well as their usual one",
+			provider:    "p",
+			model:       "m",
+			timestamp:   3,
+			maxTokens:   1,
+			temperature: 2,
+			messages: []inference.Message{
+				{Role: inference.RoleUser, Content: "x"},
+			},
+		},
 	}
 
 	out := make([]vector, 0, len(cases))
@@ -145,7 +180,12 @@ func main() {
 			Model:     c.model,
 			Timestamp: c.timestamp,
 		}
-		req := inference.InferenceRequest{Model: c.model, Messages: c.messages}
+		req := inference.InferenceRequest{
+			Model:       c.model,
+			Messages:    c.messages,
+			MaxTokens:   c.maxTokens,
+			Temperature: c.temperature,
+		}
 		wire := make([]map[string]string, 0, len(c.messages))
 		for _, m := range c.messages {
 			wire = append(wire, map[string]string{"role": string(m.Role), "content": m.Content})
@@ -158,6 +198,8 @@ func main() {
 			Model:           c.model,
 			Timestamp:       strconv.FormatInt(c.timestamp, 10),
 			Messages:        wire,
+			MaxTokens:       c.maxTokens,
+			Temperature:     c.temperature,
 			SigningBytesHex: hex.EncodeToString(auth.SigningBytes(req)),
 		})
 	}
