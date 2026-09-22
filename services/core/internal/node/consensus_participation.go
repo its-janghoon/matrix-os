@@ -75,6 +75,26 @@ func (n *Node) refuseIfNotInConsensus() error {
 	return refuseIfNotParticipating(n.participationSource())
 }
 
+// silencePhrase renders the duration for a PERSON.
+//
+// A zero duration means nothing has been heard since this process started, not
+// that the last message arrived an instant ago. Rendered naively it printed
+//
+//	Market: this node has heard no proposal or vote for 0s, so it has stopped
+//	announcing and is refusing reservations.
+//
+// on the GPU box during the v0.5.6 rollout - which is the correct behaviour (fail
+// closed until the network is heard, and it came back 40 seconds later) reported as
+// a stopped clock. An operator reading it during an upgrade sees a broken node
+// rather than one that has not finished joining, and that is the difference between
+// a line that explains an expected pause and one that starts an investigation.
+func silencePhrase(silence time.Duration) string {
+	if silence == 0 {
+		return "since starting"
+	}
+	return "for " + silence.Round(time.Second).String()
+}
+
 // refuseIfNotParticipating is the refusal itself, over the signal rather than the
 // node, so there is one implementation and a test does not need a cluster.
 //
@@ -90,7 +110,7 @@ func refuseIfNotParticipating(src consensusParticipation) error {
 	if participating {
 		return nil
 	}
-	return fmt.Errorf("%w: no proposal or vote has been heard for %s", ErrNotInConsensus, silence.Round(time.Second))
+	return fmt.Errorf("%w: no proposal or vote has been heard %s", ErrNotInConsensus, silencePhrase(silence))
 }
 
 // consensusSilenceReported makes the log a TRANSITION and not a line per tick.
@@ -104,9 +124,9 @@ func (n *Node) reportConsensusSilence(silence time.Duration) {
 	if n.consensusSilenceReported.Swap(true) {
 		return
 	}
-	fmt.Printf("Market: this node has heard no proposal or vote for %s, so it has stopped "+
+	fmt.Printf("Market: this node has heard no proposal or vote %s, so it has stopped "+
 		"announcing and is refusing reservations. It cannot settle while partitioned.\n",
-		silence.Round(time.Second))
+		silencePhrase(silence))
 }
 
 func (n *Node) clearConsensusSilence() {

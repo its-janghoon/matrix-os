@@ -77,6 +77,12 @@ func (e *Engine) participationSilenceLimit() time.Duration {
 // ParticipatingInConsensus reports whether this node is still hearing the rest of
 // the validator set, and how long it has been since it last did.
 //
+// A ZERO DURATION MEANS "NEVER", NOT "JUST NOW". Nothing has been heard since this
+// process started, so there is no interval to measure. Callers that put the
+// duration in front of a person must say so in words: "no vote for 0s" reads as a
+// stopped clock, and on a restart - which is when it prints - it reads as a broken
+// node rather than one that has not finished joining.
+//
 // A SET OF ONE IS ALWAYS PARTICIPATING. There is nobody to hear from, so silence
 // carries no information - a devnet, a single-validator chain and a node that is
 // the whole set would otherwise be permanently partitioned from themselves and

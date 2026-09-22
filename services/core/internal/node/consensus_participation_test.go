@@ -66,3 +66,34 @@ func TestANodeWithNoConsensusIsNotGated(t *testing.T) {
 		t.Error("a node with no consensus engine reported itself partitioned")
 	}
 }
+
+// A just-started node has heard nothing, so there is no interval to report. It
+// printed "heard no proposal or vote for 0s" on the GPU box during the v0.5.6
+// rollout: correct behaviour - fail closed until the network is heard, back 40
+// seconds later - reported as a stopped clock. During an upgrade that reads as a
+// broken node rather than one still joining.
+func TestAJustStartedNodeDoesNotReportZeroSeconds(t *testing.T) {
+	err := refuseIfNotParticipating(stubParticipation{participating: false, silence: 0})
+	if err == nil {
+		t.Fatal("a node that has heard nothing accepted a reservation")
+	}
+	got := err.Error()
+	if strings.Contains(got, "0s") {
+		t.Errorf("reported a zero interval as if it were a measurement: %q", got)
+	}
+	if !strings.Contains(got, "since starting") {
+		t.Errorf("does not say that nothing has been heard since the process started: %q", got)
+	}
+}
+
+// And a real measured silence still reads as one, so the fix above did not replace
+// the duration with a phrase everywhere.
+func TestAMeasuredSilenceIsStillReportedAsADuration(t *testing.T) {
+	err := refuseIfNotParticipating(stubParticipation{participating: false, silence: 42 * time.Second})
+	if err == nil {
+		t.Fatal("a partitioned node accepted a reservation")
+	}
+	if got := err.Error(); !strings.Contains(got, "for 42s") {
+		t.Errorf("a measured silence lost its duration: %q", got)
+	}
+}
