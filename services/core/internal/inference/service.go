@@ -32,6 +32,13 @@ var (
 	// consensus reads as a refund rather than a purchase and refuses. Named so
 	// the door above can map it to something a reader can act on.
 	ErrSelfPurchase = errors.New("inference: a budget cannot buy from its own owner")
+	// ErrBudgetCannotCover reports a reservation this budget's own terms will not
+	// let consensus apply: larger than the per-job cap, or opened after the
+	// expiry. applyInferOperation refuses both by returning no effect, which
+	// commits a transaction that moves nothing and tells the buyer only that "the
+	// deposit did not apply" - after they have signed. Named so the reservation
+	// path can refuse it first, with the numbers in it.
+	ErrBudgetCannotCover = errors.New("inference: this budget cannot cover the reservation")
 )
 
 // Settler is the consensus-backed settlement dependency the inference Service

@@ -214,6 +214,13 @@ func mapInferenceError(err error) error {
 		return status.Error(codes.InvalidArgument, err.Error())
 	case errors.Is(err, inference.ErrPriceAboveCeiling):
 		return status.Error(codes.FailedPrecondition, err.Error())
+	case errors.Is(err, inference.ErrBudgetCannotCover):
+		// A precondition and not a bad argument: the request is well formed and
+		// the budget is real, but its own terms will not let consensus apply a
+		// reservation this size. Without this case it fell to the default and
+		// reached the reader as an internal error, which is the one reading that
+		// suggests the fault is not theirs to fix.
+		return status.Error(codes.FailedPrecondition, err.Error())
 	case errors.Is(err, token.ErrInvalidSignature),
 		errors.Is(err, token.ErrUnsignedTransaction),
 		errors.Is(err, token.ErrInvalidTransaction),
