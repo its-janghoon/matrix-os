@@ -161,7 +161,8 @@ activated the inference-escrow rules.`,
 				job, err := runEscrowed(ctx, ic, *inferenceAddr, escrowedInput{
 					buyer: buyer, provider: provider, model: model, prompt: prompt,
 					units: units, walletPath: walletPath,
-					out: cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
+					explicitTimeout: opts.Timeout,
+					out:             cmd.OutOrStdout(), errOut: cmd.ErrOrStderr(),
 				})
 				if err != nil {
 					return err

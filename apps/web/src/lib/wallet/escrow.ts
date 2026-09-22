@@ -30,6 +30,7 @@
  * settlement to the buyer was meant to create.
  */
 
+import { budgetFromAccount } from './budget';
 import { checkSettlement } from './ceiling';
 import { INFERENCE, big, num, obj, rpc, sellerFor, str, type SellerChoice, type Settled } from './node';
 import { fromBase64, toBase64 } from './signing';
@@ -73,6 +74,49 @@ export class SettlementRefused extends Error {
   }
 }
 
+/**
+ * How many units one message reserves.
+ *
+ * WHY THIS IS NOT A CONSTANT ANY MORE. It was `4096`, and a budget opened through
+ * /chat caps one job at a TENTH of its deposit. At 1000 base units per unit that
+ * made a reservation of 4,096,000 against a cap of 417,710 on a 4,177,100 budget -
+ * so consensus committed the deposit, moved nothing, and the reader was told
+ * `the deposit for job "..." did not apply`, after signing, with no number in it.
+ * Every budget under about 41,000,000 base units was unusable for a single
+ * message. Observed live at transfer index 215, block 4140.
+ *
+ * So the reservation is sized to what the PAYER can actually pay for one job. The
+ * cap is read out of the budget's own account name, which is the authorisation
+ * itself rather than a copy of it, and the reservation is whichever is smaller:
+ * what a long answer needs, or what this budget allows.
+ *
+ * Reserving LESS is safe and reserving more is not. The charge is clamped down to
+ * the reservation, so a short reservation costs a long answer its tail - the
+ * provider refuses up front through ErrUnderReserved rather than working unpaid -
+ * while an over-large one is refused by the chain after the money is committed.
+ *
+ * A wallet paying directly has no per-job cap, so it keeps the full figure: its
+ * bound is its balance, which the market checks at submit.
+ */
+const PREFERRED_UNITS = 4096n;
+
+function unitsToReserve(payer: string, pricePerUnit: bigint): bigint {
+  const budget = budgetFromAccount(payer);
+  if (budget === null || pricePerUnit <= 0n) return PREFERRED_UNITS;
+  const affordable = budget.perJobCap / pricePerUnit;
+  if (affordable <= 0n) {
+    // Not a silent zero: a zero-unit reservation is refused deeper in with a
+    // message about an empty reservation, which says nothing about the cap that
+    // is the actual problem.
+    throw new Error(
+      `this budget caps one job at ${budget.perJobCap} base units and this seller charges ` +
+        `${pricePerUnit} per unit, so it cannot pay for even one unit of work. Close it and open ` +
+        `one with a larger per-job cap.`,
+    );
+  }
+  return affordable < PREFERRED_UNITS ? affordable : PREFERRED_UNITS;
+}
+
 export async function chatEscrowed(
   endpoint: string,
   signer: Signer,
@@ -112,7 +156,7 @@ export async function chatEscrowed(
     provider: seller.id,
     model: input.model,
     messages: wire,
-    unitsEstimate: '4096',
+    unitsEstimate: String(unitsToReserve(signer.accountId, seller.pricePerUnit)),
     authorization,
   }, input.signal ? { signal: input.signal } : {});
 

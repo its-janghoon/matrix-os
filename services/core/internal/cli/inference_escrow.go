@@ -35,6 +35,12 @@ type escrowedInput struct {
 	buyer, provider, model, prompt string
 	units                          uint64
 	walletPath                     string
+	// explicitTimeout is the --timeout the caller named, or zero when they named
+	// none. It is passed in rather than read from the context's own deadline
+	// because the two are indistinguishable once a deadline is set: the generic
+	// default and a deliberate choice both arrive as "a deadline exists", and only
+	// one of them should stop this command waiting for an answer it has paid for.
+	explicitTimeout time.Duration
 	// out receives the COMPLETION and nothing else, so piping this command into
 	// a file gets the answer; progress and warnings go to errOut. Both are
 	// passed in rather than taken from os, because a stream written straight to
@@ -118,6 +124,38 @@ func runEscrowed(ctx context.Context, ic *inferenceConn, addr string, in escrowe
 	fmt.Fprintf(in.errOut, "  reserving %d units at %d each = %d, claimable by the provider after %s\n",
 		reserved.GetUnitsReserved(), perUnit, deposit.GetAmount(),
 		time.Unix(reserved.GetClaimableAt(), 0).UTC().Format(time.RFC3339))
+
+	// FROM HERE THE DEADLINE IS THE RESERVATION'S, NOT THE RPC DEFAULT.
+	//
+	// Everything below - fund, stream, settle - runs under one context, and until
+	// now that was the generic 60-second client timeout. A completion from a real
+	// model on a real GPU routinely takes longer than that, so a buyer who set no
+	// --timeout funded a reservation and then gave up on it mid-run: the provider
+	// finished the work, the reservation stayed funded, and the whole of it became
+	// claimable. The default was quietly deciding to abandon money.
+	//
+	// ClaimableAt is the honest bound. It is the moment the provider may claim the
+	// entire reservation, so waiting up to it risks nothing that is not already at
+	// risk, and stopping before it throws away work the buyer has already paid
+	// for. It comes from the node's own reservation rather than from a constant
+	// here, which also means a provider serving a slow model does not need this
+	// client to be reconfigured.
+	//
+	// An EXPLICIT --timeout still wins. A caller who named a number meant it, and
+	// silently outliving it would be the same class of surprise in the other
+	// direction.
+	if in.explicitTimeout <= 0 {
+		if claim := reserved.GetClaimableAt(); claim > 0 {
+			deadline := time.Unix(claim, 0)
+			if until := time.Until(deadline); until > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithDeadline(context.WithoutCancel(ctx), deadline)
+				defer cancel()
+				fmt.Fprintf(in.errOut, "  waiting up to %s for the answer, which is when the "+
+					"reservation becomes claimable\n", until.Round(time.Second))
+			}
+		}
+	}
 
 	// 2. FUND, and wait for it to commit AND apply. A deposit in the mempool is
 	// not money in escrow, and the node refuses to stream against one.

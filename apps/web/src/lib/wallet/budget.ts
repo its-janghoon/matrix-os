@@ -80,6 +80,38 @@ export function budgetExpired(b: Budget, now: Date = new Date()): boolean {
 }
 
 /**
+ * Reads a budget's terms back OUT of its account id.
+ *
+ * The terms are not stored anywhere else that matters: the account NAME is the
+ * authorisation, which is why depositing into it is signing them. So anything
+ * that needs to respect a bound - and the per-job cap is one a reservation has to
+ * respect before it is signed - reads them from here rather than from a copy kept
+ * beside it. A copy is how one side starts believing a cap the chain does not.
+ *
+ * Returns null for anything that is not a budget account, which is the normal
+ * answer when a wallet is paying directly.
+ */
+export function budgetFromAccount(id: string): Budget | null {
+  if (!id.startsWith(ESCROW_PREFIX)) return null;
+  const parts = id.slice(ESCROW_PREFIX.length).split('.');
+  if (parts.length !== 6) return null;
+  try {
+    return {
+      buyer: parts[0],
+      delegate: parts[1],
+      perJobCap: BigInt(parts[2]),
+      maxPricePerUnit: BigInt(parts[3]),
+      expiry: BigInt(parts[4]),
+      nonce: BigInt(parts[5]),
+    };
+  } catch {
+    // A malformed name is not a budget this code can reason about, and guessing
+    // at one would mean reasoning about a cap nobody signed.
+    return null;
+  }
+}
+
+/**
  * Opens a budget: ONE wallet signature, and the only one this flow needs.
  *
  * The amount deposited is the budget. Nothing else about the terms is sent
