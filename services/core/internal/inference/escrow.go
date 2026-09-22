@@ -128,8 +128,28 @@ func (s *Service) ReserveEscrow(jobID string, reserveAuth []byte) (*EscrowPlan, 
 	// The SIGNER is the delegate when the buyer is a budget, and the nonce
 	// belongs to whoever signs. Deriving it from the buyer would hand a browser
 	// a nonce for an account it holds no key for.
-	signer, _, err := token.SpenderFor(buyer)
+	signer, budget, err := token.SpenderFor(buyer)
 	if err != nil {
+		return nil, err
+	}
+	// A BUDGET-FUNDED RESERVATION OBEYS THE BUDGET'S OWN RULES, AND THE BUYER HAS
+	// TO HEAR ABOUT IT HERE.
+	//
+	// applyInferOperation refuses a reservation larger than the per-job cap, and
+	// one opened after the expiry, by returning no effect. That refusal is right -
+	// an escrow must not be the way around a cap that bounds a draw - but it is
+	// SILENT: the transaction commits, moves nothing, and the buyer is told "the
+	// deposit for job <uuid> did not apply", after signing, with no number in it.
+	//
+	// It is knowable here, from two strings, before the buyer signs anything. This
+	// is the same place and the same reasoning as the self-purchase check in
+	// SubmitInferenceJob.
+	//
+	// Measured live: /chat reserves 4096 units at 1000/unit = 4,096,000, and a
+	// budget opened through the same page caps one job at a tenth of its deposit.
+	// Every budget under about 41,000,000 base units was therefore unusable for a
+	// single message, and said so only after the money had been committed.
+	if err := budgetCanCover(terms.Reserved, budget, time.Now().UTC().Unix()); err != nil {
 		return nil, err
 	}
 
