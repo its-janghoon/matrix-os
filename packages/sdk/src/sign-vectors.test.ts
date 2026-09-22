@@ -46,6 +46,9 @@ interface SignVector {
    */
   timestamp: string;
   messages: { role: string; content: string }[];
+  /** In the digest since v0.5.8. A JSON number round-trips a float64 exactly. */
+  maxTokens: number;
+  temperature: number;
   signingBytesHex: string;
 }
 
@@ -104,6 +107,8 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         model: v.model,
         timestamp: BigInt(v.timestamp),
         messages: v.messages.map((m) => ({ role: protoRole(m.role), content: m.content }) as ChatMessage),
+        maxTokens: v.maxTokens,
+        temperature: v.temperature,
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
@@ -115,6 +120,8 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         model: v.model,
         timestamp: BigInt(v.timestamp),
         messages: v.messages.map((m) => ({ role: m.role, content: m.content })) as canonical.Message[],
+        maxTokens: v.maxTokens,
+        temperature: v.temperature,
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
