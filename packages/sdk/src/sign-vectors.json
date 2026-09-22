@@ -1,0 +1,95 @@
+[
+  {
+    "name": "ascii",
+    "why": "the case every implementation gets right, so a failure here is a framing bug rather than an encoding one",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+    "model": "qwen3.6-27b",
+    "timestamp": "1790059598000000000",
+    "messages": [
+      {
+        "content": "hello",
+        "role": "user"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002e6574683a3078383536653366666638346135653833333432306234336365633062346531336331363737393831370000000b7177656e332e362d32376200000020b9a65522d7c2aa1f9555cebcf90651d837d490d5b715290eba2dc3d614950a0718d791b861918c00"
+  },
+  {
+    "name": "korean",
+    "why": "three bytes per character and one UTF-16 unit each: Go's length prefix is three times JavaScript's",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+    "model": "qwen3.6-27b",
+    "timestamp": "1790059598000000000",
+    "messages": [
+      {
+        "content": "안녕하세요, 오늘 날씨 어때요?",
+        "role": "user"
+      },
+      {
+        "content": "좋습니다.",
+        "role": "assistant"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002e6574683a3078383536653366666638346135653833333432306234336365633062346531336331363737393831370000000b7177656e332e362d323762000000207bc2f1a9d9fd6ef02ff364f13799968d8f227fbfa86bd975490f6855fe11432218d791b861918c00"
+  },
+  {
+    "name": "astral",
+    "why": "outside the BMP, so UTF-16 uses a surrogate PAIR: two units for four bytes, which is the case a naive byte-count fix still gets wrong",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+    "model": "모델-🜛-v2",
+    "timestamp": "1",
+    "messages": [
+      {
+        "content": "𝄞 🧑‍🚀 done",
+        "role": "user"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002e6574683a3078383536653366666638346135653833333432306234336365633062346531336331363737393831370000000eebaaa8eb8db82df09f9c9b2d763200000020d0bcdb19fb82387c306956f3a73ac1b188381d0cf0fd784c38d6a7f9c74b33b40000000000000001"
+  },
+  {
+    "name": "empty-transcript",
+    "why": "no messages at all still has a digest of its own; the run is refused later, not here",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "p",
+    "model": "m",
+    "timestamp": "0",
+    "messages": [],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d00000020af5570f5a1810b7af78caf4bc70a660f0df51e42baf91d4de5b2328de0e83dfc0000000000000000"
+  },
+  {
+    "name": "empty-fields",
+    "why": "an empty provider, model and content are length-prefixed as zero rather than skipped, which is what keeps them from being confused with an absent field",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "",
+    "model": "",
+    "timestamp": "-1",
+    "messages": [
+      {
+        "content": "",
+        "role": "user"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000000000000000000205bd950f70d4a2f81dbed08b186e977924d817ec5657b419d8dacd81f1d395a3fffffffffffffffff"
+  },
+  {
+    "name": "adjacent-turns",
+    "why": "the prefixes are why \"ab\" and \"a\"+\"b\" do not hash the same; without them one signature would authorize either conversation",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "p",
+    "model": "m",
+    "timestamp": "2",
+    "messages": [
+      {
+        "content": "a",
+        "role": "user"
+      },
+      {
+        "content": "b",
+        "role": "user"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d000000207c250b76ccf64b1ff1aa9b478835fe296e6ff081cd084e9c6e799118e8794ae70000000000000002"
+  }
+]
