@@ -13,9 +13,13 @@ Last verified 2026-09-21.
 
 ---
 
-## The live network, as of 2026-09-21
+## The live network, as of 2026-09-23
 
-Chain `8170`, protocol version 3 (inference escrow), five boxes on `v0.5.5`.
+Chain `8170`. Protocol version 4 is scheduled at height 4337. The released
+binary is `v0.5.8`; the boxes ran `v0.5.7` at the time of writing, so check
+what is actually deployed rather than trusting this line — `systemctl show
+matrixd -p ActiveEnterTimestamp --value` on a box tells you when it last
+restarted, which is when it last took a release.
 
 | box | role | address | config |
 |---|---|---|---|
@@ -24,7 +28,34 @@ Chain `8170`, protocol version 3 (inference escrow), five boxes on `v0.5.5`.
 | gpu | seller | `13.220.232.122` (x86_64) | `/etc/matrix/config.yaml` |
 
 Protocol upgrades scheduled: `1497=2` (spend budgets), `1831=3` (inference
-escrow). Both long since activated.
+escrow), `4337=4` (refuse a non-canonical `eth:` recipient). The first two are
+long since activated.
+
+### The box list every script wants, ready to paste
+
+`rollout.sh`, `advance-height.sh`, `budget-smoke.sh` and `escrow-smoke.sh` all
+refuse to start without `MATRIX_ROLLOUT_BOXES`, and it lives in the shell rather
+than on disk — so a new terminal has lost it, which has now stopped a rollout
+twice. This is that table in the format they parse:
+
+```bash
+export MATRIX_ROLLOUT_BOXES="validator-1|validator-1.ecirlabs.com|$HOME/Downloads/matrix.pem|validator
+validator-2|validator-2.ecirlabs.com|$HOME/Downloads/matrix.pem|validator
+validator-3|validator-3.ecirlabs.com|$HOME/Downloads/matrix.pem|validator
+validator-4|3.36.163.59|$HOME/Downloads/matrix.pem|validator
+gpu|13.220.232.122|$HOME/Downloads/tta-temp.pem|seller"
+```
+
+The four validators share `matrix.pem`; the GPU box needs `tta-temp.pem`. Those
+paths are where they sit on the operator's laptop — correct them, do not commit
+a key, and note the variable holds paths only, never key material.
+
+**Pass a protocol version ONLY when the release changes a block-validity rule.**
+`./scripts/rollout.sh v0.5.8` updates binaries and nothing else; adding a second
+argument writes a new activation schedule. A version number is refused unless it
+is past the one already scheduled, so the mistake usually fails loudly — but on
+a release that genuinely needs no version, a schedule written by accident is a
+rule change nobody asked for.
 
 The marketplace is up. One seller, `eth:0x856e3fff…`, 1000 base units per unit,
 serving `qwen3.6-27b`. Confirm from anywhere, with no keys:
