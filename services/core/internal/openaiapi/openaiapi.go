@@ -222,11 +222,42 @@ type chatRequest struct {
 	MaxTokens   int           `json:"max_tokens"`
 	Temperature float64       `json:"temperature"`
 	Stream      bool          `json:"stream"`
+	Tools       []chatTool    `json:"tools"`
+	// ToolChoice is ACCEPTED AND IGNORED, like `n` and `stop` above. Forcing a
+	// particular call is a model-server capability that differs between servers, so
+	// honouring it on one provider and not another would make the same request mean
+	// two things depending on who served it. Failing instead would break an SDK
+	// call that sets it out of habit.
+	ToolChoice json.RawMessage `json:"tool_choice"`
 }
 
 type chatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
+	// ToolCallID is required by OpenAI on a tool message and is what pairs a
+	// result with the call that asked for it.
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+}
+
+// chatTool is a tool definition in OpenAI's nested shape.
+type chatTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	} `json:"function"`
+}
+
+// chatToolCall is a tool call in OpenAI's nested shape.
+type chatToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
 }
 
 type chatResponse struct {
@@ -303,13 +334,34 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 				fmt.Sprintf("messages[%d]: %v", i, err))
 			return
 		}
-		msgs = append(msgs, inference.Message{Role: role, Content: m.Content})
+		if role == inference.RoleTool && strings.TrimSpace(m.ToolCallID) == "" {
+			// Refused rather than defaulted. A tool result with no call id cannot be
+			// paired with the call it answers, and a model holding two results it
+			// cannot tell apart answers from the wrong one - a wrong answer with no
+			// error anywhere, which is worse than this 400.
+			writeError(w, http.StatusBadRequest, "invalid_request_error",
+				fmt.Sprintf("messages[%d]: a tool message needs 'tool_call_id' so the model can "+
+					"tell which call it answers", i))
+			return
+		}
+		msgs = append(msgs, inference.Message{
+			Role:       role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  toInferenceToolCalls(m.ToolCalls),
+		})
+	}
+
+	tools, err := toInferenceTools(req.Tools)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
 	}
 
 	// Resolved before a provider is chosen, so a duplicate never reserves anyone's
 	// capacity.
 	guard, ok := h.beginIdempotent(w, r, buyer,
-		requestFingerprint(req.Model, msgs, req.MaxTokens, req.Temperature))
+		requestFingerprint(req.Model, msgs, req.MaxTokens, req.Temperature, tools))
 	if !ok {
 		return
 	}
@@ -341,6 +393,7 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 		Messages:    msgs,
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		Tools:       tools,
 	}, estimateUnits(msgs, req.MaxTokens))
 	if err != nil {
 		guard.release()
@@ -365,15 +418,27 @@ func (h *Handler) chatCompletions(w http.ResponseWriter, r *http.Request) {
 	if model == "" {
 		model = req.Model
 	}
+	// finish_reason is what an SDK branches on to decide whether to run a tool and
+	// come back, or to show the answer. Reporting "stop" for a turn that asked for a
+	// tool would make every client library treat the call as the end of the
+	// conversation and drop it.
+	finish := "stop"
+	if len(done.ToolCalls) > 0 {
+		finish = "tool_calls"
+	}
 	writeJSON(w, http.StatusOK, chatResponse{
 		ID:      "chatcmpl-" + done.ID,
 		Object:  "chat.completion",
 		Created: h.cfg.Now().UTC().Unix(),
 		Model:   model,
 		Choices: []chatChoice{{
-			Index:        0,
-			Message:      chatMessage{Role: string(inference.RoleAssistant), Content: done.Completion},
-			FinishReason: "stop",
+			Index: 0,
+			Message: chatMessage{
+				Role:      string(inference.RoleAssistant),
+				Content:   done.Completion,
+				ToolCalls: fromInferenceToolCalls(done.ToolCalls),
+			},
+			FinishReason: finish,
 		}},
 		Usage: chatUsage{
 			PromptTokens:     done.Usage.PromptTokens,
@@ -625,6 +690,89 @@ func cheapest(candidates []market.Provider) market.Provider {
 	return best
 }
 
+// toInferenceTools flattens OpenAI's nested tool definitions into the internal
+// shape, refusing the ones the digest cannot make safe.
+//
+// A NAMELESS TOOL IS REFUSED. The name is what the model calls and what the
+// client dispatches on, so an empty one produces a call nothing can execute.
+//
+// A DUPLICATE NAME IS REFUSED. Two definitions under one name leave the client
+// choosing which to run for a call that names it, and the buyer signed for both -
+// so whichever it picks, the signature does not settle the question.
+//
+// NON-OBJECT PARAMETERS ARE REFUSED. A JSON Schema for a function's arguments is
+// an object; a bare string or array is something a model server may accept, reject
+// or reinterpret, and a definition whose meaning depends on the server is not one
+// the buyer can be said to have signed for.
+func toInferenceTools(tools []chatTool) ([]inference.ToolDefinition, error) {
+	if len(tools) == 0 {
+		return nil, nil
+	}
+	out := make([]inference.ToolDefinition, 0, len(tools))
+	seen := make(map[string]struct{}, len(tools))
+	for i, t := range tools {
+		name := strings.TrimSpace(t.Function.Name)
+		if name == "" {
+			return nil, fmt.Errorf("tools[%d]: 'function.name' is required: it is what the "+
+				"model calls and what your client dispatches on", i)
+		}
+		if _, dup := seen[name]; dup {
+			return nil, fmt.Errorf("tools[%d]: %q is defined twice, so a call naming it would "+
+				"be ambiguous", i, name)
+		}
+		seen[name] = struct{}{}
+		params := t.Function.Parameters
+		if len(params) > 0 {
+			var probe map[string]json.RawMessage
+			if err := json.Unmarshal(params, &probe); err != nil {
+				return nil, fmt.Errorf("tools[%d]: 'function.parameters' must be a JSON Schema "+
+					"object: %v", i, err)
+			}
+		}
+		out = append(out, inference.ToolDefinition{
+			Name:        name,
+			Description: t.Function.Description,
+			Parameters:  params,
+		})
+	}
+	return out, nil
+}
+
+func toInferenceToolCalls(calls []chatToolCall) []inference.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]inference.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		if strings.TrimSpace(c.Function.Name) == "" {
+			continue
+		}
+		out = append(out, inference.ToolCall{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func fromInferenceToolCalls(calls []inference.ToolCall) []chatToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]chatToolCall, len(calls))
+	for i, c := range calls {
+		out[i].ID = c.ID
+		out[i].Type = "function"
+		out[i].Function.Name = c.Name
+		out[i].Function.Arguments = c.Arguments
+	}
+	return out
+}
+
 func mapRole(role string) (inference.Role, error) {
 	switch strings.ToLower(strings.TrimSpace(role)) {
 	case string(inference.RoleSystem):
@@ -635,7 +783,18 @@ func mapRole(role string) (inference.Role, error) {
 		return inference.RoleUser, nil
 	case string(inference.RoleAssistant):
 		return inference.RoleAssistant, nil
-	case "tool", "function", "developer":
+	case string(inference.RoleTool):
+		// Supported since tool definitions became part of the buyer's signature.
+		// Before that a tool result had no call it could be bound to, so accepting
+		// one would have been accepting a turn nobody authorised.
+		return inference.RoleTool, nil
+	case "function", "developer":
+		// Still refused, and deliberately not aliased. "function" is OpenAI's
+		// retired spelling of a tool result and carries a name where a tool message
+		// carries a call id, so silently treating it as a tool message would bind a
+		// result to whichever call the model guessed. "developer" is a system
+		// message with a precedence this network does not implement; mapping it to
+		// system would claim an ordering guarantee nothing enforces.
 		return "", fmt.Errorf("role %q is not supported on this network yet", role)
 	default:
 		return "", fmt.Errorf("unknown role %q", role)

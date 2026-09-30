@@ -81,7 +81,12 @@ export type InferenceJobStatus =
   | 'INFERENCE_JOB_STATUS_FAILED'
   | 'INFERENCE_JOB_STATUS_SETTLING';
 
-export type ChatRole = 'CHAT_ROLE_UNSPECIFIED' | 'CHAT_ROLE_SYSTEM' | 'CHAT_ROLE_USER' | 'CHAT_ROLE_ASSISTANT';
+export type ChatRole =
+  | 'CHAT_ROLE_UNSPECIFIED'
+  | 'CHAT_ROLE_SYSTEM'
+  | 'CHAT_ROLE_USER'
+  | 'CHAT_ROLE_ASSISTANT'
+  | 'CHAT_ROLE_TOOL';
 
 export type AgentStatus =
   | 'AGENT_STATUS_UNSPECIFIED'
@@ -524,6 +529,33 @@ export function validateLockAttestations(
 export interface ChatMessage {
   role: ChatRole;
   content: string;
+  /** On a tool turn, which call this answers. Inside the signed digest. */
+  toolCallId?: string;
+  /** On an assistant turn, the calls the model made. Inside the signed digest. */
+  toolCalls?: SdkToolCall[];
+}
+
+/**
+ * One tool offered to the model. The CLIENT executes it; the node only says what
+ * to call.
+ */
+export interface SdkToolDefinition {
+  name: string;
+  description?: string;
+  /**
+   * A JSON Schema object as a STRING of raw JSON, not a parsed object. These bytes
+   * are inside a signature, and a parsed object would be re-serialized with some
+   * writer's own key order and spacing - so two implementations would sign two
+   * different byte strings from one input. Pass exactly the text you will send.
+   */
+  parameters?: string;
+}
+
+/** A call the model asked for. */
+export interface SdkToolCall {
+  id: string;
+  name: string;
+  arguments: string;
 }
 
 export interface InferenceJob {
@@ -854,6 +886,15 @@ export async function runAuthorizationSigningBytes(input: {
    */
   maxTokens?: number;
   temperature?: number;
+  /**
+   * The tools offered to the model, in the digest since v0.5.9. A node able to add
+   * a tool to a signed request asks the buyer's model a different question at the
+   * buyer's expense.
+   *
+   * Absent produces the pre-tool digest byte-for-byte, so a caller that uses no
+   * tools is unaffected.
+   */
+  tools?: SdkToolDefinition[];
 }): Promise<Uint8Array> {
   const messages: ChatMessage[] =
     input.messages && input.messages.length > 0
@@ -862,7 +903,12 @@ export async function runAuthorizationSigningBytes(input: {
         ? [{ role: 'CHAT_ROLE_USER', content: input.prompt }]
         : [];
 
-  const digest = await messagesDigest(messages, input.maxTokens ?? 0, input.temperature ?? 0);
+  const digest = await messagesDigest(
+    messages,
+    input.maxTokens ?? 0,
+    input.temperature ?? 0,
+    input.tools,
+  );
 
   const domain = utf8(RUN_AUTH_DOMAIN);
   const provider = utf8(input.provider);
@@ -902,6 +948,7 @@ async function messagesDigest(
   messages: ChatMessage[],
   maxTokens = 0,
   temperature = 0,
+  tools: SdkToolDefinition[] = [],
 ): Promise<Uint8Array> {
   const parts: Uint8Array[] = [];
   const count = new Uint8Array(8);
@@ -930,6 +977,37 @@ async function messagesDigest(
   new DataView(temp.buffer).setFloat64(0, temperature, false);
   parts.push(temp);
 
+  // The tool block, ONLY when there is a tool surface, so a request with no tools
+  // hashes byte-for-byte as it did in v0.5.8. See the node's writeToolBlock.
+  const surface =
+    tools.length > 0 ||
+    messages.some((m) => (m.toolCallId ?? '') !== '' || (m.toolCalls?.length ?? 0) > 0);
+  if (surface) {
+    const u64 = (n: number) => {
+      const b = new Uint8Array(8);
+      new DataView(b.buffer).setBigUint64(0, BigInt(n), false);
+      return b;
+    };
+    const lp = (s: string) => {
+      const bytes = utf8(s);
+      const len = new Uint8Array(4);
+      new DataView(len.buffer).setUint32(0, bytes.length, false);
+      return [len, bytes];
+    };
+    parts.push(u64(tools.length));
+    for (const t of tools) {
+      parts.push(...lp(t.name), ...lp(t.description ?? ''), ...lp(t.parameters ?? ''));
+    }
+    for (const m of messages) {
+      parts.push(...lp(m.toolCallId ?? ''));
+      const calls = m.toolCalls ?? [];
+      parts.push(u64(calls.length));
+      for (const c of calls) {
+        parts.push(...lp(c.id), ...lp(c.name), ...lp(c.arguments));
+      }
+    }
+  }
+
   let size = 0;
   for (const p of parts) size += p.length;
   const flat = new Uint8Array(size);
@@ -944,19 +1022,39 @@ async function messagesDigest(
 }
 
 /**
- * The node's internal role strings are "system" / "user" / "assistant", not the
- * proto enum names, and the digest is over those. Mapping here rather than
+ * The node's internal role strings are "system" / "user" / "assistant" / "tool",
+ * not the proto enum names, and the digest is over those. Mapping here rather than
  * asking a caller to know it is the difference between a signature that
  * verifies and one that mysteriously does not.
+ *
+ * AN UNKNOWN ROLE THROWS. It used to fall through to "user", and that default was
+ * worse than an error: an assistant turn whose role arrived misspelled hashed as a
+ * user turn, so the caller got a VALID SIGNATURE over a conversation it had not
+ * described. A signature nobody can tell is wrong is the one failure mode this
+ * whole file exists to prevent, so a role this function does not know is refused
+ * rather than guessed.
+ *
+ * CHAT_ROLE_UNSPECIFIED is NOT unknown - it is the proto zero value, meaning the
+ * field was not set, and the node reads an unset role as "user". It keeps that
+ * meaning here so a caller that omits the role still signs what the node verifies.
  */
 function roleWireName(role: ChatRole): string {
   switch (role) {
     case 'CHAT_ROLE_SYSTEM':
       return 'system';
+    case 'CHAT_ROLE_USER':
+    case 'CHAT_ROLE_UNSPECIFIED':
+      return 'user';
     case 'CHAT_ROLE_ASSISTANT':
       return 'assistant';
+    case 'CHAT_ROLE_TOOL':
+      return 'tool';
     default:
-      return 'user';
+      throw new Error(
+        `runAuthorizationSigningBytes: unknown chat role ${String(role)}. Refusing rather than ` +
+          `defaulting to "user": the signature would be valid over a different conversation ` +
+          `than the one you passed.`,
+      );
   }
 }
 

@@ -108,11 +108,23 @@ func (g *idempotencyGuard) release() {
 // requestFingerprint hashes what makes two requests the same request. It covers
 // the model and the messages, which is everything that decides what work is done
 // and what it costs.
-func requestFingerprint(model string, msgs []inference.Message, maxTokens int, temperature float64) string {
+//
+// TOOLS ARE IN IT for the same reason: two requests identical but for their tools
+// ask the model to do different things, and treating the second as a replay of the
+// first would answer it with the first one's completion. A loop's iterations differ
+// in their transcript so they were never at risk, but a client retrying with one
+// tool removed was.
+func requestFingerprint(model string, msgs []inference.Message, maxTokens int, temperature float64, tools []inference.ToolDefinition) string {
 	h := sha256.New()
 	fmt.Fprintf(h, "model\x00%s\x00max\x00%d\x00temp\x00%v\x00", model, maxTokens, temperature)
 	for _, m := range msgs {
-		fmt.Fprintf(h, "%s\x00%s\x00", m.Role, m.Content)
+		fmt.Fprintf(h, "%s\x00%s\x00%s\x00", m.Role, m.Content, m.ToolCallID)
+		for _, c := range m.ToolCalls {
+			fmt.Fprintf(h, "call\x00%s\x00%s\x00%s\x00", c.ID, c.Name, c.Arguments)
+		}
+	}
+	for _, t := range tools {
+		fmt.Fprintf(h, "tool\x00%s\x00%s\x00%s\x00", t.Name, t.Description, string(t.Parameters))
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }

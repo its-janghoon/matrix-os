@@ -131,6 +131,108 @@ In dependency order. Each step is landable on its own.
 
 ---
 
+## What was actually built, and where it departed from the above
+
+Steps 1 through 5 are done. Two things went differently, and both are worth
+knowing before reading the code.
+
+### The tool block in the digest is CONDITIONAL
+
+The plan above says tools go into `requestDigest`, and they do — but appending a
+zero tool count unconditionally would have changed the digest of every request
+that uses no tools, which is nearly all of them. That is a second
+compatibility-break three weeks after the first, for nothing.
+
+So the block is emitted only when the request has a **tool surface**: some tool
+offered, or some turn carrying tool metadata. A request without one hashes
+byte-for-byte as it did in v0.5.8, so every signature made before this change is
+still valid and the legacy arm can still be deleted on its original schedule.
+
+That is not a hole in either direction. Signing without tools and running with
+them is a different digest, so the added tools fail; signing with tools and
+running without them is also different. Both are refused.
+
+It did open one gap that had to be closed with it: the **legacy arm** verifies
+against the pre-v0.5.8 digest, which covers the transcript and nothing else. Left
+alone it would have accepted a legacy-signed request carrying any tools a node
+liked. The legacy arm is therefore closed to tool requests — which costs nothing
+real, since no client predating tools can be sending them.
+
+### Two things the plan did not mention had to move with it
+
+**The overbilling ceiling.** A tool schema is prompt tokens the seller really
+spent — several times the size of the question — and a call is completion tokens.
+The ceiling counted neither, so an honest tool-calling bill was clamped DOWN,
+underpaying the seller for work the buyer received. Same failure the reasoning
+text caused before it was counted, same direction. `MaxUnitsForResponse` counts
+both, and the browser's `maxUnitsFor` had to move in step: the node uses it to
+clamp and the browser uses it to REFUSE, so the two disagreeing means a reader is
+told their seller is overcharging, after funding, and forfeits the reservation.
+
+**The idempotency fingerprint.** Two requests identical but for their tools ask
+the model to do different things. Left uncovered, a retry with one tool removed
+would have been served the other request's answer.
+
+### The loop bound is a ceiling, not a suggestion
+
+`runWithTools` defaults to 4 round trips and caps any caller at 12. The cap is
+applied to what the caller asks for rather than trusted from it, because the
+caller is a page and a page can be wrong. A loop that runs out reports
+`exhausted` with the units it spent rather than throwing — the reader paid for
+those jobs and is owed both the partial work and the fact that it was cut off.
+
+### The tool path does not fall back
+
+The runtime falls back from the escrowed path to `chat()` when a node has not
+activated the escrow rules. `chat()` carries no tools, so falling back on a tool
+run would answer the question with a model that cannot search and no sign that
+anything was lost — which is the exact failure this feature exists to remove. The
+tool path surfaces the error instead.
+
+### There is no keyless general web search, so there is no web_search tool
+
+The first attempt held a `BRAVE_SEARCH_API_KEY` on a route in this app. The second
+moved the key into the reader's own browser. Both worked; neither shipped, because
+a key is a key — either one person pays for everyone's searches through an
+unauthenticated route, or every reader has to go and get a credential before
+`/chat` can look anything up.
+
+So the question became whether it can be done with **no key at all**, and the
+answer was measured rather than assumed:
+
+| candidate | keyless | CORS | usable |
+|---|---|---|---|
+| Brave | no | `405`, no headers | no |
+| Serper, Tavily | no | yes | key required |
+| DuckDuckGo Instant Answer | yes | `*` | **no** — returns an empty object for an ordinary query and for a bare entity alike; it answers a narrow set of canned questions, not searches |
+| public SearXNG instances | yes | none | **no** — `403`/`429`, or `200` with an HTML page because `format=json` is disabled, and no CORS header |
+
+General web search therefore does not exist on these terms, and no `web_search`
+tool is offered. A tool that cannot work is worse than an absent one: the model
+calls it, the call fails, and the reader pays for a round trip that could never
+have succeeded.
+
+### What IS offered, keyless: weather and wikipedia
+
+Two APIs are keyless, send `access-control-allow-origin: *`, and between them
+cover the questions that sent a reader looking for search in the first place —
+what the weather is, and what a thing is. `apps/web/src/lib/wallet/keylessTools.ts`.
+
+Nothing to configure, nothing that can be missing, so both are offered on every
+send. Their descriptions say what they do **not** cover — news, prices, who holds
+a role now, a specific page — so the model answers from its own knowledge there
+rather than calling something that cannot help.
+
+**The trap worth recording.** Open-Meteo's geocoder resolves `대구` to a village
+in **North Korea** before the city of 2.4 million, and returns nothing at all for
+`서울` while `Seoul` works. A tool that reported only a temperature would have
+answered the wrong country's weather with nothing anywhere to notice. So the
+resolved place, its region, its country and its timezone are part of the answer,
+the rejected candidates are listed, and the tool's own description tells the model
+to romanize the name. The failure is made visible rather than made unlikely.
+
+---
+
 ## What this design refuses
 
 **A node executing tools on the buyer's behalf.** The client executes and the

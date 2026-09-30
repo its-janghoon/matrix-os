@@ -29,12 +29,20 @@
 export const RUN_AUTH_DOMAIN = 'matrix/inference/run-authorization/v1';
 
 /** A chat turn's role, spelled exactly as it goes into the signed digest. */
-export type Role = 'system' | 'user' | 'assistant';
+export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
 /** One chat turn. The role spelling is inside the signature. */
 export interface Message {
   role: Role;
   content: string;
+  /**
+   * On a tool turn, the call this is the result of. Inside the signature, because a
+   * node free to re-point it could pair a result with the wrong call and the model
+   * would answer from the wrong one - a wrong answer with no error anywhere.
+   */
+  toolCallId?: string;
+  /** On an assistant turn, the calls the model made. Also inside the signature. */
+  toolCalls?: ToolCall[];
 }
 
 export function utf8(value: string): Uint8Array {
@@ -140,6 +148,42 @@ export interface RunAuthorizationSigningInput {
    */
   maxTokens?: number;
   temperature?: number;
+  /**
+   * The tools offered to the model, in the digest since v0.5.9.
+   *
+   * A tool definition tells the model what it may do, so a node able to add one to
+   * a signed request asks the buyer's model a different question at the buyer's
+   * expense. Covering them is what removes that.
+   *
+   * THE BLOCK IS CONDITIONAL. It is emitted only when the request has a tool
+   * surface - some tool offered, or some turn carrying tool metadata - so a request
+   * with no tools hashes byte-for-byte as it did in v0.5.8. Emitting a zero count
+   * unconditionally would change every existing signature and cost a second
+   * compatibility window for nothing.
+   */
+  tools?: ToolDefinition[];
+}
+
+/** One tool a buyer offers the model. The CLIENT executes it; the node never does. */
+export interface ToolDefinition {
+  name: string;
+  description?: string;
+  /**
+   * A JSON Schema object as a STRING of raw JSON, not a parsed object.
+   *
+   * These bytes are inside a signature, and a parsed object would be re-serialized
+   * by whichever JSON writer runs - with its own key order, spacing and number
+   * formatting - so two implementations would sign two different byte strings from
+   * one input. Hold the text you will send and pass exactly that.
+   */
+  parameters?: string;
+}
+
+/** A tool call the model asked for, replayed on a later turn of a loop. */
+export interface ToolCall {
+  id: string;
+  name: string;
+  arguments: string;
 }
 
 /**
@@ -161,7 +205,12 @@ export interface RunAuthorizationSigningInput {
 export async function runAuthorizationSigningBytes(
   input: RunAuthorizationSigningInput,
 ): Promise<Uint8Array> {
-  const digest = await messagesDigest(input.messages, input.maxTokens ?? 0, input.temperature ?? 0);
+  const digest = await messagesDigest(
+    input.messages,
+    input.maxTokens ?? 0,
+    input.temperature ?? 0,
+    input.tools,
+  );
   return concat([
     lp(utf8(RUN_AUTH_DOMAIN)),
     lp(input.fromPublicKey),
@@ -190,6 +239,7 @@ export async function messagesDigest(
   messages: Message[],
   maxTokens = 0,
   temperature = 0,
+  tools: ToolDefinition[] = [],
 ): Promise<Uint8Array> {
   const parts: Uint8Array[] = [u64(BigInt(messages.length))];
   for (const m of messages) {
@@ -199,8 +249,51 @@ export async function messagesDigest(
   const temp = new Uint8Array(8);
   new DataView(temp.buffer).setFloat64(0, temperature, false);
   parts.push(temp);
+  if (hasToolSurface(messages, tools)) {
+    parts.push(...toolBlock(messages, tools));
+  }
   const hash = await crypto.subtle.digest('SHA-256', concat(parts) as BufferSource);
   return new Uint8Array(hash);
+}
+
+/**
+ * Whether this request involves tools at all.
+ *
+ * It reads the TRANSCRIPT as well as the tool list, because iteration two of a loop
+ * replays the model's own call and the client's result even when the caller stops
+ * offering the tools - and those have to be signed for the same reason the
+ * definitions do.
+ */
+function hasToolSurface(messages: Message[], tools: ToolDefinition[]): boolean {
+  if (tools.length > 0) return true;
+  return messages.some((m) => (m.toolCallId ?? '') !== '' || (m.toolCalls?.length ?? 0) > 0);
+}
+
+/**
+ * The definitions, then every message's tool metadata.
+ *
+ * ORDER IS AS GIVEN, not sorted: the sequence is part of what the buyer signed, so
+ * a node reordering the tools produces a different digest.
+ *
+ * The per-message part walks EVERY message rather than only those carrying
+ * metadata, so there is no index to encode and no sparse-set convention for another
+ * language to get subtly wrong. An ordinary turn contributes an empty prefix and a
+ * zero count.
+ */
+function toolBlock(messages: Message[], tools: ToolDefinition[]): Uint8Array[] {
+  const parts: Uint8Array[] = [u64(BigInt(tools.length))];
+  for (const t of tools) {
+    parts.push(lp(utf8(t.name)), lp(utf8(t.description ?? '')), lp(utf8(t.parameters ?? '')));
+  }
+  for (const m of messages) {
+    parts.push(lp(utf8(m.toolCallId ?? '')));
+    const calls = m.toolCalls ?? [];
+    parts.push(u64(BigInt(calls.length)));
+    for (const c of calls) {
+      parts.push(lp(utf8(c.id)), lp(utf8(c.name)), lp(utf8(c.arguments)));
+    }
+  }
+  return parts;
 }
 
 /**

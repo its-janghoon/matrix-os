@@ -243,12 +243,32 @@ Still open:
   path bills the seller for its own work. Needs a look on the GPU box.
 - **Re-encrypt or retire `prod-smoke-buyer.json`**, a plaintext key on the GPU
   box from an early smoke test.
-- **Tool calls do not exist in the protocol**, only in the UI's ambition.
-  **Decided: build them.** So the UI's claim stops being false by being made
-  true, rather than by being removed. Nothing is designed yet - the first
-  question is whether a tool call is a protocol-level field on the inference
-  job or something the seller's own model server handles behind the door, and
-  that answer decides whether this needs a protocol version at all.
+- **Tool calls are BUILT, and web search is the first one.** Seller-side, no
+  protocol version. A tool definition is inside the buyer's signed digest, so a
+  node cannot attach a tool to a signed request; the block is emitted only when a
+  request has tools, so every pre-v0.5.9 signature stays valid. The node never
+  RUNS a tool: it returns what the model asked for, `runWithTools` executes it and
+  comes back as a new job. Each round trip is its own reservation and settlement,
+  bounded at 4 by default and 12 absolutely, because nothing in the protocol
+  bounds the number of jobs. Design and the departures from it:
+  `docs/designs/tool-calls.md`.
+  - **Nothing to configure, and no web search.** There is no keyless general web
+    search a browser can call — measured: every general engine needs a key,
+    DuckDuckGo's keyless API returns an empty object for an ordinary query, and
+    public SearXNG instances answer 403/429 or serve HTML with no CORS header. So
+    no `web_search` tool is offered at all, rather than one that fails and is paid
+    for. What IS offered, keyless and always on: `weather` (Open-Meteo) and
+    `wikipedia`. News, prices and "who holds this role now" remain out of reach.
+  - **The geocoding trap.** Open-Meteo resolves `대구` to a village in NORTH KOREA
+    before the city, and finds nothing for `서울` while `Seoul` works. The tool
+    therefore reports the place, region, country and timezone it actually used and
+    lists the candidates it rejected, so a wrong match is visible instead of being
+    a confidently wrong temperature.
+  - **Merge and roll out together.** `apps/web` deploys on merge and signs the
+    new digest; a node that has not been upgraded verifies the old one. The
+    compatibility arm lives on the NODE, so it protects old clients from new
+    nodes — the opposite of this deploy's direction. A node that refuses the
+    reservation falls through to a tool-free answer that SAYS it had no tools.
 
 ### 5. Open questions with no owner
 

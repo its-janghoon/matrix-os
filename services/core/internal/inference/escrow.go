@@ -364,6 +364,10 @@ func (s *Service) StreamEscrowed(ctx context.Context, jobID string, streamAuth [
 	// it, chunk by chunk, which is the entire point of this path.
 	job.Completion = result.Response.Completion
 	job.Reasoning = result.Response.Reasoning
+	// The calls the model asked for. This is the path /chat uses, so dropping them here
+	// meant the browser saw a finished job with an empty answer and no way to know the
+	// model had asked to search - the loop would never take a second step.
+	job.ToolCalls = result.Response.ToolCalls
 	job.Units = amount
 	job.Usage = result.Response.Usage
 	job.Model = result.Response.Model
@@ -567,7 +571,7 @@ func (s *Service) escrowCharge(marketJobID string, req InferenceRequest, resp In
 	if billable > mjob.Units {
 		billable = mjob.Units
 	}
-	if ceiling := MaxUnitsFor(req, resp.Completion, resp.Reasoning); billable > ceiling {
+	if ceiling := MaxUnitsForResponse(req, resp); billable > ceiling {
 		billable = ceiling
 	}
 	amount, err := market.CheckedMul(billable, mjob.PricePerUnit)

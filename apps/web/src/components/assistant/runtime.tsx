@@ -13,6 +13,25 @@ import { chat, reportProblem, type SellerChoice } from '@/lib/wallet/node';
 import { checkReceipt, type ReceiptCheck } from '@/lib/wallet/receipt';
 import type { Message } from '@/lib/wallet/signing';
 import type { Signer } from '@/lib/wallet/signer';
+import { runWithTools } from '@/lib/wallet/toolLoop';
+import { keylessTools } from '@/lib/wallet/keylessTools';
+
+/**
+ * The model's search query, for the line shown while it runs.
+ *
+ * The arguments are the model's raw JSON and may not parse. A failure here shows the
+ * text as-is rather than throwing: this is a progress label, and losing the whole
+ * answer because a label could not be formatted would be absurd.
+ */
+function describeQuery(rawArguments: string): string {
+  try {
+    const parsed = JSON.parse(rawArguments) as { query?: unknown };
+    if (typeof parsed.query === 'string' && parsed.query.trim() !== '') return parsed.query;
+  } catch {
+    // Fall through to the raw text.
+  }
+  return rawArguments.slice(0, 120);
+}
 
 /**
  * The message a reader sees when a purchase fails.
@@ -59,6 +78,14 @@ export interface Purchase {
    * thing a reader cannot detect for themselves, and they were billed for it.
    */
   cutShort?: boolean;
+  /**
+   * How many jobs this one answer took, when it took more than one.
+   *
+   * A tool loop is several jobs with several settlements, and `units` is their total.
+   * Without this number a reader seeing a larger-than-usual charge has no way to tell
+   * a four-job search from one expensive job.
+   */
+  jobs?: number;
 }
 
 export interface MatrixChatSettings {
@@ -156,6 +183,12 @@ export function MatrixRuntimeProvider({
 
         const history = transcriptOf(messages);
 
+        // Always offered: these need no key, so there is nothing to configure and
+        // nothing that can be missing. They are NOT general web search - there is no
+        // keyless general search a page can call - so the model is told what they cover
+        // and answers from its own knowledge otherwise. See keylessTools.ts.
+        const tools = keylessTools();
+
         // The text so far, and a promise that resolves when the whole exchange
         // has settled. The deltas arrive in a callback rather than as an async
         // iterator, so they are queued here and drained by the loop below - a
@@ -168,6 +201,120 @@ export function MatrixRuntimeProvider({
         // it the reservation is funded, and retrying down the other path would
         // pay for the same answer twice.
         let phase: EscrowPhase = 'reserving';
+
+        // Set when the tool run could not even reserve, so the tool-free path below is
+        // used instead and the reader is told the tools were unavailable.
+        let toolsUnavailable = '';
+
+        if (tools.length > 0) {
+          // A FAILURE HERE FALLS THROUGH, but never silently. The path below drops to
+          // chat(), which carries no tools, so a quiet fallback would answer the
+          // question with a model that cannot look anything up and no sign that
+          // anything was lost - the exact failure this feature exists to remove. It is
+          // only reached when the reservation was REFUSED, which is the case of a node
+          // that has not activated the escrow rules, and there the alternative is no
+          // answer at all. So it falls through and the answer says it did.
+          let spent = 0n;
+          const loop = runWithTools(endpoint, signer, {
+            model,
+            messages: history,
+            tools,
+            minBond,
+            chosen,
+            ...(abortSignal ? { signal: abortSignal } : {}),
+            onPhase: (p) => {
+              phase = p;
+            },
+            onDelta: (delta) => {
+              text += delta;
+              pending = true;
+            },
+            onToolStart: (call) => {
+              // Shown in the answer, not hidden. The reader is paying for another job
+              // each time this happens, so a search that runs silently is a charge
+              // they cannot account for.
+              text += `${text === '' ? '' : '\n\n'}_searching: ${describeQuery(call.arguments)}_\n\n`;
+              pending = true;
+            },
+            onToolResult: (_call, result, toolFailed) => {
+              if (toolFailed) {
+                text += `_the search failed: ${result}_\n\n`;
+                pending = true;
+              }
+            },
+          })
+            .then((r) => {
+              spent = r.units;
+              return r;
+            })
+            .catch((err: unknown) => {
+              failed = err;
+              return undefined;
+            })
+            .finally(() => {
+              finished = true;
+            });
+
+          while (!finished) {
+            await new Promise((r) => setTimeout(r, 50));
+            if (pending) {
+              pending = false;
+              yield { content: [{ type: 'text' as const, text }] };
+            }
+          }
+          const result = await loop;
+          if (failed !== undefined) {
+            // Past the reserve the money is committed, so a retry would pay for the
+            // same answer twice. Only a refused RESERVATION falls through.
+            if (phase !== 'reserving') throw shown(failed);
+            if (abortSignal?.aborted) throw shown(failed);
+            toolsUnavailable = reportProblem(failed);
+            text = '';
+            pending = false;
+            finished = false;
+            failed = undefined;
+          } else if (result !== undefined) {
+            const lastRun = result.runs[result.runs.length - 1];
+            if (lastRun === undefined) throw new Error('the seller produced no answer');
+            latest.current.onSettled?.();
+
+            const receipt = await checkReceipt(lastRun, result.messages, signer.accountId);
+            const answer =
+              result.exhausted && result.completion === ''
+                ? `The model was still calling tools after ${result.runs.length} attempts, so this ` +
+                  `stopped there. Ask again to continue.`
+                : result.completion;
+
+            yield {
+              content: [
+                ...(lastRun.reasoning !== ''
+                  ? [{ type: 'reasoning' as const, text: lastRun.reasoning }]
+                  : []),
+                { type: 'text' as const, text: answer },
+              ],
+              metadata: {
+                custom: {
+                  purchase: {
+                    provider: lastRun.provider,
+                    model: lastRun.model || model,
+                    // Every job the ask took, not just the last one. A reader shown only
+                    // the final leg would think a four-job search cost what one job did.
+                    units: spent.toString(),
+                    promptTokens: lastRun.promptTokens,
+                    completionTokens: lastRun.completionTokens,
+                    servedBy: lastRun.seller.endpoint,
+                    ...(receipt ? { receipt } : {}),
+                    ...(lastRun.cutShort ? { cutShort: true } : {}),
+                    ...(result.runs.length > 1 ? { jobs: result.runs.length } : {}),
+                  } satisfies Purchase,
+                },
+              },
+            };
+            return;
+          } else {
+            throw new Error('the seller produced no answer');
+          }
+        }
 
         const run = chatEscrowed(endpoint, signer, {
           model,
@@ -251,7 +398,18 @@ export function MatrixRuntimeProvider({
             ...(settled.reasoning !== ''
               ? [{ type: 'reasoning' as const, text: settled.reasoning }]
               : []),
-            { type: 'text' as const, text: settled.completion },
+            {
+              type: 'text' as const,
+              // The notice comes FIRST when the tools were skipped. This node refused
+              // the reservation the tool path needs, so the answer below was produced
+              // by a model that could not look anything up - and a reader who is not
+              // told that cannot tell a remembered fact from a checked one.
+              text:
+                toolsUnavailable === ''
+                  ? settled.completion
+                  : `_Answered without the weather and Wikipedia tools: this node refused the ` +
+                    `reservation they need (${toolsUnavailable})._\n\n${settled.completion}`,
+            },
           ],
           metadata: { custom: { purchase } },
         };

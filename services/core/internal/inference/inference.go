@@ -24,6 +24,7 @@ package inference
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -57,14 +58,62 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	// RoleTool is the result of a tool the CLIENT executed, handed back to the
+	// model as one more turn. The node never runs a tool - see ToolDefinition.
+	RoleTool Role = "tool"
 )
 
 // Message is one turn in a chat conversation.
 type Message struct {
-	// Role is the speaker: system, user, or assistant.
+	// Role is the speaker: system, user, assistant, or tool.
 	Role Role `json:"role"`
-	// Content is the message text.
+	// Content is the message text. For a tool message it is the tool's output.
 	Content string `json:"content"`
+	// ToolCallID, on a tool message, says which call this is the result of. The
+	// model needs it to match a result to the call it made; two calls in flight
+	// without it are indistinguishable.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolCalls, on an assistant message, is what the model asked to call on a
+	// previous turn. A tool loop replays it so the model can see its own request
+	// beside the result.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+}
+
+// ToolDefinition is one tool the buyer offers the model, in the shape an
+// OpenAI-compatible model server expects.
+//
+// THE NODE NEVER EXECUTES ONE. It only passes the definitions to the model and
+// returns whatever the model asked to call; the client runs the tool and sends the
+// result back as a RoleTool message. A seller that ran the tool would need the
+// buyer's credentials for whatever the tool reaches, which is a custody story this
+// network has already declined once.
+type ToolDefinition struct {
+	// Name is the function name the model will call.
+	Name string `json:"name"`
+	// Description tells the model when to use it.
+	Description string `json:"description,omitempty"`
+	// Parameters is a JSON Schema object, carried as RAW JSON rather than a
+	// decoded map.
+	//
+	// WHY RAW. This is inside the buyer's signature, and a re-serialized object
+	// would require Go and JavaScript to agree about key order, spacing and number
+	// formatting before two implementations could compute the same digest - the
+	// same trap that made Temperature hash as its IEEE-754 bits instead of as
+	// text. The bytes the caller sent have one spelling, so they are what is
+	// hashed and what is forwarded.
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+}
+
+// ToolCall is the model asking for a tool to be run. The client executes it.
+type ToolCall struct {
+	// ID correlates this call with the RoleTool message that answers it.
+	ID string `json:"id"`
+	// Name is the tool being called, matching a ToolDefinition.Name.
+	Name string `json:"name"`
+	// Arguments is the model's JSON argument object, raw as the model emitted it.
+	// It is NOT validated against the schema here: the client owns the tool and
+	// is the only party that can say what its arguments mean.
+	Arguments string `json:"arguments"`
 }
 
 // InferenceRequest describes an inference job to run against a Backend. A caller
@@ -82,6 +131,10 @@ type InferenceRequest struct {
 	MaxTokens int `json:"max_tokens,omitempty"`
 	// Temperature optionally controls sampling. Zero means the backend default.
 	Temperature float64 `json:"temperature,omitempty"`
+	// Tools are the tools the buyer offers the model for this run. Empty is the
+	// ordinary case and hashes exactly as it did before tools existed, so a client
+	// that never uses them signs the same digest it always did.
+	Tools []ToolDefinition `json:"tools,omitempty"`
 }
 
 // Messages returns the effective chat transcript for the request: the explicit
@@ -128,6 +181,14 @@ type InferenceResponse struct {
 	//
 	// Empty for a model with no reasoning, which is most of them.
 	Reasoning string `json:"reasoning,omitempty"`
+	// ToolCalls is what the model asked to have run instead of, or as well as,
+	// answering. The CLIENT executes these and sends the results back as RoleTool
+	// messages in a new job; this node does not run them.
+	//
+	// A completion with tool calls and no Completion text is normal and is not an
+	// error: the model chose to act rather than speak. It is still billable work,
+	// because the tokens were generated either way.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// Usage is the token accounting for the inference.
 	Usage Usage `json:"usage"`
 	// Units is the billable marketplace quantity for this inference. It is the
@@ -286,6 +347,31 @@ const maxUnitsFloor = 64
 // the ceiling was not protecting the buyer there, it was underpaying the seller
 // for tokens the buyer received.
 func MaxUnitsFor(req InferenceRequest, completion, reasoning string) uint64 {
+	return maxUnitsFor(req, completion, reasoning, nil)
+}
+
+// MaxUnitsForResponse is MaxUnitsFor with the response's tool calls counted too.
+// Use it wherever the whole response is to hand; MaxUnitsFor remains for the
+// callers that hold only text.
+//
+// WHY TOOL TEXT HAS TO COUNT. A tool definition is sent to the model, so its schema
+// is prompt tokens the provider really spent - and a schema is hundreds of bytes,
+// several times the question. A tool CALL is completion tokens for the same reason.
+// A ceiling blind to both bounds an honest tool-calling run below what it actually
+// cost, and the clamp then underpays the seller for work the buyer received. That
+// is the same failure the reasoning text caused before it was counted, in the same
+// direction.
+//
+// The contribution is present only when the request or response carries tools, so
+// the ceiling for every request that uses none is byte-for-byte what it was. That
+// matters because the BUYER recomputes this number to check its own bill: a formula
+// that moved for all requests would have every buyer on an older client disagreeing
+// with its node until it upgraded.
+func MaxUnitsForResponse(req InferenceRequest, resp InferenceResponse) uint64 {
+	return maxUnitsFor(req, resp.Completion, resp.Reasoning, resp.ToolCalls)
+}
+
+func maxUnitsFor(req InferenceRequest, completion, reasoning string, calls []ToolCall) uint64 {
 	var (
 		bytes    int
 		messages int
@@ -299,6 +385,20 @@ func MaxUnitsFor(req InferenceRequest, completion, reasoning string) uint64 {
 	// The completion is one more message's worth of text and template.
 	messages++
 	bytes += len(completion) + len(reasoning)
+
+	// Tools, when there are any. Each definition is text the model was shown and
+	// each call is text it produced; both are charged to the buyer either way.
+	for _, t := range req.Tools {
+		bytes += len(t.Name) + len(t.Description) + len(t.Parameters)
+	}
+	if len(req.Tools) > 0 {
+		// The definitions arrive as their own block in the prompt template, so they
+		// carry a per-block overhead in the same way a message does.
+		messages++
+	}
+	for _, c := range calls {
+		bytes += len(c.ID) + len(c.Name) + len(c.Arguments)
+	}
 
 	ceiling := uint64(bytes/bytesPerTokenCeiling) + uint64(messages)*tokensPerMessageOverhead
 	if ceiling < maxUnitsFloor {

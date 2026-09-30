@@ -55,16 +55,51 @@ type vector struct {
 	// the TypeScript side of this guard on its first run, which is what the guard
 	// is for. Proto JSON already spells int64 as a string for the same reason -
 	// the market API returns amounts and totals that way.
-	Timestamp string              `json:"timestamp"`
-	Messages  []map[string]string `json:"messages"`
+	Timestamp string          `json:"timestamp"`
+	Messages  []vectorMessage `json:"messages"`
 	// MaxTokens and Temperature joined the digest in v0.5.8. Carried explicitly so
 	// the vectors exercise them rather than only their zero values - a field hashed
 	// as zero everywhere is indistinguishable from a field nobody hashes.
 	MaxTokens   int     `json:"maxTokens"`
 	Temperature float64 `json:"temperature"`
+	// Tools joined the digest in v0.5.9, as a block emitted ONLY when the request
+	// has a tool surface. That conditionality is itself a thing to pin: a vector
+	// with no tools must hash exactly as it did before tools existed, so the cases
+	// below deliberately include both kinds and a TypeScript copy that emits the
+	// block unconditionally fails on the tool-free ones.
+	Tools []vectorTool `json:"tools,omitempty"`
 	// SigningBytesHex is the whole authorization payload, so a difference in the
 	// digest and a difference in the framing around it are told apart.
 	SigningBytesHex string `json:"signingBytesHex"`
+}
+
+// vectorMessage is a turn as the JSON file carries it. Tool fields are omitted
+// when empty so the tool-free vectors stay readable and a reader can see at a
+// glance which cases exercise the block.
+type vectorMessage struct {
+	Role       string           `json:"role"`
+	Content    string           `json:"content"`
+	ToolCallID string           `json:"toolCallId,omitempty"`
+	ToolCalls  []vectorToolCall `json:"toolCalls,omitempty"`
+}
+
+type vectorTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// Parameters is a STRING holding raw JSON, not a nested object.
+	//
+	// It has to be, for the same reason the timestamp is a string: the bytes are
+	// what is hashed, and a nested object would be re-serialized by each language's
+	// JSON writer with its own key order and spacing. Two implementations would
+	// then hash two different byte strings from one file and the vector would be
+	// testing the JSON writers rather than the digest.
+	Parameters string `json:"parameters,omitempty"`
+}
+
+type vectorToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 func main() {
@@ -81,6 +116,7 @@ func main() {
 		maxTokens                  int
 		temperature                float64
 		messages                   []inference.Message
+		tools                      []inference.ToolDefinition
 	}{
 		{
 			name:      "ascii",
@@ -170,6 +206,90 @@ func main() {
 				{Role: inference.RoleUser, Content: "x"},
 			},
 		},
+		{
+			name:      "tool-offered",
+			why:       "one tool offered and none called yet: this is the request /chat sends on the first turn of a search, and it is where a node adding a tool of its own has to fail",
+			provider:  "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+			model:     "qwen3.6-27b",
+			timestamp: 1790059598000000000,
+			maxTokens: 512,
+			messages: []inference.Message{
+				{Role: inference.RoleUser, Content: "서울 날씨 어때?"},
+			},
+			tools: []inference.ToolDefinition{{
+				Name:        "web_search",
+				Description: "Search the web and return result titles and snippets.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+			}},
+		},
+		{
+			name:      "tool-name-astral",
+			why:       "a non-ASCII tool name and a schema with a non-ASCII description: the tool block has its own length prefixes and they meet the byte-versus-UTF-16 trap independently of the transcript's",
+			provider:  "p",
+			model:     "m",
+			timestamp: 4,
+			messages: []inference.Message{
+				{Role: inference.RoleUser, Content: "go"},
+			},
+			tools: []inference.ToolDefinition{
+				{
+					Name:        "날씨_조회🜛",
+					Description: "도시 이름으로 날씨를 찾는다",
+					Parameters:  json.RawMessage(`{"type":"object","properties":{"도시":{"type":"string"}}}`),
+				},
+				{
+					// No description and no parameters: both are length-prefixed as
+					// zero rather than skipped, so a tool with neither is still
+					// distinguishable from one that is absent.
+					Name: "b",
+				},
+			},
+		},
+		{
+			name:      "tool-loop-turn",
+			why:       "iteration two: the assistant's own call and the client's result are replayed, and both are signed - a node that rewrote the arguments would be telling the model it had asked something it did not ask",
+			provider:  "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+			model:     "qwen3.6-27b",
+			timestamp: 1790059598000000005,
+			maxTokens: 512,
+			messages: []inference.Message{
+				{Role: inference.RoleUser, Content: "서울 날씨 어때?"},
+				{Role: inference.RoleAssistant, ToolCalls: []inference.ToolCall{{
+					ID:        "call_abc123",
+					Name:      "web_search",
+					Arguments: `{"query":"서울 날씨"}`,
+				}}},
+				{Role: inference.RoleTool, ToolCallID: "call_abc123", Content: "맑음, 최고 26도"},
+			},
+			tools: []inference.ToolDefinition{{
+				Name:        "web_search",
+				Description: "Search the web and return result titles and snippets.",
+				Parameters:  json.RawMessage(`{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}`),
+			}},
+		},
+		{
+			name:      "tool-metadata-without-tools",
+			why:       "a transcript carrying a tool result while offering no tools still emits the block, because the result and the call it answers are what a node would otherwise be free to rewrite",
+			provider:  "p",
+			model:     "m",
+			timestamp: 5,
+			messages: []inference.Message{
+				{Role: inference.RoleTool, ToolCallID: "c1", Content: "42"},
+			},
+		},
+		{
+			name:      "two-calls-one-turn",
+			why:       "two calls in one assistant turn, so their order is inside the signature: swapping them would pair each result with the other's call",
+			provider:  "p",
+			model:     "m",
+			timestamp: 6,
+			messages: []inference.Message{
+				{Role: inference.RoleAssistant, ToolCalls: []inference.ToolCall{
+					{ID: "c1", Name: "a", Arguments: `{"x":1}`},
+					{ID: "c2", Name: "a", Arguments: `{"x":2}`},
+				}},
+			},
+		},
 	}
 
 	out := make([]vector, 0, len(cases))
@@ -185,10 +305,31 @@ func main() {
 			Messages:    c.messages,
 			MaxTokens:   c.maxTokens,
 			Temperature: c.temperature,
+			Tools:       c.tools,
 		}
-		wire := make([]map[string]string, 0, len(c.messages))
+		wire := make([]vectorMessage, 0, len(c.messages))
 		for _, m := range c.messages {
-			wire = append(wire, map[string]string{"role": string(m.Role), "content": m.Content})
+			vm := vectorMessage{
+				Role:       string(m.Role),
+				Content:    m.Content,
+				ToolCallID: m.ToolCallID,
+			}
+			for _, call := range m.ToolCalls {
+				vm.ToolCalls = append(vm.ToolCalls, vectorToolCall{
+					ID:        call.ID,
+					Name:      call.Name,
+					Arguments: call.Arguments,
+				})
+			}
+			wire = append(wire, vm)
+		}
+		var tools []vectorTool
+		for _, t := range c.tools {
+			tools = append(tools, vectorTool{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  string(t.Parameters),
+			})
 		}
 		out = append(out, vector{
 			Name:            c.name,
@@ -200,6 +341,7 @@ func main() {
 			Messages:        wire,
 			MaxTokens:       c.maxTokens,
 			Temperature:     c.temperature,
+			Tools:           tools,
 			SigningBytesHex: hex.EncodeToString(auth.SigningBytes(req)),
 		})
 	}

@@ -3,6 +3,7 @@ package inference
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -51,11 +52,14 @@ func TestTheEchoBackendStreamsAndTheChunksReassemble(t *testing.T) {
 
 	// And the response must be identical to the one-shot one, or what settles
 	// would depend on which method a caller happened to use.
+	//
+	// reflect.DeepEqual rather than ==: the response carries ToolCalls now, and a
+	// struct holding a slice is not comparable. The check is the same one.
 	oneShot, err := b.Infer(context.Background(), InferenceRequest{Prompt: "one two three four"})
 	if err != nil {
 		t.Fatalf("Infer: %v", err)
 	}
-	if resp != oneShot {
+	if !reflect.DeepEqual(resp, oneShot) {
 		t.Fatalf("streamed response %+v differs from the one-shot %+v", resp, oneShot)
 	}
 }

@@ -72,23 +72,60 @@ const bytes = (s: string): number => new TextEncoder().encode(s).length;
  * DELIVERED to the buyer alongside the answer and they are charged for it;
  * leaving it out once billed a live sale 241 units for 864 tokens of real work,
  * where the ceiling was not protecting the buyer but underpaying the seller.
+ *
+ * `tools` and `toolCalls` are counted for exactly the same reason, and this must stay
+ * in step with the node's MaxUnitsForResponse. A tool SCHEMA is sent to the model, so
+ * it is prompt tokens the seller really spent - several times the size of the
+ * question - and a CALL is completion tokens. A ceiling blind to both would refuse an
+ * honest tool-calling bill here, in the browser, after the deposit was funded: the
+ * reader would be told the seller was overcharging and would forfeit the whole
+ * reservation at expiry. The tool contribution is present only when tools are, so
+ * every tool-free exchange gets the number it always did.
  */
 export function maxUnitsFor(
   messages: CeilingMessage[],
   completion: string,
   reasoning = '',
+  tools: CeilingTool[] = [],
+  toolCalls: CeilingToolCall[] = [],
 ): bigint {
   let total = 0;
   for (const m of messages) total += bytes(m.role) + bytes(m.content);
 
   // The completion is one more message's worth of text and template.
-  const count = messages.length + 1;
+  let count = messages.length + 1;
   total += bytes(completion) + bytes(reasoning);
+
+  for (const t of tools) {
+    total += bytes(t.name) + bytes(t.description ?? '') + bytes(t.parameters ?? '');
+  }
+  if (tools.length > 0) {
+    // The definitions arrive as their own block in the prompt template, so they
+    // carry a per-block overhead the same way a message does.
+    count += 1;
+  }
+  for (const c of toolCalls) {
+    total += bytes(c.id) + bytes(c.name) + bytes(c.arguments);
+  }
 
   const ceiling =
     BigInt(Math.floor(total / BYTES_PER_TOKEN_CEILING)) +
     BigInt(count) * BigInt(TOKENS_PER_MESSAGE_OVERHEAD);
   return ceiling < MAX_UNITS_FLOOR ? MAX_UNITS_FLOOR : ceiling;
+}
+
+/** A tool definition, as far as the ceiling is concerned: its bytes. */
+export interface CeilingTool {
+  name: string;
+  description?: string;
+  parameters?: string;
+}
+
+/** A call the model made, as far as the ceiling is concerned: its bytes. */
+export interface CeilingToolCall {
+  id: string;
+  name: string;
+  arguments: string;
 }
 
 /**
@@ -108,6 +145,9 @@ export function checkSettlement(input: {
   messages: CeilingMessage[];
   completion: string;
   reasoning?: string;
+  /** The tools this run offered, and the calls it produced. Both are charged. */
+  tools?: CeilingTool[];
+  toolCalls?: CeilingToolCall[];
 }): { ok: true } | { ok: false; reason: string } {
   if (input.amount === 0n) {
     return { ok: false, reason: 'the settlement is for nothing, which consensus refuses' };
@@ -120,7 +160,13 @@ export function checkSettlement(input: {
   }
   if (input.pricePerUnit === 0n) return { ok: true };
 
-  const ceiling = maxUnitsFor(input.messages, input.completion, input.reasoning ?? '');
+  const ceiling = maxUnitsFor(
+    input.messages,
+    input.completion,
+    input.reasoning ?? '',
+    input.tools ?? [],
+    input.toolCalls ?? [],
+  );
   const most = ceiling * input.pricePerUnit;
   if (input.amount > most) {
     return {

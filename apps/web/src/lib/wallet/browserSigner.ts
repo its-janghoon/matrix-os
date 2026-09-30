@@ -11,7 +11,7 @@
  */
 
 import { paymentSigningBytes, runAuthorizationSigningBytes } from './signing';
-import type { Message, PaymentFields, PaymentSignature, RunAuthorization, Signer } from './signer';
+import type { PaymentFields, PaymentSignature, RunAuthorization, RunAuthorizationInput, Signer } from './signer';
 import type { Wallet } from './wallet';
 
 export function browserSigner(wallet: Wallet): Signer {
@@ -19,18 +19,14 @@ export function browserSigner(wallet: Wallet): Signer {
     kind: 'browser',
     accountId: wallet.accountId,
 
-    async signRunAuthorization(input: {
-      provider: string;
-      model: string;
-      messages: Message[];
-      timestamp: bigint;
-    }): Promise<RunAuthorization> {
+    async signRunAuthorization(input: RunAuthorizationInput): Promise<RunAuthorization> {
       const bytes = await runAuthorizationSigningBytes({
         fromPublicKey: wallet.publicKey,
         provider: input.provider,
         model: input.model,
         timestamp: input.timestamp,
         messages: input.messages,
+        tools: input.tools,
       });
       return {
         publicKey: wallet.publicKey,
