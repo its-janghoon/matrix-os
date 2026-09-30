@@ -252,11 +252,12 @@ Still open:
   bounded at 4 by default and 12 absolutely, because nothing in the protocol
   bounds the number of jobs. Design and the departures from it:
   `docs/designs/tool-calls.md`.
-  - **`BRAVE_SEARCH_API_KEY` must be set on the web deployment** or the tool is
-    not offered and `/chat` answers as it did before. The route that holds it is
-    `apps/web/src/app/api/tools/web-search/route.ts`, it is UNAUTHENTICATED, and
-    the search quota is the whole exposure — no chain key or budget is reachable
-    from it. Put auth in front of it if that quota matters.
+  - **Nothing to configure on the deployment.** The search key is the READER's,
+    pasted into `/chat` settings and held in their own browser; they spend their
+    own quota and the key never reaches a node, a seller or this repo. Serper or
+    Tavily, because those two allow a browser to call them — Brave answers a CORS
+    preflight with 405 and cannot be used from a page at all. No key means the
+    tool is not offered and `/chat` answers as it did before.
   - **Merge and roll out together.** `apps/web` deploys on merge and signs the
     new digest; a node that has not been upgraded verifies the old one. The
     compatibility arm lives on the NODE, so it protects old clients from new

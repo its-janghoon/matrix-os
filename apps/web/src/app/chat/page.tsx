@@ -34,6 +34,7 @@ import type { Signer } from '@/lib/wallet/signer';
 import { createWallet, forgetWallet, loadWallet, walletSupported } from '@/lib/wallet/wallet';
 
 import { StrandedBudget } from './ui';
+import { SearchKeyField } from './searchKey';
 
 /**
  * A chat client that holds its own key.
@@ -310,6 +311,7 @@ function Chat() {
                   onChange={(e) => setEndpoint(e.target.value)}
                   spellCheck={false}
                 />
+                <SearchKeyField />
                 <div className='mt-4 flex flex-wrap items-center gap-4 text-sm'>
                   <span className='text-gray-400'>
                     Balance:{' '}

@@ -189,16 +189,50 @@ run would answer the question with a model that cannot search and no sign that
 anything was lost — which is the exact failure this feature exists to remove. The
 tool path surfaces the error instead.
 
-### web_search runs on the buyer's own server
+### web_search runs in the reader's browser, with the reader's own key
 
-`apps/web/src/app/api/tools/web-search/route.ts`, holding
-`BRAVE_SEARCH_API_KEY`. Not the browser, because a key in the page is a key
-anyone can spend; not the node, for the custody reason below. The route is
-**unauthenticated** and rate-limited per IP: the configured search quota is the
-whole exposure, no chain key or budget is reachable from it, and a deployment that
-cares should put its own auth in front. Absent key means the tool is not offered
-at all — `webSearchAvailable()` is asked before every send, because a tool offered
-but not runnable costs the reader a round trip that could never have worked.
+It ran on a server first — a route in this app holding one `BRAVE_SEARCH_API_KEY`
+for everybody — and that was wrong in a way worth recording, because the code
+worked.
+
+It made search **the only centralised dependency in a self-custody page**. The
+wallet is in the browser, the budget's delegate key is in the browser, the
+settlement is signed in the browser. One shared search key meant one quota anyone
+who could reach the deployment could drain through an unauthenticated route, and
+meant `/chat` could not search at all unless that particular deployment was alive
+and funded. None of that is true of a key the reader pastes into their own
+browser: they spend their own quota, nothing is exposed to anyone else, and the
+tool works on any deployment including a local one.
+
+**Why it took a rewrite rather than moving one fetch.** Not every search API can
+be called from a page, and the first provider chosen is one that cannot: Brave
+answers a CORS preflight with `405` and no headers, so a browser cannot reach it
+whatever the key is. That is why the provider is part of the stored setting rather
+than an implementation detail — it is the thing that decides whether this design
+is possible. Both offered providers were checked against a real preflight:
+
+| provider | `OPTIONS` | headers | browser-callable |
+|---|---|---|---|
+| Brave | `405` | none | no |
+| Serper | `204` | `allow-origin: *`, `X-API-KEY` allowed | yes |
+| Tavily | `200` | origin reflected, `content-type` allowed | yes |
+
+Tavily takes its key in the request **body**, which is why it needs no custom
+header and why `content-type` alone satisfies its preflight.
+
+**What this costs.** The key sits in `localStorage`, readable by any script on the
+origin. That is real and it is not new: the same origin already holds the delegate
+key that *spends* the reader's budget, which is worth strictly more than a search
+quota. A key that could not be read would have to be non-extractable like the
+wallet's, and a search API needs the bytes in a header. The settings field says so
+rather than leaving it implied.
+
+**The one thing that must never happen** is the key reaching the transcript. A
+tool result becomes a message in the next job's prompt, and that prompt goes to
+the **seller** — so a provider's error page echoed into the result would hand the
+reader's key to whoever is serving the model. Error bodies are therefore never
+quoted back, only statuses, and a test asserts that an echoed key does not survive
+into the message the model is given.
 
 ---
 

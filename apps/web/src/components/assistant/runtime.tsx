@@ -14,7 +14,7 @@ import { checkReceipt, type ReceiptCheck } from '@/lib/wallet/receipt';
 import type { Message } from '@/lib/wallet/signing';
 import type { Signer } from '@/lib/wallet/signer';
 import { runWithTools } from '@/lib/wallet/toolLoop';
-import { webSearchAvailable, webSearchTool } from '@/lib/wallet/webSearch';
+import { storedSearchCredential, webSearchTool } from '@/lib/wallet/webSearch';
 
 /**
  * The model's search query, for the line shown while it runs.
@@ -183,10 +183,13 @@ export function MatrixRuntimeProvider({
 
         const history = transcriptOf(messages);
 
-        // Asked per send, not once at mount: a deployment can gain or lose its search
-        // key without this page reloading, and a tool OFFERED but not runnable costs
-        // the reader a round trip that could never have worked.
-        const tools = (await webSearchAvailable()) ? [webSearchTool()] : [];
+        // Read per send, not once at mount: the reader can paste or clear a search key
+        // in settings while the thread is open, and the tool must follow that
+        // immediately. No key means the tool is NOT OFFERED - not offered and broken -
+        // because a tool the model can call but nothing can run costs a round trip that
+        // could never have worked.
+        const credential = storedSearchCredential();
+        const tools = credential ? [webSearchTool(credential)] : [];
 
         // The text so far, and a promise that resolves when the whole exchange
         // has settled. The deltas arrive in a callback rather than as an async
