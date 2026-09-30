@@ -8,8 +8,8 @@
     "timestamp": "1790059598000000000",
     "messages": [
       {
-        "content": "hello",
-        "role": "user"
+        "role": "user",
+        "content": "hello"
       }
     ],
     "maxTokens": 0,
@@ -25,12 +25,12 @@
     "timestamp": "1790059598000000000",
     "messages": [
       {
-        "content": "안녕하세요, 오늘 날씨 어때요?",
-        "role": "user"
+        "role": "user",
+        "content": "안녕하세요, 오늘 날씨 어때요?"
       },
       {
-        "content": "좋습니다.",
-        "role": "assistant"
+        "role": "assistant",
+        "content": "좋습니다."
       }
     ],
     "maxTokens": 0,
@@ -46,8 +46,8 @@
     "timestamp": "1",
     "messages": [
       {
-        "content": "𝄞 🧑‍🚀 done",
-        "role": "user"
+        "role": "user",
+        "content": "𝄞 🧑‍🚀 done"
       }
     ],
     "maxTokens": 0,
@@ -75,8 +75,8 @@
     "timestamp": "-1",
     "messages": [
       {
-        "content": "",
-        "role": "user"
+        "role": "user",
+        "content": ""
       }
     ],
     "maxTokens": 0,
@@ -92,12 +92,12 @@
     "timestamp": "2",
     "messages": [
       {
-        "content": "a",
-        "role": "user"
+        "role": "user",
+        "content": "a"
       },
       {
-        "content": "b",
-        "role": "user"
+        "role": "user",
+        "content": "b"
       }
     ],
     "maxTokens": 0,
@@ -113,8 +113,8 @@
     "timestamp": "1790059598000000000",
     "messages": [
       {
-        "content": "write a haiku",
-        "role": "user"
+        "role": "user",
+        "content": "write a haiku"
       }
     ],
     "maxTokens": 4096,
@@ -130,12 +130,150 @@
     "timestamp": "3",
     "messages": [
       {
-        "content": "x",
-        "role": "user"
+        "role": "user",
+        "content": "x"
       }
     ],
     "maxTokens": 1,
     "temperature": 2,
     "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d00000020233ef3f6173514cf7f7c1a8610291a18fdf0214c01a2cbff60be96a888ab1de30000000000000003"
+  },
+  {
+    "name": "tool-offered",
+    "why": "one tool offered and none called yet: this is the request /chat sends on the first turn of a search, and it is where a node adding a tool of its own has to fail",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+    "model": "qwen3.6-27b",
+    "timestamp": "1790059598000000000",
+    "messages": [
+      {
+        "role": "user",
+        "content": "서울 날씨 어때?"
+      }
+    ],
+    "maxTokens": 512,
+    "temperature": 0,
+    "tools": [
+      {
+        "name": "web_search",
+        "description": "Search the web and return result titles and snippets.",
+        "parameters": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002e6574683a3078383536653366666638346135653833333432306234336365633062346531336331363737393831370000000b7177656e332e362d32376200000020609bc72c8139cbab188a58ccf9ea1aea1108ea1b0ab3081e5bf0ff55c010c91718d791b861918c00"
+  },
+  {
+    "name": "tool-name-astral",
+    "why": "a non-ASCII tool name and a schema with a non-ASCII description: the tool block has its own length prefixes and they meet the byte-versus-UTF-16 trap independently of the transcript's",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "p",
+    "model": "m",
+    "timestamp": "4",
+    "messages": [
+      {
+        "role": "user",
+        "content": "go"
+      }
+    ],
+    "maxTokens": 0,
+    "temperature": 0,
+    "tools": [
+      {
+        "name": "날씨_조회🜛",
+        "description": "도시 이름으로 날씨를 찾는다",
+        "parameters": "{\"type\":\"object\",\"properties\":{\"도시\":{\"type\":\"string\"}}}"
+      },
+      {
+        "name": "b"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d000000206885cfdd6b01d5666e222f2be361ee0257e4493ab6707f8d0aa5624ede3a69020000000000000004"
+  },
+  {
+    "name": "tool-loop-turn",
+    "why": "iteration two: the assistant's own call and the client's result are replayed, and both are signed - a node that rewrote the arguments would be telling the model it had asked something it did not ask",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "eth:0x856e3fff84a5e833420b43cec0b4e13c16779817",
+    "model": "qwen3.6-27b",
+    "timestamp": "1790059598000000005",
+    "messages": [
+      {
+        "role": "user",
+        "content": "서울 날씨 어때?"
+      },
+      {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "call_abc123",
+            "name": "web_search",
+            "arguments": "{\"query\":\"서울 날씨\"}"
+          }
+        ]
+      },
+      {
+        "role": "tool",
+        "content": "맑음, 최고 26도",
+        "toolCallId": "call_abc123"
+      }
+    ],
+    "maxTokens": 512,
+    "temperature": 0,
+    "tools": [
+      {
+        "name": "web_search",
+        "description": "Search the web and return result titles and snippets.",
+        "parameters": "{\"type\":\"object\",\"properties\":{\"query\":{\"type\":\"string\"}},\"required\":[\"query\"]}"
+      }
+    ],
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000002e6574683a3078383536653366666638346135653833333432306234336365633062346531336331363737393831370000000b7177656e332e362d3237620000002074e0e85ca4cdaf2d2e9921108e1fde6e32479881205d8751b8e53c3a42ca4b5718d791b861918c05"
+  },
+  {
+    "name": "tool-metadata-without-tools",
+    "why": "a transcript carrying a tool result while offering no tools still emits the block, because the result and the call it answers are what a node would otherwise be free to rewrite",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "p",
+    "model": "m",
+    "timestamp": "5",
+    "messages": [
+      {
+        "role": "tool",
+        "content": "42",
+        "toolCallId": "c1"
+      }
+    ],
+    "maxTokens": 0,
+    "temperature": 0,
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d00000020a551955179d3cab4326a0fe5120d4e381f75727a771e6c4cfff31a13484bf32b0000000000000005"
+  },
+  {
+    "name": "two-calls-one-turn",
+    "why": "two calls in one assistant turn, so their order is inside the signature: swapping them would pair each result with the other's call",
+    "publicKeyHex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+    "provider": "p",
+    "model": "m",
+    "timestamp": "6",
+    "messages": [
+      {
+        "role": "assistant",
+        "content": "",
+        "toolCalls": [
+          {
+            "id": "c1",
+            "name": "a",
+            "arguments": "{\"x\":1}"
+          },
+          {
+            "id": "c2",
+            "name": "a",
+            "arguments": "{\"x\":2}"
+          }
+        ]
+      }
+    ],
+    "maxTokens": 0,
+    "temperature": 0,
+    "signingBytesHex": "000000256d61747269782f696e666572656e63652f72756e2d617574686f72697a6174696f6e2f763100000020000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f0000000170000000016d00000020fcab3734b7b9a23348b61f1c372e6153768d9348f952d35013f31bd142b8fb010000000000000006"
   }
 ]

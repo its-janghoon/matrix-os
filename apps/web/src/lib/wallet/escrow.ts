@@ -34,7 +34,7 @@ import { budgetFromAccount } from './budget';
 import { checkSettlement } from './ceiling';
 import { INFERENCE, big, num, obj, rpc, sellerFor, str, type SellerChoice, type Settled } from './node';
 import { fromBase64, toBase64 } from './signing';
-import type { Message, Signer } from './signer';
+import type { Message, Signer, ToolCall, ToolDefinition } from './signer';
 
 /** How far a job has got, for a caller that wants to show it. */
 export type EscrowPhase = 'reserving' | 'funding' | 'streaming' | 'settling';
@@ -42,6 +42,15 @@ export type EscrowPhase = 'reserving' | 'funding' | 'streaming' | 'settling';
 export interface EscrowChatOptions {
   model: string;
   messages: Message[];
+  /**
+   * Tools offered to the model for this one job.
+   *
+   * The node never runs them: it returns what the model asked to call, and the
+   * CALLER executes it and comes back with the result as a new job. That is a
+   * separate reservation and a separate settlement, which is why the loop lives in
+   * toolLoop.ts and not here - this function is one job, always.
+   */
+  tools?: ToolDefinition[];
   minBond?: bigint;
   chosen?: SellerChoice;
   /** Called with each piece of the answer as it arrives. */
@@ -127,7 +136,25 @@ export async function chatEscrowed(
   // owns the provider, so a request sent anywhere else is refused by a node that
   // has never heard of the job.
   const serving = seller.endpoint;
-  const wire = input.messages.map((m) => ({ role: `CHAT_ROLE_${m.role.toUpperCase()}`, content: m.content }));
+  const wire = input.messages.map((m) => ({
+    role: `CHAT_ROLE_${m.role.toUpperCase()}`,
+    content: m.content,
+    ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+    ...(m.toolCalls?.length
+      ? {
+          toolCalls: m.toolCalls.map((c) => ({
+            id: c.id,
+            name: c.name,
+            argumentsJson: c.arguments,
+          })),
+        }
+      : {}),
+  }));
+  const wireTools = (input.tools ?? []).map((t) => ({
+    name: t.name,
+    description: t.description ?? '',
+    parametersJson: t.parameters ?? '',
+  }));
 
   input.onPhase?.('reserving');
   const auth = await signer.signRunAuthorization({
@@ -135,6 +162,7 @@ export async function chatEscrowed(
     model: input.model,
     messages: input.messages,
     timestamp: BigInt(Date.now()) * 1_000_000n,
+    tools: input.tools,
   });
   // The SAME authorization object is sent twice: once to reserve, and once to
   // stream. Streaming otherwise takes a job id and nothing else, and a job id is
@@ -156,6 +184,7 @@ export async function chatEscrowed(
     provider: seller.id,
     model: input.model,
     messages: wire,
+    ...(wireTools.length > 0 ? { tools: wireTools } : {}),
     unitsEstimate: String(unitsToReserve(signer.accountId, seller.pricePerUnit)),
     authorization,
   }, input.signal ? { signal: input.signal } : {});
@@ -232,6 +261,11 @@ export async function chatEscrowed(
   const job = obj(last.job);
   const amount = big(settlement.amount);
 
+  // What the model asked to have run. A turn may carry these and no completion,
+  // which is the model choosing to act rather than answer - so an empty completion
+  // is not a failure here.
+  const toolCalls = toolCallsFromJob(job);
+
   // The check that makes the buyer's signature mean something. Refused BEFORE
   // signing, and loudly: the reader still owes the reservation at the expiry, so
   // a silent refusal would cost them more than a wrong bill.
@@ -242,6 +276,8 @@ export async function chatEscrowed(
     messages: input.messages,
     completion,
     reasoning: str(job.reasoning),
+    tools: input.tools ?? [],
+    toolCalls,
   });
   if (!verdict.ok) throw new SettlementRefused(verdict.reason, jobId, claimableAt);
 
@@ -279,7 +315,32 @@ export async function chatEscrowed(
     completionTokens: num(usage.completionTokens),
     receipt: decodeReceiptField(settled.receipt),
     seller,
+    // From the FINAL streamed frame's job, not the settled one, for the same reason
+    // the completion comes off the stream: this is what the run produced, and it is
+    // what the caller must execute to continue the loop.
+    toolCalls,
   };
+}
+
+/**
+ * The calls off a job frame, defensively.
+ *
+ * A call with no name is DROPPED rather than surfaced: a client asked to run a
+ * nameless tool can only fail, and passing it on turns a malformed model server
+ * into an error the reader cannot act on. The node drops these too; doing it on both
+ * sides costs one loop and means neither has to trust the other for it.
+ */
+function toolCallsFromJob(job: Record<string, unknown>): ToolCall[] {
+  const raw = job.toolCalls;
+  if (!Array.isArray(raw)) return [];
+  const out: ToolCall[] = [];
+  for (const entry of raw) {
+    const c = obj(entry);
+    const name = str(c.name);
+    if (name === '') continue;
+    out.push({ id: str(c.id), name, arguments: str(c.argumentsJson) });
+  }
+  return out;
 }
 
 function decodeReceiptField(raw: unknown): string {

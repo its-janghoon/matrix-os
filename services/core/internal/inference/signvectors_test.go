@@ -26,11 +26,60 @@ type signVector struct {
 	Model     string `json:"model"`
 	// A STRING because int64 nanoseconds do not survive a JSON number in
 	// JavaScript. See cmd/signvectors.
-	Timestamp       string              `json:"timestamp"`
-	Messages        []map[string]string `json:"messages"`
-	MaxTokens       int                 `json:"maxTokens"`
-	Temperature     float64             `json:"temperature"`
-	SigningBytesHex string              `json:"signingBytesHex"`
+	Timestamp       string           `json:"timestamp"`
+	Messages        []signVectorMsg  `json:"messages"`
+	MaxTokens       int              `json:"maxTokens"`
+	Temperature     float64          `json:"temperature"`
+	Tools           []signVectorTool `json:"tools"`
+	SigningBytesHex string           `json:"signingBytesHex"`
+}
+
+type signVectorMsg struct {
+	Role       string               `json:"role"`
+	Content    string               `json:"content"`
+	ToolCallID string               `json:"toolCallId"`
+	ToolCalls  []signVectorToolCall `json:"toolCalls"`
+}
+
+type signVectorTool struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Raw JSON as a STRING: the bytes are what is hashed. See cmd/signvectors.
+	Parameters string `json:"parameters"`
+}
+
+type signVectorToolCall struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
+}
+
+// request rebuilds the request a vector describes. Shared by both tests so the
+// coverage assertion below cannot drift from what is actually hashed.
+func (v signVector) request() InferenceRequest {
+	msgs := make([]Message, 0, len(v.Messages))
+	for _, m := range v.Messages {
+		msg := Message{Role: Role(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
+		for _, c := range m.ToolCalls {
+			msg.ToolCalls = append(msg.ToolCalls, ToolCall{ID: c.ID, Name: c.Name, Arguments: c.Arguments})
+		}
+		msgs = append(msgs, msg)
+	}
+	var tools []ToolDefinition
+	for _, t := range v.Tools {
+		tools = append(tools, ToolDefinition{
+			Name:        t.Name,
+			Description: t.Description,
+			Parameters:  json.RawMessage(t.Parameters),
+		})
+	}
+	return InferenceRequest{
+		Model:       v.Model,
+		Messages:    msgs,
+		MaxTokens:   v.MaxTokens,
+		Temperature: v.Temperature,
+		Tools:       tools,
+	}
 }
 
 func TestTheCommittedSignVectorsMatchThisCode(t *testing.T) {
@@ -51,10 +100,6 @@ func TestTheCommittedSignVectorsMatchThisCode(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: bad key hex: %v", v.Name, err)
 		}
-		msgs := make([]Message, 0, len(v.Messages))
-		for _, m := range v.Messages {
-			msgs = append(msgs, Message{Role: Role(m["role"]), Content: m["content"]})
-		}
 		ts, err := strconv.ParseInt(v.Timestamp, 10, 64)
 		if err != nil {
 			t.Fatalf("%s: bad timestamp %q: %v", v.Name, v.Timestamp, err)
@@ -65,12 +110,7 @@ func TestTheCommittedSignVectorsMatchThisCode(t *testing.T) {
 			Model:     v.Model,
 			Timestamp: ts,
 		}
-		got := hex.EncodeToString(auth.SigningBytes(InferenceRequest{
-			Model:       v.Model,
-			Messages:    msgs,
-			MaxTokens:   v.MaxTokens,
-			Temperature: v.Temperature,
-		}))
+		got := hex.EncodeToString(auth.SigningBytes(v.request()))
 		if got != v.SigningBytesHex {
 			t.Errorf("%s (%s): the committed vector no longer matches this code.\n"+
 				"  want %s\n   got %s\n"+
@@ -95,13 +135,30 @@ func TestTheSignVectorsStillCoverTheEncodingTrap(t *testing.T) {
 	}
 
 	var multiByte, astral, empty bool
+	var withTools, withoutTools, withCalls, astralToolName bool
 	for _, v := range vectors {
 		fields := []string{v.Provider, v.Model}
 		for _, m := range v.Messages {
-			fields = append(fields, m["content"])
+			fields = append(fields, m.Content)
+			if len(m.ToolCalls) > 0 {
+				withCalls = true
+			}
 		}
 		if len(v.Messages) == 0 {
 			empty = true
+		}
+		if len(v.Tools) > 0 {
+			withTools = true
+			for _, t := range v.Tools {
+				fields = append(fields, t.Name, t.Description, t.Parameters)
+				for _, r := range t.Name {
+					if r > 0xFFFF {
+						astralToolName = true
+					}
+				}
+			}
+		} else {
+			withoutTools = true
 		}
 		for _, f := range fields {
 			for _, r := range f {
@@ -124,5 +181,22 @@ func TestTheSignVectorsStillCoverTheEncodingTrap(t *testing.T) {
 	}
 	if !empty {
 		t.Error("no vector has an empty transcript, which has a digest of its own")
+	}
+	if !withTools {
+		t.Error("no vector offers a tool, so the tool block is untested")
+	}
+	if !withoutTools {
+		// This is the one that catches an implementation emitting the block
+		// unconditionally: it would hash a zero count where this side hashes
+		// nothing, and only a tool-FREE vector notices.
+		t.Error("every vector offers a tool, so nothing pins the block to being absent " +
+			"when there is no tool surface - which is what keeps every pre-tool digest unchanged")
+	}
+	if !withCalls {
+		t.Error("no vector replays an assistant tool call, so the per-message metadata is untested")
+	}
+	if !astralToolName {
+		t.Error("no tool NAME carries a character outside the BMP; the tool block has its own " +
+			"length prefixes and meets the encoding trap independently of the transcript's")
 	}
 }

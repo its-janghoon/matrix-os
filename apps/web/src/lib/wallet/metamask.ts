@@ -4,7 +4,7 @@ import { getAddress, type Address } from 'viem';
 import type { BridgeChain } from '@/lib/bridge/config';
 import { EIP712_DOMAIN, RUN_AUTHORIZATION_TYPES, TRANSFER_TYPES, bytes32, fromHex, toHex } from './eip712';
 import { messagesDigest } from './signing';
-import type { Message, PaymentFields, PaymentSignature, RunAuthorization, Signer } from './signer';
+import type { PaymentFields, PaymentSignature, RunAuthorization, RunAuthorizationInput, Signer } from './signer';
 
 export interface Eip1193RequestArguments {
   method: string;
@@ -177,13 +177,8 @@ export class MetamaskSigner implements EvmSigner {
     };
   }
 
-  async signRunAuthorization(input: {
-    provider: string;
-    model: string;
-    messages: Message[];
-    timestamp: bigint;
-  }): Promise<RunAuthorization> {
-    const promptDigest = await messagesDigest(input.messages);
+  async signRunAuthorization(input: RunAuthorizationInput): Promise<RunAuthorization> {
+    const promptDigest = await messagesDigest(input.messages, 0, 0, input.tools);
     const signature = await this.signTypedData(RUN_AUTHORIZATION_TYPES, {
       buyer: this.address,
       provider: input.provider,

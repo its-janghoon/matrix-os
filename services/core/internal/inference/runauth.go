@@ -142,6 +142,20 @@ func (a *RunAuthorization) Sign(req InferenceRequest, priv ed25519.PrivateKey) e
 // A decimal rendering has to agree across two languages about trailing zeros, the
 // exponent form and how many digits to emit; the bits are the value and have one
 // spelling. JavaScript numbers are float64, so this is exact on both sides.
+//
+// WHY THE TOOL BLOCK IS CONDITIONAL. A tool definition tells the model what it may
+// do, so a node able to add, remove or rewrite one on a signed request asks the
+// buyer's model a different question at the buyer's expense. It therefore has to
+// be signed. But appending a zero count unconditionally would change the digest of
+// every request that uses no tools - which is all of them today - and cost a
+// second compatibility window three weeks after the first. So the block is emitted
+// only when the request actually has a tool surface, and a request without one
+// hashes byte-for-byte as it did in v0.5.8.
+//
+// That is not a hole. Signing without tools and running with them is a different
+// digest, so the added tools fail; signing with tools and running without them is
+// also a different digest. Both directions are refused, which is the whole
+// requirement.
 func requestDigest(req InferenceRequest) [32]byte {
 	msgs, err := req.EffectiveMessages()
 	if err != nil {
@@ -165,9 +179,64 @@ func requestDigest(req InferenceRequest) [32]byte {
 	var temp [8]byte
 	binary.BigEndian.PutUint64(temp[:], math.Float64bits(req.Temperature))
 	_, _ = h.Write(temp[:])
+	if hasToolSurface(req, msgs) {
+		writeToolBlock(h, req.Tools, msgs)
+	}
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+// hasToolSurface reports whether this request involves tools at all, either by
+// offering them or by carrying a turn that came out of a previous tool round.
+//
+// It reads the TRANSCRIPT as well as the tool list because iteration two of a loop
+// offers the same tools but also replays the model's own call and the client's
+// result - and those have to be signed for the same reason the definitions do. A
+// node that rewrote the arguments of a call already made would be telling the model
+// it had asked something it did not ask.
+func hasToolSurface(req InferenceRequest, msgs []Message) bool {
+	if len(req.Tools) > 0 {
+		return true
+	}
+	for _, m := range msgs {
+		if m.ToolCallID != "" || len(m.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// writeToolBlock hashes the tool definitions and then every message's tool
+// metadata, length-prefixed throughout.
+//
+// ORDER IS AS SENT, not sorted. The sequence is part of what the buyer signed, so
+// a node reordering the tools produces a different digest - and sorting would be a
+// second rule three implementations must agree on for no gain.
+//
+// The per-message part walks EVERY message rather than only the ones carrying
+// metadata, so there is no index to encode and no sparse-set convention for a
+// second language to get subtly wrong. An ordinary turn contributes an empty
+// prefix and a zero count.
+func writeToolBlock(h interface{ Write([]byte) (int, error) }, tools []ToolDefinition, msgs []Message) {
+	var n [8]byte
+	binary.BigEndian.PutUint64(n[:], uint64(len(tools)))
+	_, _ = h.Write(n[:])
+	for _, t := range tools {
+		writeLenPrefixed(h, []byte(t.Name))
+		writeLenPrefixed(h, []byte(t.Description))
+		writeLenPrefixed(h, t.Parameters)
+	}
+	for _, m := range msgs {
+		writeLenPrefixed(h, []byte(m.ToolCallID))
+		binary.BigEndian.PutUint64(n[:], uint64(len(m.ToolCalls)))
+		_, _ = h.Write(n[:])
+		for _, c := range m.ToolCalls {
+			writeLenPrefixed(h, []byte(c.ID))
+			writeLenPrefixed(h, []byte(c.Name))
+			writeLenPrefixed(h, []byte(c.Arguments))
+		}
+	}
 }
 
 // legacyRequestDigest is requestDigest as it was before MaxTokens and Temperature
@@ -224,15 +293,34 @@ func reportLegacyDigestAccepted() {
 //
 // Current FIRST, so an upgraded client never touches the legacy arm and the log
 // line below means what it says: some client is still signing the old digest.
+//
+// THE LEGACY ARM IS CLOSED TO TOOL REQUESTS. The old digest covers the transcript
+// and nothing else, so accepting it for a request carrying tools would hand back
+// exactly the hole the tool block exists to close - a node could attach any tool it
+// liked to a legacy-signed request and the signature would still verify. No client
+// that predates tools can be sending them, so refusing this costs nothing real.
 func acceptsEitherDigest(a *RunAuthorization, req InferenceRequest, verify func([]byte) bool) bool {
 	if verify(a.SigningBytes(req)) {
 		return true
+	}
+	if toolsPresent(req) {
+		return false
 	}
 	if verify(a.legacySigningBytes(req)) {
 		reportLegacyDigestAccepted()
 		return true
 	}
 	return false
+}
+
+// toolsPresent is hasToolSurface over a request's own effective transcript, for
+// the callers that hold only the request.
+func toolsPresent(req InferenceRequest) bool {
+	msgs, err := req.EffectiveMessages()
+	if err != nil {
+		msgs = nil
+	}
+	return hasToolSurface(req, msgs)
 }
 
 // legacySigningBytes is the authorization payload built over the old digest.
@@ -402,7 +490,8 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 		if recoversTo(requestDigest(req)) {
 			return nil
 		}
-		if recoversTo(legacyRequestDigest(req)) {
+		// Same rule as acceptsEitherDigest: a request with tools has no legacy arm.
+		if !toolsPresent(req) && recoversTo(legacyRequestDigest(req)) {
 			reportLegacyDigestAccepted()
 			return nil
 		}

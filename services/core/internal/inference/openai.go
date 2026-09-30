@@ -129,6 +129,34 @@ type chatMessage struct {
 	Content          string `json:"content"`
 	Reasoning        string `json:"reasoning,omitempty"`
 	ReasoningContent string `json:"reasoning_content,omitempty"`
+	// ToolCallID is sent on a tool result and tells the model which call it
+	// answers.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolCalls is READ off an assistant choice and SENT when a transcript replays
+	// an earlier assistant turn that called something.
+	ToolCalls []wireToolCall `json:"tool_calls,omitempty"`
+}
+
+// wireToolCall is a tool call in the OpenAI shape, which nests the name and
+// arguments under "function" rather than putting them beside the id.
+type wireToolCall struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Index    *int   `json:"index,omitempty"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// wireTool is a tool definition in the OpenAI shape.
+type wireTool struct {
+	Type     string `json:"type"`
+	Function struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description,omitempty"`
+		Parameters  json.RawMessage `json:"parameters,omitempty"`
+	} `json:"function"`
 }
 
 // reasoningText returns the working under whichever name the server used.
@@ -145,6 +173,7 @@ type chatCompletionRequest struct {
 	Messages    []chatMessage `json:"messages"`
 	MaxTokens   int           `json:"max_tokens,omitempty"`
 	Temperature float64       `json:"temperature,omitempty"`
+	Tools       []wireTool    `json:"tools,omitempty"`
 }
 
 // chatCompletionResponse is the subset of the OpenAI response we parse.
@@ -175,6 +204,7 @@ func (b *OpenAIBackend) Infer(ctx context.Context, req InferenceRequest) (Infere
 		Messages:    toWireMessages(msgs),
 		MaxTokens:   req.MaxTokens,
 		Temperature: req.Temperature,
+		Tools:       toWireTools(req.Tools),
 	}
 	body, err := json.Marshal(wire)
 	if err != nil {
@@ -225,16 +255,83 @@ func (b *OpenAIBackend) Infer(ctx context.Context, req InferenceRequest) (Infere
 		Model:      model,
 		Completion: parsed.Choices[0].Message.Content,
 		Reasoning:  parsed.Choices[0].Message.reasoningText(),
+		ToolCalls:  fromWireToolCalls(parsed.Choices[0].Message.ToolCalls),
 		Usage:      usage,
 		Units:      UnitsFor(usage),
 	}, nil
 }
 
 // toWireMessages converts internal messages to the OpenAI wire representation.
+//
+// Tool metadata rides along because iteration two of a loop replays the model's
+// own call beside the client's result, and a model that cannot see the call it made
+// cannot tell which of two results is which.
 func toWireMessages(msgs []Message) []chatMessage {
 	out := make([]chatMessage, len(msgs))
 	for i, m := range msgs {
-		out[i] = chatMessage{Role: string(m.Role), Content: m.Content}
+		out[i] = chatMessage{
+			Role:       string(m.Role),
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			ToolCalls:  toWireToolCalls(m.ToolCalls),
+		}
+	}
+	return out
+}
+
+// toWireTools nests each definition under "function", which is the shape an
+// OpenAI-compatible server expects.
+func toWireTools(tools []ToolDefinition) []wireTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]wireTool, len(tools))
+	for i, t := range tools {
+		out[i].Type = "function"
+		out[i].Function.Name = t.Name
+		out[i].Function.Description = t.Description
+		out[i].Function.Parameters = t.Parameters
+	}
+	return out
+}
+
+func toWireToolCalls(calls []ToolCall) []wireToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]wireToolCall, len(calls))
+	for i, c := range calls {
+		out[i].ID = c.ID
+		out[i].Type = "function"
+		out[i].Function.Name = c.Name
+		out[i].Function.Arguments = c.Arguments
+	}
+	return out
+}
+
+// fromWireToolCalls flattens the nested wire shape back to the internal one.
+//
+// A call with no name is DROPPED rather than passed on as an empty one. A client
+// asked to execute a nameless tool has nothing it can do but fail, and a model
+// server that emits one is malformed; carrying it forward would turn a server bug
+// into a client error message the buyer cannot act on.
+func fromWireToolCalls(calls []wireToolCall) []ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]ToolCall, 0, len(calls))
+	for _, c := range calls {
+		if c.Function.Name == "" {
+			continue
+		}
+		out = append(out, ToolCall{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

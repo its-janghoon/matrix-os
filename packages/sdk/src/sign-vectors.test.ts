@@ -45,10 +45,27 @@ interface SignVector {
    * spells int64 as a string for the same reason.
    */
   timestamp: string;
-  messages: { role: string; content: string }[];
+  messages: {
+    role: string;
+    content: string;
+    toolCallId?: string;
+    toolCalls?: { id: string; name: string; arguments: string }[];
+  }[];
   /** In the digest since v0.5.8. A JSON number round-trips a float64 exactly. */
   maxTokens: number;
   temperature: number;
+  /**
+   * In the digest since v0.5.9, as a block emitted ONLY when the request has a tool
+   * surface. Absent here means the vector has none, and such a vector must hash
+   * exactly as it did before tools existed - which is what catches an
+   * implementation that emits a zero count unconditionally.
+   *
+   * `parameters` is a STRING of raw JSON, not a nested object: the bytes are what is
+   * hashed, and a nested object would be re-serialized by each language's JSON
+   * writer with its own key order and spacing, so the two sides would hash
+   * different bytes from one file.
+   */
+  tools?: { name: string; description?: string; parameters?: string }[];
   signingBytesHex: string;
 }
 
@@ -73,12 +90,12 @@ const cases = vectors as SignVector[];
  * the vector's role is translated up into the proto name here, which tests the same
  * path `apps/web` uses rather than reaching past it.
  *
- * Worth knowing while reading this: roleWireName's default arm returns "user" for
- * anything it does not recognise. Feeding it an internal spelling therefore does
- * not fail - it silently digests an "assistant" turn as a "user" one, which is how
- * this test first appeared to have found a drift in the library. An unknown role
- * producing a valid signature over a different transcript is a sharp edge, but it
- * belongs to the published API and is not something to change from a test file.
+ * Worth knowing while reading this: roleWireName used to return "user" for anything
+ * it did not recognise, so feeding it an internal spelling did not fail - it
+ * silently digested an "assistant" turn as a "user" one, which is how this test
+ * first appeared to have found a drift in the library. That default is now an
+ * error, because an unknown role producing a valid signature over a different
+ * transcript is the one failure the signing layout exists to prevent.
  */
 function protoRole(internal: string): ChatRole {
   switch (internal) {
@@ -88,6 +105,8 @@ function protoRole(internal: string): ChatRole {
       return 'CHAT_ROLE_ASSISTANT';
     case 'user':
       return 'CHAT_ROLE_USER';
+    case 'tool':
+      return 'CHAT_ROLE_TOOL';
     default:
       throw new Error(`the vectors carry a role this test does not map: ${internal}`);
   }
@@ -106,9 +125,18 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         provider: v.provider,
         model: v.model,
         timestamp: BigInt(v.timestamp),
-        messages: v.messages.map((m) => ({ role: protoRole(m.role), content: m.content }) as ChatMessage),
+        messages: v.messages.map(
+          (m) =>
+            ({
+              role: protoRole(m.role),
+              content: m.content,
+              toolCallId: m.toolCallId,
+              toolCalls: m.toolCalls,
+            }) as ChatMessage,
+        ),
         maxTokens: v.maxTokens,
         temperature: v.temperature,
+        tools: v.tools,
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
@@ -119,9 +147,15 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         provider: v.provider,
         model: v.model,
         timestamp: BigInt(v.timestamp),
-        messages: v.messages.map((m) => ({ role: m.role, content: m.content })) as canonical.Message[],
+        messages: v.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+          toolCallId: m.toolCallId,
+          toolCalls: m.toolCalls,
+        })) as canonical.Message[],
         maxTokens: v.maxTokens,
         temperature: v.temperature,
+        tools: v.tools,
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
@@ -142,10 +176,34 @@ describe('run authorization bytes against the Go-generated vectors', () => {
   });
 
   it('still covers the encoding trap, so an ASCII-only file cannot pass for a guard', () => {
-    const text = cases.flatMap((v) => [v.provider, v.model, ...v.messages.map((m) => m.content)]);
+    const text = cases.flatMap((v) => [
+      v.provider,
+      v.model,
+      ...v.messages.map((m) => m.content),
+      ...(v.tools ?? []).flatMap((t) => [t.name, t.description ?? '', t.parameters ?? '']),
+    ]);
     const points = text.flatMap((s) => Array.from(s).map((c) => c.codePointAt(0) ?? 0));
     expect(points.some((c) => c > 0x7f)).toBe(true);
     expect(points.some((c) => c > 0xffff)).toBe(true);
     expect(cases.some((v) => v.messages.length === 0)).toBe(true);
+  });
+
+  it('covers tools on both sides of the conditional block', () => {
+    // A vector WITH tools, or the block is untested.
+    expect(cases.some((v) => (v.tools?.length ?? 0) > 0)).toBe(true);
+    // And one WITHOUT, which is what catches an implementation emitting a zero
+    // count unconditionally: it hashes eight bytes where Go hashes none, and only
+    // a tool-free vector notices. That is also the property keeping every
+    // pre-v0.5.9 signature valid.
+    expect(cases.some((v) => (v.tools?.length ?? 0) === 0)).toBe(true);
+    // A replayed call, so the per-message metadata is exercised.
+    expect(cases.some((v) => v.messages.some((m) => (m.toolCalls?.length ?? 0) > 0))).toBe(true);
+    // A tool NAME outside the BMP: the tool block has its own length prefixes and
+    // meets the byte-versus-UTF-16 trap independently of the transcript's.
+    expect(
+      cases.some((v) =>
+        (v.tools ?? []).some((t) => Array.from(t.name).some((c) => (c.codePointAt(0) ?? 0) > 0xffff)),
+      ),
+    ).toBe(true);
   });
 });

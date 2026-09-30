@@ -265,7 +265,7 @@ func (s *Service) PrepareSettlementProgress(
 	if billableUnits > mjob.Units {
 		billableUnits = mjob.Units
 	}
-	if ceiling := MaxUnitsFor(request, resp.Completion, resp.Reasoning); billableUnits > ceiling {
+	if ceiling := MaxUnitsForResponse(request, resp); billableUnits > ceiling {
 		billableUnits = ceiling
 	}
 	amount, err := market.CheckedMul(billableUnits, mjob.PricePerUnit)
@@ -304,6 +304,7 @@ func (s *Service) PrepareSettlementProgress(
 	// request: the buyer gets it from SettleSigned, after paying.
 	job.Completion = resp.Completion
 	job.Reasoning = resp.Reasoning
+	job.ToolCalls = resp.ToolCalls
 	job.Units = amount
 	job.Usage = resp.Usage
 	job.Model = resp.Model

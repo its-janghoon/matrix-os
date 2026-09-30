@@ -131,6 +131,77 @@ In dependency order. Each step is landable on its own.
 
 ---
 
+## What was actually built, and where it departed from the above
+
+Steps 1 through 5 are done. Two things went differently, and both are worth
+knowing before reading the code.
+
+### The tool block in the digest is CONDITIONAL
+
+The plan above says tools go into `requestDigest`, and they do — but appending a
+zero tool count unconditionally would have changed the digest of every request
+that uses no tools, which is nearly all of them. That is a second
+compatibility-break three weeks after the first, for nothing.
+
+So the block is emitted only when the request has a **tool surface**: some tool
+offered, or some turn carrying tool metadata. A request without one hashes
+byte-for-byte as it did in v0.5.8, so every signature made before this change is
+still valid and the legacy arm can still be deleted on its original schedule.
+
+That is not a hole in either direction. Signing without tools and running with
+them is a different digest, so the added tools fail; signing with tools and
+running without them is also different. Both are refused.
+
+It did open one gap that had to be closed with it: the **legacy arm** verifies
+against the pre-v0.5.8 digest, which covers the transcript and nothing else. Left
+alone it would have accepted a legacy-signed request carrying any tools a node
+liked. The legacy arm is therefore closed to tool requests — which costs nothing
+real, since no client predating tools can be sending them.
+
+### Two things the plan did not mention had to move with it
+
+**The overbilling ceiling.** A tool schema is prompt tokens the seller really
+spent — several times the size of the question — and a call is completion tokens.
+The ceiling counted neither, so an honest tool-calling bill was clamped DOWN,
+underpaying the seller for work the buyer received. Same failure the reasoning
+text caused before it was counted, same direction. `MaxUnitsForResponse` counts
+both, and the browser's `maxUnitsFor` had to move in step: the node uses it to
+clamp and the browser uses it to REFUSE, so the two disagreeing means a reader is
+told their seller is overcharging, after funding, and forfeits the reservation.
+
+**The idempotency fingerprint.** Two requests identical but for their tools ask
+the model to do different things. Left uncovered, a retry with one tool removed
+would have been served the other request's answer.
+
+### The loop bound is a ceiling, not a suggestion
+
+`runWithTools` defaults to 4 round trips and caps any caller at 12. The cap is
+applied to what the caller asks for rather than trusted from it, because the
+caller is a page and a page can be wrong. A loop that runs out reports
+`exhausted` with the units it spent rather than throwing — the reader paid for
+those jobs and is owed both the partial work and the fact that it was cut off.
+
+### The tool path does not fall back
+
+The runtime falls back from the escrowed path to `chat()` when a node has not
+activated the escrow rules. `chat()` carries no tools, so falling back on a tool
+run would answer the question with a model that cannot search and no sign that
+anything was lost — which is the exact failure this feature exists to remove. The
+tool path surfaces the error instead.
+
+### web_search runs on the buyer's own server
+
+`apps/web/src/app/api/tools/web-search/route.ts`, holding
+`BRAVE_SEARCH_API_KEY`. Not the browser, because a key in the page is a key
+anyone can spend; not the node, for the custody reason below. The route is
+**unauthenticated** and rate-limited per IP: the configured search quota is the
+whole exposure, no chain key or budget is reachable from it, and a deployment that
+cares should put its own auth in front. Absent key means the tool is not offered
+at all — `webSearchAvailable()` is asked before every send, because a tool offered
+but not runnable costs the reader a round trip that could never have worked.
+
+---
+
 ## What this design refuses
 
 **A node executing tools on the buyer's behalf.** The client executes and the

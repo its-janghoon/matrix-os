@@ -25,7 +25,7 @@
 
 import { randomUint64 } from '@/lib/bridge/lock';
 import { submitSignedTransfer } from './node';
-import type { Message, PaymentFields, RunAuthorization, Signer } from './signer';
+import type { PaymentFields, RunAuthorization, RunAuthorizationInput, Signer } from './signer';
 
 export interface Budget {
   /** The account the money came from and the account a close returns it to. */
@@ -202,12 +202,7 @@ export function budgetSigner(browser: Signer, budget: Budget): Signer {
   return {
     kind: browser.kind,
     accountId: account,
-    signRunAuthorization(input: {
-      provider: string;
-      model: string;
-      messages: Message[];
-      timestamp: bigint;
-    }): Promise<RunAuthorization> {
+    signRunAuthorization(input: RunAuthorizationInput): Promise<RunAuthorization> {
       return browser.signRunAuthorization(input);
     },
     signPayment(payment: PaymentFields) {

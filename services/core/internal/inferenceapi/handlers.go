@@ -2,6 +2,7 @@ package inferenceapi
 
 import (
 	"context"
+	"encoding/json"
 
 	inferencev1 "github.com/ecirlabs/matrix-proto/gen/go/matrix/inference/v1"
 	"google.golang.org/grpc"
@@ -35,15 +36,93 @@ func statusToProto(s inference.InferenceJobStatus) inferencev1.InferenceJobStatu
 }
 
 // roleToInternal maps a proto chat role to the internal inference role.
+//
+// The default arm keeps mapping an UNRECOGNISED role to user, which is what the
+// proto zero value means and what the /v1 door does with an absent role. That is
+// safe HERE and would not be in a client: this side does not sign, it verifies, and
+// a request whose role this node reads differently from the client that signed it
+// produces a different digest and is refused. A client's own mapping must throw
+// instead of guessing - see roleWireName in packages/sdk.
 func roleToInternal(r inferencev1.ChatRole) inference.Role {
 	switch r {
 	case inferencev1.ChatRole_CHAT_ROLE_SYSTEM:
 		return inference.RoleSystem
 	case inferencev1.ChatRole_CHAT_ROLE_ASSISTANT:
 		return inference.RoleAssistant
+	case inferencev1.ChatRole_CHAT_ROLE_TOOL:
+		return inference.RoleTool
 	default:
 		return inference.RoleUser
 	}
+}
+
+// messagesToInternal converts proto chat turns, tool metadata included.
+//
+// ONE FUNCTION FOR ALL FOUR ENTRY POINTS. There were four copies of this loop -
+// submit, stream, run, reserve - because the four proto request types share no
+// interface. That was survivable while a turn was a role and a string; with tool
+// metadata it stops being, because a copy that forgets a field does not fail. It
+// drops the field, the digest the node computes stops matching the one the client
+// signed, and the run is refused as an invalid signature on that one path only.
+// The proto types still differ, so the callers pass the slice rather than the
+// request.
+func messagesToInternal(in []*inferencev1.ChatMessage) []inference.Message {
+	msgs := make([]inference.Message, 0, len(in))
+	for _, m := range in {
+		msg := inference.Message{
+			Role:       roleToInternal(m.GetRole()),
+			Content:    m.GetContent(),
+			ToolCallID: m.GetToolCallId(),
+		}
+		for _, c := range m.GetToolCalls() {
+			msg.ToolCalls = append(msg.ToolCalls, inference.ToolCall{
+				ID:        c.GetId(),
+				Name:      c.GetName(),
+				Arguments: c.GetArgumentsJson(),
+			})
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs
+}
+
+// toolsToInternal converts proto tool definitions.
+//
+// The schema travels as RAW TEXT and is not re-encoded here: those bytes are inside
+// the buyer's signature, so re-serializing them would change the digest this node
+// computes and refuse a correctly signed request.
+func toolsToInternal(in []*inferencev1.ToolDefinition) []inference.ToolDefinition {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]inference.ToolDefinition, 0, len(in))
+	for _, t := range in {
+		def := inference.ToolDefinition{
+			Name:        t.GetName(),
+			Description: t.GetDescription(),
+		}
+		if raw := t.GetParametersJson(); raw != "" {
+			def.Parameters = json.RawMessage(raw)
+		}
+		out = append(out, def)
+	}
+	return out
+}
+
+// toolCallsToProto is the return direction, for a job that asked for a call.
+func toolCallsToProto(calls []inference.ToolCall) []*inferencev1.ToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	out := make([]*inferencev1.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		out = append(out, &inferencev1.ToolCall{
+			Id:            c.ID,
+			Name:          c.Name,
+			ArgumentsJson: c.Arguments,
+		})
+	}
+	return out
 }
 
 // jobToProto converts an internal inference job to its proto representation.
@@ -56,6 +135,7 @@ func jobToProto(j *inference.InferenceJob) *inferencev1.InferenceJob {
 		Status:     statusToProto(j.Status),
 		Completion: j.Completion,
 		Reasoning:  j.Reasoning,
+		ToolCalls:  toolCallsToProto(j.ToolCalls),
 		Units:      j.Units,
 	}
 	if pj.Model == "" {
@@ -89,19 +169,14 @@ func jobToProto(j *inference.InferenceJob) *inferencev1.InferenceJob {
 
 // requestFromProto builds an internal InferenceRequest from the proto request.
 func requestFromProto(req *inferencev1.SubmitInferenceJobRequest) inference.InferenceRequest {
-	msgs := make([]inference.Message, 0, len(req.GetMessages()))
-	for _, m := range req.GetMessages() {
-		msgs = append(msgs, inference.Message{
-			Role:    roleToInternal(m.GetRole()),
-			Content: m.GetContent(),
-		})
-	}
+	msgs := messagesToInternal(req.GetMessages())
 	return inference.InferenceRequest{
 		Model:       req.GetModel(),
 		Prompt:      req.GetPrompt(),
 		Messages:    msgs,
 		MaxTokens:   int(req.GetMaxTokens()),
 		Temperature: req.GetTemperature(),
+		Tools:       toolsToInternal(req.GetTools()),
 	}
 }
 
@@ -321,19 +396,14 @@ func (s *Service) StreamInferenceJob(
 // streamRequestToInternal builds an internal InferenceRequest from the
 // streaming request.
 func streamRequestToInternal(req *inferencev1.StreamInferenceJobRequest) inference.InferenceRequest {
-	msgs := make([]inference.Message, 0, len(req.GetMessages()))
-	for _, m := range req.GetMessages() {
-		msgs = append(msgs, inference.Message{
-			Role:    roleToInternal(m.GetRole()),
-			Content: m.GetContent(),
-		})
-	}
+	msgs := messagesToInternal(req.GetMessages())
 	return inference.InferenceRequest{
 		Model:       req.GetModel(),
 		Prompt:      req.GetPrompt(),
 		Messages:    msgs,
 		MaxTokens:   int(req.GetMaxTokens()),
 		Temperature: req.GetTemperature(),
+		Tools:       toolsToInternal(req.GetTools()),
 	}
 }
 
@@ -341,19 +411,14 @@ func streamRequestToInternal(req *inferencev1.StreamInferenceJobRequest) inferen
 // client-signed run request. It duplicates requestFromProto rather than sharing
 // it because the two proto messages are distinct types with no common interface.
 func runRequestToInternal(req *inferencev1.RunInferenceJobRequest) inference.InferenceRequest {
-	msgs := make([]inference.Message, 0, len(req.GetMessages()))
-	for _, m := range req.GetMessages() {
-		msgs = append(msgs, inference.Message{
-			Role:    roleToInternal(m.GetRole()),
-			Content: m.GetContent(),
-		})
-	}
+	msgs := messagesToInternal(req.GetMessages())
 	return inference.InferenceRequest{
 		Model:       req.GetModel(),
 		Prompt:      req.GetPrompt(),
 		Messages:    msgs,
 		MaxTokens:   int(req.GetMaxTokens()),
 		Temperature: req.GetTemperature(),
+		Tools:       toolsToInternal(req.GetTools()),
 	}
 }
 

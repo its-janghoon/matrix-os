@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 )
 
@@ -44,6 +45,12 @@ type streamChunk struct {
 			// only its answer.
 			Reasoning        string `json:"reasoning"`
 			ReasoningContent string `json:"reasoning_content"`
+			// ToolCalls arrive in PIECES. A server sends the id and the name in
+			// one frame and then the arguments a few characters at a time across
+			// many more, each fragment tagged with an index saying which call it
+			// belongs to. See accumulateToolCalls for why that index, and not
+			// arrival order, is what stitches them back together.
+			ToolCalls []wireToolCall `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
@@ -83,6 +90,7 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 			Messages:    toWireMessages(msgs),
 			MaxTokens:   req.MaxTokens,
 			Temperature: req.Temperature,
+			Tools:       toWireTools(req.Tools),
 		},
 		Stream:        true,
 		StreamOptions: &streamOptions{IncludeUsage: true},
@@ -118,6 +126,7 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 		reasoning  strings.Builder
 		model      = req.Model
 		usage      *Usage
+		calls      toolCallAccumulator
 	)
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -178,6 +187,10 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 				}
 			}
 
+			if len(choice.Delta.ToolCalls) > 0 {
+				calls.add(choice.Delta.ToolCalls)
+			}
+
 			delta := choice.Delta.Content
 			if delta == "" {
 				continue
@@ -194,7 +207,12 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 
 	text := completion.String()
 	working := reasoning.String()
-	if text == "" {
+	toolCalls := calls.result()
+	// A completion with no text is ordinarily a failed run - but a model that chose
+	// to CALL something rather than answer emits exactly that, and it is a
+	// successful turn. Refusing it here was the one thing that would have made tool
+	// calls arrive as ErrNoCompletion, which reads as a provider fault.
+	if text == "" && len(toolCalls) == 0 {
 		return InferenceResponse{}, ErrNoCompletion
 	}
 
@@ -205,8 +223,12 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 		// The working counts: those tokens were generated and they settle. A
 		// derivation that ignored them would under-report a reasoning model by
 		// most of what it did.
+		//
+		// A tool call counts too, for the same reason: the model generated the name
+		// and the argument JSON, and a fallback that ignored them would bill a
+		// tool-calling turn as if it had produced nothing.
 		promptTokens := countTokens(promptText(msgs))
-		completionTokens := countTokens(text) + countTokens(working)
+		completionTokens := countTokens(text) + countTokens(working) + countTokens(toolCallText(toolCalls))
 		usage = &Usage{
 			PromptTokens:     promptTokens,
 			CompletionTokens: completionTokens,
@@ -218,7 +240,88 @@ func (b *OpenAIBackend) InferStream(ctx context.Context, req InferenceRequest, o
 		Model:      model,
 		Completion: text,
 		Reasoning:  working,
+		ToolCalls:  toolCalls,
 		Usage:      *usage,
 		Units:      UnitsFor(*usage),
 	}, nil
+}
+
+// toolCallAccumulator stitches streamed tool-call fragments back into whole calls.
+//
+// WHY AN INDEX AND NOT APPEND. The fragments of one call arrive across many frames
+// and the fragments of two parallel calls are interleaved, so arrival order says
+// nothing about which call a fragment belongs to - only the index does. Appending
+// in arrival order produced one call per frame, each holding a few characters of
+// somebody's argument JSON.
+//
+// The index is also allowed to be ABSENT: a server that sends one call at a time
+// may omit it, and there the fragments all belong to the call already in progress.
+// Treating a missing index as zero is what makes that case work rather than
+// starting a new call on every frame.
+type toolCallAccumulator struct {
+	order []int
+	byIdx map[int]*ToolCall
+}
+
+func (a *toolCallAccumulator) add(frags []wireToolCall) {
+	if a.byIdx == nil {
+		a.byIdx = make(map[int]*ToolCall)
+	}
+	for _, f := range frags {
+		idx := 0
+		if f.Index != nil {
+			idx = *f.Index
+		}
+		cur, ok := a.byIdx[idx]
+		if !ok {
+			cur = &ToolCall{}
+			a.byIdx[idx] = cur
+			a.order = append(a.order, idx)
+		}
+		// Identity fields arrive once and are not appended; only the arguments are
+		// a stream. A later frame repeating the id must not double it.
+		if f.ID != "" {
+			cur.ID = f.ID
+		}
+		if f.Function.Name != "" {
+			cur.Name = f.Function.Name
+		}
+		cur.Arguments += f.Function.Arguments
+	}
+}
+
+// result returns the completed calls in index order, dropping any that never
+// received a name - see fromWireToolCalls for why a nameless call is not passed on.
+func (a *toolCallAccumulator) result() []ToolCall {
+	if len(a.order) == 0 {
+		return nil
+	}
+	sorted := append([]int(nil), a.order...)
+	sort.Ints(sorted)
+	out := make([]ToolCall, 0, len(sorted))
+	for _, idx := range sorted {
+		c := a.byIdx[idx]
+		if c == nil || c.Name == "" {
+			continue
+		}
+		out = append(out, *c)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// toolCallText is the generated text of a set of calls, for the local usage
+// fallback only. It is never sent anywhere.
+func toolCallText(calls []ToolCall) string {
+	if len(calls) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for _, c := range calls {
+		b.WriteString(c.Name)
+		b.WriteString(c.Arguments)
+	}
+	return b.String()
 }

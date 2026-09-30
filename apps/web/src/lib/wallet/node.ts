@@ -151,6 +151,16 @@ export interface Settled {
    * was handed.
    */
   reasoning: string;
+  /**
+   * What the model asked to have RUN rather than answered.
+   *
+   * Present means the turn is not finished: the caller executes each call and sends
+   * the results back as a new job. A run can carry these with an EMPTY completion,
+   * which is the model choosing to act rather than speak - not a failure.
+   *
+   * The node never executes a tool. See docs/designs/tool-calls.md.
+   */
+  toolCalls?: { id: string; name: string; arguments: string }[];
   units: bigint;
   provider: string;
   model: string;

@@ -38,13 +38,18 @@ func (s *Service) ReserveInferenceEscrow(
 	// second transcription is one that eventually stops matching, and the half
 	// that drifts is the half nobody tested.
 	if err := s.authorizeRun(&inferencev1.RunInferenceJobRequest{
-		Buyer:         req.GetBuyer(),
-		Provider:      req.GetProvider(),
-		Model:         req.GetModel(),
-		Prompt:        req.GetPrompt(),
-		Messages:      req.GetMessages(),
-		MaxTokens:     req.GetMaxTokens(),
-		Temperature:   req.GetTemperature(),
+		Buyer:       req.GetBuyer(),
+		Provider:    req.GetProvider(),
+		Model:       req.GetModel(),
+		Prompt:      req.GetPrompt(),
+		Messages:    req.GetMessages(),
+		MaxTokens:   req.GetMaxTokens(),
+		Temperature: req.GetTemperature(),
+		// Tools are in the signed digest, so leaving them out here would check the
+		// signature against a DIFFERENT request than the one about to run: every
+		// tool-carrying reservation would be refused as an invalid signature. This is
+		// the drift the comment above predicts, arriving one field later.
+		Tools:         req.GetTools(),
 		UnitsEstimate: req.GetUnitsEstimate(),
 		Authorization: req.GetAuthorization(),
 	}, request); err != nil {
@@ -216,19 +221,14 @@ func signedTransferFromFields(
 // escrowRequestToInternal builds an internal InferenceRequest from the reserve
 // request.
 func escrowRequestToInternal(req *inferencev1.ReserveInferenceEscrowRequest) inference.InferenceRequest {
-	msgs := make([]inference.Message, 0, len(req.GetMessages()))
-	for _, m := range req.GetMessages() {
-		msgs = append(msgs, inference.Message{
-			Role:    roleToInternal(m.GetRole()),
-			Content: m.GetContent(),
-		})
-	}
+	msgs := messagesToInternal(req.GetMessages())
 	return inference.InferenceRequest{
 		Model:       req.GetModel(),
 		Prompt:      req.GetPrompt(),
 		Messages:    msgs,
 		MaxTokens:   int(req.GetMaxTokens()),
 		Temperature: req.GetTemperature(),
+		Tools:       toolsToInternal(req.GetTools()),
 	}
 }
 

@@ -243,12 +243,24 @@ Still open:
   path bills the seller for its own work. Needs a look on the GPU box.
 - **Re-encrypt or retire `prod-smoke-buyer.json`**, a plaintext key on the GPU
   box from an early smoke test.
-- **Tool calls do not exist in the protocol**, only in the UI's ambition.
-  **Decided: build them.** So the UI's claim stops being false by being made
-  true, rather than by being removed. Nothing is designed yet - the first
-  question is whether a tool call is a protocol-level field on the inference
-  job or something the seller's own model server handles behind the door, and
-  that answer decides whether this needs a protocol version at all.
+- **Tool calls are BUILT, and web search is the first one.** Seller-side, no
+  protocol version. A tool definition is inside the buyer's signed digest, so a
+  node cannot attach a tool to a signed request; the block is emitted only when a
+  request has tools, so every pre-v0.5.9 signature stays valid. The node never
+  RUNS a tool: it returns what the model asked for, `runWithTools` executes it and
+  comes back as a new job. Each round trip is its own reservation and settlement,
+  bounded at 4 by default and 12 absolutely, because nothing in the protocol
+  bounds the number of jobs. Design and the departures from it:
+  `docs/designs/tool-calls.md`.
+  - **`BRAVE_SEARCH_API_KEY` must be set on the web deployment** or the tool is
+    not offered and `/chat` answers as it did before. The route that holds it is
+    `apps/web/src/app/api/tools/web-search/route.ts`, it is UNAUTHENTICATED, and
+    the search quota is the whole exposure — no chain key or budget is reachable
+    from it. Put auth in front of it if that quota matters.
+  - **Merge and roll out together.** `apps/web` deploys on merge and signs the
+    new digest; a node that has not been upgraded verifies the old one. The
+    compatibility arm lives on the NODE, so it protects old clients from new
+    nodes — the opposite of this deploy's direction.
 
 ### 5. Open questions with no owner
 

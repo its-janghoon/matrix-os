@@ -42,7 +42,7 @@ enum InferenceJobStatus {
 
 // ChatRole enumerates the standard chat message roles for chat-style inference.
 enum ChatRole {
-    // Unset/unknown role.
+    // Unset/unknown role. Read as USER, matching an absent role at the /v1 door.
     CHAT_ROLE_UNSPECIFIED = 0;
     // A system instruction message.
     CHAT_ROLE_SYSTEM = 1;
@@ -50,14 +50,62 @@ enum ChatRole {
     CHAT_ROLE_USER = 2;
     // An assistant/model message.
     CHAT_ROLE_ASSISTANT = 3;
+    // The result of a tool the CLIENT ran, handed back to the model as one more
+    // turn. The node never runs a tool; see ToolDefinition.
+    CHAT_ROLE_TOOL = 4;
 }
 
 // ChatMessage is a single turn in a chat conversation.
 message ChatMessage {
     // The speaker role for this message.
     ChatRole role = 1;
-    // The message text content.
+    // The message text content. For a tool message it is the tool's output.
     string content = 2;
+    // On a TOOL message, which call this is the result of. The model needs it to
+    // pair a result with the call it made; two results without it are
+    // indistinguishable and the model may answer from the wrong one.
+    //
+    // Inside the buyer's signed digest, so a node cannot re-point it.
+    string tool_call_id = 3;
+    // On an ASSISTANT message, the calls the model made on a previous turn. A tool
+    // loop replays them so the model can see its own request beside the result.
+    //
+    // Also inside the signed digest: a node free to rewrite these would be telling
+    // the model it had asked something it did not ask.
+    repeated ToolCall tool_calls = 4;
+}
+
+// ToolDefinition is one tool the buyer offers the model.
+//
+// THE NODE NEVER EXECUTES ONE. It passes the definitions to the model and returns
+// whatever the model asked to call; the CLIENT runs the tool and sends the result
+// back as a CHAT_ROLE_TOOL message in a new job. A seller that ran the tool would
+// need the buyer's credentials for whatever the tool reaches, which is a custody
+// story this network has already declined once.
+message ToolDefinition {
+    // The function name the model will call. Required.
+    string name = 1;
+    // What the tool is for, so the model can decide when to use it.
+    string description = 2;
+    // A JSON Schema object for the arguments, as RAW JSON TEXT.
+    //
+    // Text and not a Struct, because these bytes are inside the buyer's signature:
+    // a structured field would be re-serialized by each language's writer with its
+    // own key order and spacing, and two implementations would then hash different
+    // bytes from one input. The text the caller sent has one spelling.
+    string parameters_json = 3;
+}
+
+// ToolCall is the model asking for a tool to be run. The client executes it.
+message ToolCall {
+    // Correlates this call with the tool message that answers it.
+    string id = 1;
+    // The tool being called, matching a ToolDefinition.name.
+    string name = 2;
+    // The model's JSON argument object, raw as the model emitted it. NOT validated
+    // against the schema here: the client owns the tool and is the only party that
+    // can say what its arguments mean.
+    string arguments_json = 3;
 }
 
 // TokenUsage is the token accounting a provider's backend reported for a
@@ -125,6 +173,12 @@ message InferenceJob {
     // paid for the work; charging for it without handing it over would be a bill
     // the buyer has no way to check.
     string reasoning = 12;
+    // What the model asked to have run instead of, or as well as, answering. The
+    // CLIENT executes these and comes back with the results as a NEW job; this
+    // node does not run them. A fulfilled job may carry tool calls and an empty
+    // completion, which is the model choosing to act rather than speak.
+    repeated ToolCall tool_calls = 13;
+
 }
 
 // SubmitInferenceJobRequest submits an inference job to a provider. Capacity is
@@ -147,6 +201,14 @@ message SubmitInferenceJobRequest {
     double temperature = 7;
     // Upfront estimate of the compute units to reserve. Zero defaults to one.
     uint64 units_estimate = 8;
+    // Tools offered to the model for this run. Empty is the ordinary case and
+    // produces the same signed digest it did before tools existed.
+    //
+    // Inside the buyer's signed digest: a tool definition tells the model what it
+    // may do, so a node able to add one asks the buyer's model a different
+    // question at the buyer's expense.
+    repeated ToolDefinition tools = 9;
+
 }
 
 // SubmitInferenceJobResponse returns the newly-created PENDING inference job.
@@ -225,6 +287,14 @@ message RunInferenceJobRequest {
     // untouched but the provider works for free and its capacity is held until
     // the payment request expires.
     RunAuthorization authorization = 9;
+    // Tools offered to the model for this run. Empty is the ordinary case and
+    // produces the same signed digest it did before tools existed.
+    //
+    // Inside the buyer's signed digest: a tool definition tells the model what it
+    // may do, so a node able to add one asks the buyer's model a different
+    // question at the buyer's expense.
+    repeated ToolDefinition tools = 10;
+
 }
 
 // RunAuthorization is a buyer's signature over the run it is requesting. It is
@@ -275,6 +345,14 @@ message ReserveInferenceEscrowRequest {
     // Required for the same reason RunInferenceJob requires it: without it,
     // `buyer` is just a string anyone could type.
     RunAuthorization authorization = 9;
+    // Tools offered to the model for this run. Empty is the ordinary case and
+    // produces the same signed digest it did before tools existed.
+    //
+    // Inside the buyer's signed digest: a tool definition tells the model what it
+    // may do, so a node able to add one asks the buyer's model a different
+    // question at the buyer's expense.
+    repeated ToolDefinition tools = 10;
+
 }
 
 // ReserveInferenceEscrowResponse returns the deposit to sign.
@@ -494,6 +572,14 @@ message StreamInferenceJobRequest {
     double temperature = 7;
     // Upfront estimate of the compute units to reserve. Zero defaults to one.
     uint64 units_estimate = 8;
+    // Tools offered to the model for this run. Empty is the ordinary case and
+    // produces the same signed digest it did before tools existed.
+    //
+    // Inside the buyer's signed digest: a tool definition tells the model what it
+    // may do, so a node able to add one asks the buyer's model a different
+    // question at the buyer's expense.
+    repeated ToolDefinition tools = 9;
+
 }
 
 // StreamInferenceJobResponse is one message of a streamed completion. Every

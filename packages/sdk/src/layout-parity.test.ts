@@ -54,6 +54,7 @@ const ROLES: ChatRole[] = [
   'CHAT_ROLE_SYSTEM',
   'CHAT_ROLE_USER',
   'CHAT_ROLE_ASSISTANT',
+  'CHAT_ROLE_TOOL',
 ];
 
 // The mapping this package applies before hashing. The node's digest is over
@@ -63,6 +64,7 @@ const WIRE_NAME: Record<ChatRole, canonical.Role> = {
   CHAT_ROLE_SYSTEM: 'system',
   CHAT_ROLE_USER: 'user',
   CHAT_ROLE_ASSISTANT: 'assistant',
+  CHAT_ROLE_TOOL: 'tool',
 };
 
 // Strings chosen to break a naive length prefix: multi-byte characters mean
@@ -140,11 +142,35 @@ describe('signing layouts match the canonical implementation', () => {
       const turns = Math.floor(next() * 4);
       const messages: ChatMessage[] = [];
       for (let t = 0; t < turns; t++) {
+        // A third of turns carry tool metadata, so the randomized run covers the
+        // conditional block from both sides: some cases emit it, some must not.
+        const withMeta = next() < 0.34;
         messages.push({
           role: pick(next, ROLES),
           content: pick(next, STRINGS),
+          ...(withMeta
+            ? {
+                toolCallId: pick(next, STRINGS),
+                toolCalls:
+                  next() < 0.5
+                    ? [
+                        {
+                          id: pick(next, STRINGS),
+                          name: pick(next, STRINGS),
+                          arguments: pick(next, STRINGS),
+                        },
+                      ]
+                    : undefined,
+              }
+            : {}),
         });
       }
+      const toolCount = Math.floor(next() * 3);
+      const tools = Array.from({ length: toolCount }, () => ({
+        name: pick(next, STRINGS),
+        description: pick(next, STRINGS),
+        parameters: pick(next, STRINGS),
+      }));
 
       const mine = await runAuthorizationSigningBytes({
         fromPublicKey,
@@ -152,17 +178,24 @@ describe('signing layouts match the canonical implementation', () => {
         model,
         timestamp,
         messages,
+        tools,
       });
       const theirs = await canonical.runAuthorizationSigningBytes({
         fromPublicKey,
         provider,
         model,
         timestamp,
-        messages: messages.map((m) => ({ role: WIRE_NAME[m.role], content: m.content })),
+        messages: messages.map((m) => ({
+          role: WIRE_NAME[m.role],
+          content: m.content,
+          toolCallId: m.toolCallId,
+          toolCalls: m.toolCalls,
+        })),
+        tools,
       });
       expect(
         Array.from(mine),
-        `case ${i}: provider=${JSON.stringify(provider)} turns=${turns}`,
+        `case ${i}: provider=${JSON.stringify(provider)} turns=${turns} tools=${toolCount}`,
       ).toEqual(Array.from(theirs));
     }
   });
