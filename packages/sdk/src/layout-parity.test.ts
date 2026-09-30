@@ -148,19 +148,20 @@ describe('signing layouts match the canonical implementation', () => {
         messages.push({
           role: pick(next, ROLES),
           content: pick(next, STRINGS),
-          ...(withMeta
+          // Spread, never assigned as `undefined`: this project sets
+          // exactOptionalPropertyTypes, and more to the point "absent" and
+          // "undefined" must hash the same or two callers describing one turn
+          // would sign different bytes.
+          ...(withMeta ? { toolCallId: pick(next, STRINGS) } : {}),
+          ...(withMeta && next() < 0.5
             ? {
-                toolCallId: pick(next, STRINGS),
-                toolCalls:
-                  next() < 0.5
-                    ? [
-                        {
-                          id: pick(next, STRINGS),
-                          name: pick(next, STRINGS),
-                          arguments: pick(next, STRINGS),
-                        },
-                      ]
-                    : undefined,
+                toolCalls: [
+                  {
+                    id: pick(next, STRINGS),
+                    name: pick(next, STRINGS),
+                    arguments: pick(next, STRINGS),
+                  },
+                ],
               }
             : {}),
         });
@@ -188,8 +189,8 @@ describe('signing layouts match the canonical implementation', () => {
         messages: messages.map((m) => ({
           role: WIRE_NAME[m.role],
           content: m.content,
-          toolCallId: m.toolCallId,
-          toolCalls: m.toolCalls,
+          ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+          ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
         })),
         tools,
       });

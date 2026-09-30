@@ -112,6 +112,36 @@ function protoRole(internal: string): ChatRole {
   }
 }
 
+
+/**
+ * A vector turn as each package wants it.
+ *
+ * The tool fields are SPREAD rather than assigned, because this project sets
+ * `exactOptionalPropertyTypes`: an explicit `undefined` is not the same as an absent
+ * property there, and assigning one would not compile. It is also the right shape for
+ * the digest - "no tool metadata" and "tool metadata that is undefined" must be one
+ * thing, or two callers describing the same turn would sign different bytes.
+ */
+type VectorMessage = SignVector['messages'][number];
+
+function toSdkMessage(m: VectorMessage): ChatMessage {
+  return {
+    role: protoRole(m.role),
+    content: m.content,
+    ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+    ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
+  };
+}
+
+function toCanonicalMessage(m: VectorMessage): canonical.Message {
+  return {
+    role: m.role as canonical.Role,
+    content: m.content,
+    ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}),
+    ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}),
+  };
+}
+
 describe('run authorization bytes against the Go-generated vectors', () => {
   it('has vectors to check at all', () => {
     // A file that lost its contents would make every assertion below vacuous.
@@ -125,18 +155,10 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         provider: v.provider,
         model: v.model,
         timestamp: BigInt(v.timestamp),
-        messages: v.messages.map(
-          (m) =>
-            ({
-              role: protoRole(m.role),
-              content: m.content,
-              toolCallId: m.toolCallId,
-              toolCalls: m.toolCalls,
-            }) as ChatMessage,
-        ),
+        messages: v.messages.map((m) => toSdkMessage(m)),
         maxTokens: v.maxTokens,
         temperature: v.temperature,
-        tools: v.tools,
+        ...(v.tools ? { tools: v.tools } : {}),
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
@@ -147,15 +169,10 @@ describe('run authorization bytes against the Go-generated vectors', () => {
         provider: v.provider,
         model: v.model,
         timestamp: BigInt(v.timestamp),
-        messages: v.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-          toolCallId: m.toolCallId,
-          toolCalls: m.toolCalls,
-        })) as canonical.Message[],
+        messages: v.messages.map((m) => toCanonicalMessage(m)),
         maxTokens: v.maxTokens,
         temperature: v.temperature,
-        tools: v.tools,
+        ...(v.tools ? { tools: v.tools } : {}),
       });
       expect(toHex(bytes)).toBe(v.signingBytesHex);
     });
