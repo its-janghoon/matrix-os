@@ -9,7 +9,6 @@ import (
 	"math"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/ecirlabs/matrix-core/internal/ethsig"
@@ -242,20 +241,23 @@ func writeToolBlock(h interface{ Write([]byte) (int, error) }, tools []ToolDefin
 // legacyRequestDigest is requestDigest as it was before MaxTokens and Temperature
 // were covered: the transcript and nothing else.
 //
-// WHY IT STILL EXISTS. The nodes on the live network verify with the old rule and
-// the browser signs with whatever it was served. Shipping only the new rule breaks
-// every /chat run in the window between the web deploying and the last node being
-// upgraded - and apps/web deploys on merge while a node rollout is a deliberate
-// operator step, so that window is guaranteed, not hypothetical.
+// IT IS NO LONGER ACCEPTED. For one release a signature verified under either rule,
+// because apps/web deploys on merge while a node rollout is a deliberate operator
+// step, so there was a guaranteed window where the browser signed the new digest
+// and the nodes knew only the old one. v0.5.8 and v0.5.9 are now on every box and a
+// real /chat run verified under the new rule, so the window is closed and the
+// either-rule arm is gone: a digest that does not cover max_tokens or temperature
+// lets a node raise the token bound on a request the buyer signed, and the buyer
+// pays for a larger job than the one they approved.
 //
-// So a signature is accepted under either rule for ONE release. That does not
-// reopen the hole for anyone who has upgraded: a client signing the new digest is
-// checked against it, and only a client still signing the old one falls through to
-// the legacy arm.
+// IT IS STILL COMPUTED, for one reason: to NAME that failure. A client older than
+// v0.5.8 produces a well-formed request with a signature over the old bytes, and
+// reporting that as "signature does not verify" sends the reader to their keys when
+// the answer is a stale client. Computing the old digest costs one hash on a path
+// that has already failed, and buys an error message that says what to do.
 //
-// DELETE THIS, AND acceptsLegacyDigest, once every client is on the new rule. The
-// node logs the first legacy acceptance per process, which is how an operator can
-// tell when that has happened rather than guessing.
+// This is a REFUSAL, not a fallback: nothing downstream of it treats the request as
+// authorized. Delete it when no client that old can plausibly exist.
 func legacyRequestDigest(req InferenceRequest) [32]byte {
 	msgs, err := req.EffectiveMessages()
 	if err != nil {
@@ -274,43 +276,30 @@ func legacyRequestDigest(req InferenceRequest) [32]byte {
 	return out
 }
 
-// legacyDigestReported makes the transition observable with one line rather than
-// one per request: an operator needs to know THAT old clients are still signing,
-// not how many times.
-var legacyDigestReported atomic.Bool
-
-func reportLegacyDigestAccepted() {
-	if legacyDigestReported.Swap(true) {
-		return
-	}
-	fmt.Println("Inference: accepted a run authorization signed under the PRE-v0.5.8 digest, " +
-		"which does not cover max_tokens or temperature. This is the compatibility window; " +
-		"once no client does this, legacyRequestDigest can be deleted.")
-}
-
-// acceptsEitherDigest checks a signature against the current authorization bytes
-// and, failing that, against the pre-v0.5.8 ones.
+// staleClientSignature reports whether a signature that FAILED the current rule
+// would have verified under the pre-v0.5.8 one - that is, whether the caller is an
+// out-of-date client rather than a wrong key.
 //
-// Current FIRST, so an upgraded client never touches the legacy arm and the log
-// line below means what it says: some client is still signing the old digest.
-//
-// THE LEGACY ARM IS CLOSED TO TOOL REQUESTS. The old digest covers the transcript
-// and nothing else, so accepting it for a request carrying tools would hand back
-// exactly the hole the tool block exists to close - a node could attach any tool it
-// liked to a legacy-signed request and the signature would still verify. No client
-// that predates tools can be sending them, so refusing this costs nothing real.
-func acceptsEitherDigest(a *RunAuthorization, req InferenceRequest, verify func([]byte) bool) bool {
-	if verify(a.SigningBytes(req)) {
-		return true
-	}
+// Only ever called after the real check has already failed, so it cannot authorize
+// anything. Tools are excluded because a client predating v0.5.8 cannot be sending
+// them, so a tool request matching the old bytes is not a stale client; it is
+// something to keep reporting as an ordinary failure.
+func staleClientSignature(a *RunAuthorization, req InferenceRequest, verify func([]byte) bool) bool {
 	if toolsPresent(req) {
 		return false
 	}
-	if verify(a.legacySigningBytes(req)) {
-		reportLegacyDigestAccepted()
-		return true
-	}
-	return false
+	return verify(a.legacySigningBytes(req))
+}
+
+// errStaleSigningRule is the failure a client older than v0.5.8 gets. It names the
+// fix, because "signature does not verify" does not: the bytes are right and the key
+// is right, and only the rule the client signed under is out of date.
+func errStaleSigningRule() error {
+	return fmt.Errorf("%w: this signature is valid under the pre-v0.5.8 signing rule, "+
+		"which this network no longer accepts because it does not cover max_tokens or "+
+		"temperature - a node could raise the token bound on a request you signed. The "+
+		"key and the request are fine; the signing client is out of date and must be "+
+		"upgraded", ErrRunUnauthorized)
 }
 
 // toolsPresent is hasToolSurface over a request's own effective transcript, for
@@ -323,7 +312,8 @@ func toolsPresent(req InferenceRequest) bool {
 	return hasToolSurface(req, msgs)
 }
 
-// legacySigningBytes is the authorization payload built over the old digest.
+// legacySigningBytes is the authorization payload built over the old digest. Used
+// only to classify a failure - see legacyRequestDigest.
 func (a *RunAuthorization) legacySigningBytes(req InferenceRequest) []byte {
 	digest := legacyRequestDigest(req)
 
@@ -455,9 +445,13 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 			return fmt.Errorf("%w: authorized by %s, but this budget names %s",
 				ErrRunUnauthorized, got, terms.Delegate)
 		}
-		if !acceptsEitherDigest(auth, req, func(bytes []byte) bool {
+		verify := func(bytes []byte) bool {
 			return ed25519.Verify(auth.PublicKey, bytes, auth.Signature)
-		}) {
+		}
+		if !verify(auth.SigningBytes(req)) {
+			if staleClientSignature(auth, req, verify) {
+				return errStaleSigningRule()
+			}
 			return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
 		}
 		return nil
@@ -477,8 +471,8 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 			return fmt.Errorf("%w: an ethereum signature must be %d bytes, got %d",
 				ErrRunUnauthorized, ethsig.SignatureLen, len(auth.Signature))
 		}
-		// Either digest, for the compatibility window. The EIP-712 struct is
-		// unchanged; only what promptDigest covers moved.
+		// ONE digest is accepted. The EIP-712 struct is unchanged; only what
+		// promptDigest covers moved.
 		recoversTo := func(d [32]byte) bool {
 			message, err := token.EthRunAuthorizationDigest(addr, auth.Provider, auth.Model, d[:], auth.Timestamp)
 			if err != nil {
@@ -490,10 +484,9 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 		if recoversTo(requestDigest(req)) {
 			return nil
 		}
-		// Same rule as acceptsEitherDigest: a request with tools has no legacy arm.
+		// Diagnosis only - see legacyRequestDigest. Nothing is authorized here.
 		if !toolsPresent(req) && recoversTo(legacyRequestDigest(req)) {
-			reportLegacyDigestAccepted()
-			return nil
+			return errStaleSigningRule()
 		}
 		return fmt.Errorf("%w: signed by a different key than the authorization claims (%s)",
 			ErrRunUnauthorized, addr.Hex())
@@ -509,9 +502,13 @@ func (s *Service) verifySignature(buyer string, req InferenceRequest, auth *RunA
 	if got := auth.BuyerID(); !strings.EqualFold(got, buyer) {
 		return fmt.Errorf("%w: authorized by %s, but the buyer is %s", ErrRunUnauthorized, got, buyer)
 	}
-	if !acceptsEitherDigest(auth, req, func(bytes []byte) bool {
+	verify := func(bytes []byte) bool {
 		return ed25519.Verify(auth.PublicKey, bytes, auth.Signature)
-	}) {
+	}
+	if !verify(auth.SigningBytes(req)) {
+		if staleClientSignature(auth, req, verify) {
+			return errStaleSigningRule()
+		}
 		return fmt.Errorf("%w: signature does not verify", ErrRunUnauthorized)
 	}
 	return nil

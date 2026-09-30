@@ -3,6 +3,8 @@ package inference
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
+	"strings"
 	"testing"
 )
 
@@ -154,37 +156,65 @@ func TestTwoCallsInOneTurnKeepTheirOrder(t *testing.T) {
 	}
 }
 
-// The compatibility arm accepts a signature made under the pre-v0.5.8 digest, which
-// covers the transcript and nothing else. Accepting it for a request carrying tools
-// would hand straight back the hole the tool block closes.
-func TestTheLegacyDigestArmIsClosedToToolRequests(t *testing.T) {
+// The pre-v0.5.8 signing rule is REFUSED. It is still computed, but only to tell an
+// out-of-date client apart from a wrong key, so the test that matters is that the
+// refusal happens AND says which of the two it was.
+func TestTheLegacySigningRuleIsRefusedAndNamed(t *testing.T) {
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
 		t.Fatalf("key: %v", err)
 	}
-	req := toolReq(searchTool)
 	auth := &RunAuthorization{PublicKey: pub, Provider: "p", Model: "m", Timestamp: 1}
+	verify := func(b []byte) bool { return ed25519.Verify(pub, b, auth.Signature) }
 
-	// A client signing the OLD bytes for a request that carries tools.
-	auth.Signature = ed25519.Sign(priv, auth.legacySigningBytes(req))
-	if acceptsEitherDigest(auth, req, func(b []byte) bool { return ed25519.Verify(pub, b, auth.Signature) }) {
-		t.Fatal("a legacy-signed request with tools was accepted: a node could attach any tool " +
-			"it liked to it and the signature would still verify")
-	}
-
-	// The same client, same rule, on a request with no tools: still accepted, because
-	// that is what the compatibility window is for.
+	// A tool-free request signed under the old rule: refused, and recognised as a
+	// stale client rather than reported as an unverifiable signature.
 	plain := InferenceRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "hello"}}}
 	auth.Signature = ed25519.Sign(priv, auth.legacySigningBytes(plain))
-	if !acceptsEitherDigest(auth, plain, func(b []byte) bool { return ed25519.Verify(pub, b, auth.Signature) }) {
-		t.Error("a legacy-signed request with no tools was refused, which breaks every client " +
-			"the compatibility window exists for")
+	if verify(auth.SigningBytes(plain)) {
+		t.Fatal("the old bytes verified under the current rule, so this test proves nothing")
+	}
+	if !staleClientSignature(auth, plain, verify) {
+		t.Error("a signature made under the pre-v0.5.8 rule was not recognised as a stale " +
+			"client, so the operator gets 'signature does not verify' and looks at keys")
 	}
 
-	// And the current rule still works for tools, or nothing could use them at all.
+	// Tools are excluded from the diagnosis: a client that predates v0.5.8 cannot be
+	// sending them, so matching the old bytes here is not an out-of-date client.
+	req := toolReq(searchTool)
+	auth.Signature = ed25519.Sign(priv, auth.legacySigningBytes(req))
+	if staleClientSignature(auth, req, verify) {
+		t.Error("a tool request matching the old bytes was called a stale client")
+	}
+
+	// The current rule still works for tools, or nothing could use them at all.
 	auth.Signature = ed25519.Sign(priv, auth.SigningBytes(req))
-	if !acceptsEitherDigest(auth, req, func(b []byte) bool { return ed25519.Verify(pub, b, auth.Signature) }) {
-		t.Error("a correctly signed tool request was refused")
+	if !verify(auth.SigningBytes(req)) {
+		t.Error("a correctly signed tool request did not verify")
+	}
+}
+
+// The refusal must reach the caller through verifySignature, not just through the
+// helper - that is the path a real request takes.
+func TestAStaleClientGetsAnActionableErrorFromVerifySignature(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	req := InferenceRequest{Model: "m", Messages: []Message{{Role: RoleUser, Content: "hello"}}}
+	auth := &RunAuthorization{PublicKey: pub, Provider: "p", Model: "m", Timestamp: 1}
+	auth.Signature = ed25519.Sign(priv, auth.legacySigningBytes(req))
+
+	svc := &Service{}
+	err = svc.verifySignature(auth.BuyerID(), req, auth)
+	if err == nil {
+		t.Fatal("a request signed under the pre-v0.5.8 rule was authorized")
+	}
+	if !errors.Is(err, ErrRunUnauthorized) {
+		t.Errorf("want ErrRunUnauthorized, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "out of date") {
+		t.Errorf("the error does not tell the reader the client is out of date: %v", err)
 	}
 }
 
