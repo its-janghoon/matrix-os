@@ -252,16 +252,23 @@ Still open:
   bounded at 4 by default and 12 absolutely, because nothing in the protocol
   bounds the number of jobs. Design and the departures from it:
   `docs/designs/tool-calls.md`.
-  - **Nothing to configure on the deployment.** The search key is the READER's,
-    pasted into `/chat` settings and held in their own browser; they spend their
-    own quota and the key never reaches a node, a seller or this repo. Serper or
-    Tavily, because those two allow a browser to call them — Brave answers a CORS
-    preflight with 405 and cannot be used from a page at all. No key means the
-    tool is not offered and `/chat` answers as it did before.
+  - **Nothing to configure, and no web search.** There is no keyless general web
+    search a browser can call — measured: every general engine needs a key,
+    DuckDuckGo's keyless API returns an empty object for an ordinary query, and
+    public SearXNG instances answer 403/429 or serve HTML with no CORS header. So
+    no `web_search` tool is offered at all, rather than one that fails and is paid
+    for. What IS offered, keyless and always on: `weather` (Open-Meteo) and
+    `wikipedia`. News, prices and "who holds this role now" remain out of reach.
+  - **The geocoding trap.** Open-Meteo resolves `대구` to a village in NORTH KOREA
+    before the city, and finds nothing for `서울` while `Seoul` works. The tool
+    therefore reports the place, region, country and timezone it actually used and
+    lists the candidates it rejected, so a wrong match is visible instead of being
+    a confidently wrong temperature.
   - **Merge and roll out together.** `apps/web` deploys on merge and signs the
     new digest; a node that has not been upgraded verifies the old one. The
     compatibility arm lives on the NODE, so it protects old clients from new
-    nodes — the opposite of this deploy's direction.
+    nodes — the opposite of this deploy's direction. A node that refuses the
+    reservation falls through to a tool-free answer that SAYS it had no tools.
 
 ### 5. Open questions with no owner
 

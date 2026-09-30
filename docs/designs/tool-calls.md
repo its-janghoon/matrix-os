@@ -189,50 +189,47 @@ run would answer the question with a model that cannot search and no sign that
 anything was lost — which is the exact failure this feature exists to remove. The
 tool path surfaces the error instead.
 
-### web_search runs in the reader's browser, with the reader's own key
+### There is no keyless general web search, so there is no web_search tool
 
-It ran on a server first — a route in this app holding one `BRAVE_SEARCH_API_KEY`
-for everybody — and that was wrong in a way worth recording, because the code
-worked.
+The first attempt held a `BRAVE_SEARCH_API_KEY` on a route in this app. The second
+moved the key into the reader's own browser. Both worked; neither shipped, because
+a key is a key — either one person pays for everyone's searches through an
+unauthenticated route, or every reader has to go and get a credential before
+`/chat` can look anything up.
 
-It made search **the only centralised dependency in a self-custody page**. The
-wallet is in the browser, the budget's delegate key is in the browser, the
-settlement is signed in the browser. One shared search key meant one quota anyone
-who could reach the deployment could drain through an unauthenticated route, and
-meant `/chat` could not search at all unless that particular deployment was alive
-and funded. None of that is true of a key the reader pastes into their own
-browser: they spend their own quota, nothing is exposed to anyone else, and the
-tool works on any deployment including a local one.
+So the question became whether it can be done with **no key at all**, and the
+answer was measured rather than assumed:
 
-**Why it took a rewrite rather than moving one fetch.** Not every search API can
-be called from a page, and the first provider chosen is one that cannot: Brave
-answers a CORS preflight with `405` and no headers, so a browser cannot reach it
-whatever the key is. That is why the provider is part of the stored setting rather
-than an implementation detail — it is the thing that decides whether this design
-is possible. Both offered providers were checked against a real preflight:
-
-| provider | `OPTIONS` | headers | browser-callable |
+| candidate | keyless | CORS | usable |
 |---|---|---|---|
-| Brave | `405` | none | no |
-| Serper | `204` | `allow-origin: *`, `X-API-KEY` allowed | yes |
-| Tavily | `200` | origin reflected, `content-type` allowed | yes |
+| Brave | no | `405`, no headers | no |
+| Serper, Tavily | no | yes | key required |
+| DuckDuckGo Instant Answer | yes | `*` | **no** — returns an empty object for an ordinary query and for a bare entity alike; it answers a narrow set of canned questions, not searches |
+| public SearXNG instances | yes | none | **no** — `403`/`429`, or `200` with an HTML page because `format=json` is disabled, and no CORS header |
 
-Tavily takes its key in the request **body**, which is why it needs no custom
-header and why `content-type` alone satisfies its preflight.
+General web search therefore does not exist on these terms, and no `web_search`
+tool is offered. A tool that cannot work is worse than an absent one: the model
+calls it, the call fails, and the reader pays for a round trip that could never
+have succeeded.
 
-**What this costs.** The key sits in `localStorage`, readable by any script on the
-origin. That is real and it is not new: the same origin already holds the delegate
-key that *spends* the reader's budget, which is worth strictly more than a search
-quota. A key that could not be read would have to be non-extractable like the
-wallet's, and a search API needs the bytes in a header. The settings field says so
-rather than leaving it implied.
+### What IS offered, keyless: weather and wikipedia
 
-**The one thing that must never happen** is the key reaching the transcript. A
-tool result becomes a message in the next job's prompt, and that prompt goes to
-the **seller** — so a provider's error page echoed into the result would hand the
-reader's key to whoever is serving the model. Error bodies are therefore never
-quoted back, only statuses, and a test asserts that an echoed key does not survive
-into the message the model is given.
+Two APIs are keyless, send `access-control-allow-origin: *`, and between them
+cover the questions that sent a reader looking for search in the first place —
+what the weather is, and what a thing is. `apps/web/src/lib/wallet/keylessTools.ts`.
+
+Nothing to configure, nothing that can be missing, so both are offered on every
+send. Their descriptions say what they do **not** cover — news, prices, who holds
+a role now, a specific page — so the model answers from its own knowledge there
+rather than calling something that cannot help.
+
+**The trap worth recording.** Open-Meteo's geocoder resolves `대구` to a village
+in **North Korea** before the city of 2.4 million, and returns nothing at all for
+`서울` while `Seoul` works. A tool that reported only a temperature would have
+answered the wrong country's weather with nothing anywhere to notice. So the
+resolved place, its region, its country and its timezone are part of the answer,
+the rejected candidates are listed, and the tool's own description tells the model
+to romanize the name. The failure is made visible rather than made unlikely.
 
 ---
 
