@@ -152,11 +152,19 @@ That is not a hole in either direction. Signing without tools and running with
 them is a different digest, so the added tools fail; signing with tools and
 running without them is also different. Both are refused.
 
-It did open one gap that had to be closed with it: the **legacy arm** verifies
+It did open one gap that had to be closed with it: the **legacy arm** verified
 against the pre-v0.5.8 digest, which covers the transcript and nothing else. Left
 alone it would have accepted a legacy-signed request carrying any tools a node
-liked. The legacy arm is therefore closed to tool requests — which costs nothing
+liked. The legacy arm was therefore closed to tool requests — which cost nothing
 real, since no client predating tools can be sending them.
+
+**That arm is now gone entirely** (v0.5.9 onward). Every box runs v0.5.8 or later
+and a real `/chat` run verified under the current rule with no legacy acceptance
+logged, so the window the arm existed for is closed. The old digest is still
+COMPUTED, on the already-failed path only, to tell an out-of-date client apart from
+a wrong key: a client older than v0.5.8 sends a well-formed request whose signature
+is over the old bytes, and reporting that as "signature does not verify" sends the
+reader to their keys when the answer is a stale client. It authorizes nothing.
 
 ### Two things the plan did not mention had to move with it
 
