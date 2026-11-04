@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -497,15 +498,15 @@ export default function ConfigurationPage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/guides/network-setup' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/guides/network-setup' className='text-accent-200 underline hover:text-accent-100'>
                           Network setup
-                        </a>{' '}
+                        </Link>{' '}
                         - running more than one node
                       </li>
                       <li>
-                        <a href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
                           Architecture
-                        </a>{' '}
+                        </Link>{' '}
                         - what each listener belongs to
                       </li>
                     </ul>

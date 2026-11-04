@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -95,13 +96,13 @@ export default function QuickstartPage() {
                   <p className='mb-4 text-gray-300'>
                     You need the two binaries, <code className='text-white'>matrixd</code> (the node) and{' '}
                     <code className='text-white'>matrix</code> (the CLI). Get them from{' '}
-                    <a href='/download' className='text-accent-200 underline hover:text-accent-100'>
+                    <Link href='/download' className='text-accent-200 underline hover:text-accent-100'>
                       a release
-                    </a>{' '}
+                    </Link>{' '}
                     or build from source with the{' '}
-                    <a href='/docs/installation' className='text-accent-200 underline hover:text-accent-100'>
+                    <Link href='/docs/installation' className='text-accent-200 underline hover:text-accent-100'>
                       installation guide
-                    </a>
+                    </Link>
                     . Nothing else: no GPU, no model server, no account with us.
                   </p>
 
@@ -169,27 +170,27 @@ export default function QuickstartPage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/architecture' className='text-accent-200 underline hover:text-accent-100'>
                           Architecture
-                        </a>{' '}
+                        </Link>{' '}
                         - what is inside the node you just started
                       </li>
                       <li>
-                        <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
                           Compute marketplace
-                        </a>{' '}
+                        </Link>{' '}
                         - how a job is priced, reserved and settled
                       </li>
                       <li>
-                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                           Configuration
-                        </a>{' '}
+                        </Link>{' '}
                         - every field in the file <code className='text-white'>-init</code> wrote
                       </li>
                       <li>
-                        <a href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
                           matrix CLI
-                        </a>{' '}
+                        </Link>{' '}
                         - the full command surface
                       </li>
                     </ul>

@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { CopyButton } from '@/components/CopyButton';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -152,9 +153,9 @@ export default function MatrixOsInstallation() {
                         <code className='text-white'>SHA256SUMS</code> file generated over those
                         archives. Unix archives are <code className='text-white'>.tar.gz</code>;
                         Windows is a <code className='text-white'>.zip</code>. The{' '}
-                        <a href='/download' className='text-primary-300 hover:text-secondary-300'>
+                        <Link href='/download' className='text-primary-300 hover:text-secondary-300'>
                           download page
-                        </a>{' '}
+                        </Link>{' '}
                         reads the release list directly, so it shows only what exists - if it
                         offers nothing, nothing has been published yet. Git Bash users: do not
                         feed <code className='text-white'>uname -s</code> into the URL. That
@@ -234,16 +235,16 @@ export default function MatrixOsInstallation() {
                     <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
                       <li>
                         Follow our{' '}
-                        <a href='/docs/quickstart' className='text-blue-400 hover:text-blue-300 underline'>
+                        <Link href='/docs/quickstart' className='text-blue-400 hover:text-blue-300 underline'>
                           Quick Start Guide
-                        </a>{' '}
+                        </Link>{' '}
                         to create your first agent
                       </li>
                       <li>
                         Learn about{' '}
-                        <a href='/docs/configuration' className='text-blue-400 hover:text-blue-300 underline'>
+                        <Link href='/docs/configuration' className='text-blue-400 hover:text-blue-300 underline'>
                           configuration options
-                        </a>
+                        </Link>
                       </li>
                     </ul>
                   </div>

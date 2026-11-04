@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import { ValidatorSetChange } from '@/components/diagrams';
 import DocSidebar from '@/components/DocSidebar';
@@ -484,15 +485,15 @@ export default function NetworkSetupPage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                           Configuration
-                        </a>{' '}
+                        </Link>{' '}
                         - every field in both files
                       </li>
                       <li>
-                        <a href='/products/consensus' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/products/consensus' className='text-accent-200 underline hover:text-accent-100'>
                           Consensus
-                        </a>{' '}
+                        </Link>{' '}
                         - what the quorum is actually doing
                       </li>
                     </ul>

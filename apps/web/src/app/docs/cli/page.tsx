@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -130,9 +131,9 @@ export default function MatrixCliDocs() {
                   <CodeSample label='shell' code={BUILD} />
                   <p className='mt-4 text-gray-300'>
                     Or take a prebuilt binary from{' '}
-                    <a href='/download' className='text-accent-200 underline hover:text-accent-100'>
+                    <Link href='/download' className='text-accent-200 underline hover:text-accent-100'>
                       a release
-                    </a>
+                    </Link>
                     .
                   </p>
 
@@ -287,15 +288,15 @@ export default function MatrixCliDocs() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
                           Quickstart
-                        </a>{' '}
+                        </Link>{' '}
                         - a node and a settled job in about a minute
                       </li>
                       <li>
-                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                           Configuration
-                        </a>{' '}
+                        </Link>{' '}
                         - every field, including where the API key lives
                       </li>
                       <li>

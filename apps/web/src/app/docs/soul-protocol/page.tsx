@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -59,13 +60,13 @@ export default function SoulProtocolPage() {
                       in-process Go type holds a soul&apos;s memory, values and persona. <strong>No node serves any
                       of these RPCs today</strong>, and there is no client library for them. If you are looking for
                       something to build against right now, that is the{' '}
-                      <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                      <Link href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
                         compute marketplace
-                      </a>{' '}
+                      </Link>{' '}
                       and{' '}
-                      <a href='/products/inference' className='text-accent-200 underline hover:text-accent-100'>
+                      <Link href='/products/inference' className='text-accent-200 underline hover:text-accent-100'>
                         inference
-                      </a>{' '}
+                      </Link>{' '}
                       APIs, which a node does serve.
                     </p>
                   </div>
@@ -109,18 +110,18 @@ export default function SoulProtocolPage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
                           Matrix Protocol
-                        </a>{' '}
+                        </Link>{' '}
                         - the protocol that is implemented and running
                       </li>
                       <li>
-                        <a
+                        <Link
                           href='/docs/guides/agent-development'
                           className='text-accent-200 underline hover:text-accent-100'
                         >
                           Agent development
-                        </a>{' '}
+                        </Link>{' '}
                         - the WebAssembly runtime a node actually has
                       </li>
                     </ul>

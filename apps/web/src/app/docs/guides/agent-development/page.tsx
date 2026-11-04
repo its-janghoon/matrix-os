@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -248,15 +249,15 @@ export default function AgentDevelopmentPage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/quickstart' className='text-accent-200 underline hover:text-accent-100'>
                           Quickstart
-                        </a>{' '}
+                        </Link>{' '}
                         - the parts of the stack that are finished
                       </li>
                       <li>
-                        <a href='/docs/soul-protocol' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/soul-protocol' className='text-accent-200 underline hover:text-accent-100'>
                           Soul Protocol
-                        </a>{' '}
+                        </Link>{' '}
                         - the identity layer agents are meant to use, also unserved
                       </li>
                     </ul>

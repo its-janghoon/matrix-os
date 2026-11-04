@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CodeSample } from '@/components/CodeSample';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -249,15 +250,15 @@ export default function GpuProviderPage() {
                         - sizing the model to the GPU, pricing from a measured cost basis, and the operating notes
                       </li>
                       <li>
-                        <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
                           Compute marketplace
-                        </a>{' '}
+                        </Link>{' '}
                         - how a quote becomes a reservation and a reservation becomes a settlement
                       </li>
                       <li>
-                        <a href='/docs/guides/network-setup' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/guides/network-setup' className='text-accent-200 underline hover:text-accent-100'>
                           Network setup
-                        </a>{' '}
+                        </Link>{' '}
                         - what a node needs to agree with its peers at all
                       </li>
                     </ul>

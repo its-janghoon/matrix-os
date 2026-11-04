@@ -1,0 +1,51 @@
+name: Pages
+
+# The website is a static export of apps/web, published to GitHub Pages.
+on:
+  push:
+    branches: [main]
+    paths: ['apps/web/**', 'packages/protocol/**', '.github/workflows/pages.yaml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: corepack enable
+      - name: Install dependencies
+        working-directory: apps/web
+        run: corepack yarn install --frozen-lockfile
+      - name: Build
+        working-directory: apps/web
+        env:
+          NEXT_PUBLIC_BASE_PATH: /${{ github.event.repository.name }}
+          NEXT_PUBLIC_SITE_URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: corepack yarn build
+      - run: touch apps/web/out/.nojekyll
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: apps/web/out
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

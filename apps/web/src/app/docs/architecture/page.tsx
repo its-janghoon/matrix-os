@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { CopyButton } from '@/components/CopyButton';
 import DocSidebar from '@/components/DocSidebar';
 import Navigation from '@/components/Navigation';
@@ -125,9 +126,9 @@ export default function ArchitecturePage() {
                     startup. The generated file is a secure baseline, not a production launch profile. The excerpt
                     below shows an explicit public overlay; replace its origin and copy consensus values exactly
                     across the network. See{' '}
-                    <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                    <Link href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                       configuration
-                    </a>{' '}
+                    </Link>{' '}
                     for the rest.
                   </p>
                   <div className='rounded-lg border border-gray-800 bg-black p-4'>
@@ -144,21 +145,21 @@ export default function ArchitecturePage() {
                     <h2 className='mb-4 text-2xl font-bold text-white'>Next</h2>
                     <ul className='mb-0 list-disc space-y-3 pl-6 text-gray-100'>
                       <li>
-                        <a href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/matrix-protocol' className='text-accent-200 underline hover:text-accent-100'>
                           The Matrix Protocol
-                        </a>{' '}
+                        </Link>{' '}
                         - the wire messages between nodes
                       </li>
                       <li>
-                        <a href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/compute-marketplace' className='text-accent-200 underline hover:text-accent-100'>
                           The compute marketplace
-                        </a>{' '}
+                        </Link>{' '}
                         - providers, jobs and settlement
                       </li>
                       <li>
-                        <a href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
+                        <Link href='/docs/configuration' className='text-accent-200 underline hover:text-accent-100'>
                           Configuration
-                        </a>{' '}
+                        </Link>{' '}
                         - every field in the file above
                       </li>
                     </ul>

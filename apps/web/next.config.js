@@ -1,16 +1,17 @@
 /** @type {import('next').NextConfig} */
+// The site is a static export served by GitHub Pages under /<repo>. The Pages
+// workflow sets NEXT_PUBLIC_BASE_PATH; a local build leaves it empty.
+const basePath = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+
 const nextConfig = {
   reactStrictMode: true,
+  output: 'export',
+  basePath,
+  trailingSlash: true,
+  images: { unoptimized: true },
   env: {
     ENVIRONMENT: process.env.ENVIRONMENT,
     GA_TRACKING_ID: process.env.GA_TRACKING_ID,
-  },
-  // Still an experimental key in Next 16 (config-shared.d.ts lists
-  // `serverActions` under `experimental`), so it stays where it was.
-  experimental: {
-    serverActions: {
-      allowedOrigins: ['*'],
-    },
   },
   // The canonical signing byte layouts live in one place, packages/protocol, and
   // are consumed here as a linked workspace package rather than copied. It ships

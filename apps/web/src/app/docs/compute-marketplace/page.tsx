@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import DocSidebar from '@/components/DocSidebar';
 import { ConsensusRound, JobLifecycle, TokenBridge } from '@/components/diagrams';
 import Navigation from '@/components/Navigation';
@@ -256,9 +257,9 @@ r = client.chat.completions.create(
                     <p className='text-gray-100 leading-relaxed mb-0'>
                       For an ed25519 wallet there is now a 12-word BIP-39 recovery phrase and an encrypted keystore,
                       derived at the SLIP-0010 path <code>m/44&apos;/9004&apos;/0&apos;/0&apos;</code>. See the{' '}
-                      <a href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
+                      <Link href='/docs/cli' className='text-accent-200 underline hover:text-accent-100'>
                         CLI reference
-                      </a>
+                      </Link>
                       .
                     </p>
                   </div>
@@ -276,9 +277,9 @@ r = client.chat.completions.create(
                   <div className='bg-gray-900/50 rounded-xl p-6 border border-gray-800 mb-8'>
                     <p className='text-gray-100 leading-relaxed mb-4'>
                       Every figure in the{' '}
-                      <a href='/market' className='text-blue-400 hover:text-blue-300 underline'>
+                      <Link href='/market' className='text-blue-400 hover:text-blue-300 underline'>
                         marketplace directory
-                      </a>{' '}
+                      </Link>{' '}
                       is read from the chain the answering node holds, or observed by that node itself. None of it is
                       reported by the seller: an announcement carries no uptime, no latency and no rating, because
                       those are exactly the numbers a seller can type anything into.
@@ -350,14 +351,14 @@ r = client.chat.completions.create(
                     <h2 className='text-2xl font-bold text-white mb-4'>Next Steps</h2>
                     <ul className='text-gray-100 space-y-3 list-disc pl-6 mb-0'>
                       <li>
-                        <a href='/docs/architecture' className='text-blue-400 hover:text-blue-300 underline'>
+                        <Link href='/docs/architecture' className='text-blue-400 hover:text-blue-300 underline'>
                           See how the marketplace fits the Matrix OS architecture
-                        </a>
+                        </Link>
                       </li>
                       <li>
-                        <a href='/docs/matrix-protocol' className='text-blue-400 hover:text-blue-300 underline'>
+                        <Link href='/docs/matrix-protocol' className='text-blue-400 hover:text-blue-300 underline'>
                           Learn about the Matrix Protocol
-                        </a>
+                        </Link>
                       </li>
                     </ul>
                   </div>

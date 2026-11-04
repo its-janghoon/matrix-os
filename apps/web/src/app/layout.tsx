@@ -11,10 +11,15 @@ export const viewport: Viewport = {
   maximumScale: 1,
 };
 
+// GitHub Pages serves the site under /<repo>, and Next does not add basePath
+// to metadata URLs, so the icon and image paths carry it themselves.
+const BASE = process.env.NEXT_PUBLIC_BASE_PATH ?? '';
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://its-janghoon.github.io/matrix-os';
+
 export const metadata: Metadata = {
   // Without this, Next resolves relative og:image URLs against localhost, so
   // link previews in production point at a host nobody can reach.
-  metadataBase: new URL('https://ecirlabs.com'),
+  metadataBase: new URL(SITE_URL),
   title: {
     default: 'ECIR Labs - Building the future of decentralized intelligence',
     template: '%s | ECIR Labs',
@@ -41,7 +46,7 @@ export const metadata: Metadata = {
   openGraph: {
     type: 'website',
     locale: 'en_US',
-    url: 'https://ecirlabs.com',
+    url: SITE_URL,
     siteName: 'ECIR Labs',
     title: 'ECIR Labs - Decentralized Intelligence Platform',
     description:
@@ -75,14 +80,14 @@ export const metadata: Metadata = {
   // public/brand/README.md.
   icons: {
     icon: [
-      { url: '/favicon.svg', type: 'image/svg+xml' },
-      { url: '/favicon-32x32.png', sizes: '32x32', type: 'image/png' },
-      { url: '/favicon-16x16.png', sizes: '16x16', type: 'image/png' },
+      { url: `${BASE}/favicon.svg`, type: 'image/svg+xml' },
+      { url: `${BASE}/favicon-32x32.png`, sizes: '32x32', type: 'image/png' },
+      { url: `${BASE}/favicon-16x16.png`, sizes: '16x16', type: 'image/png' },
     ],
-    shortcut: '/favicon.ico',
-    apple: [{ url: '/apple-touch-icon.png', sizes: '180x180', type: 'image/png' }],
+    shortcut: `${BASE}/favicon.ico`,
+    apple: [{ url: `${BASE}/apple-touch-icon.png`, sizes: '180x180', type: 'image/png' }],
   },
-  manifest: '/manifest.json',
+  manifest: `${BASE}/manifest.json`,
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
