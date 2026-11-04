@@ -1,204 +1,101 @@
 # Matrix OS
 
-Matrix OS is a peer-to-peer network for decentralized LLM compute. People leave their
-idle computers running to join the network like a blockchain node and contribute LLM
-compute to the network. Anyone can buy LLM compute and API responses with
-cryptocurrency, and the people who provide compute get paid by the network.
+Matrix OS is a peer-to-peer marketplace for compute and LLM inference that you run yourself.
+Machines announce spare capacity over libp2p, buyers pay for jobs and model responses with
+signed transfers, and every balance is settled in native MATRIX on a leader-based BFT
+Layer 1.
 
-This repository is a polyglot monorepo that consolidates the Matrix OS projects into a
-single tree. Each subproject keeps its own toolchain and its own README; this root
-document describes the layout and how to build and test each piece.
+There is no public network. Start one on your own machine in one command, then add machines
+when you want more than one.
 
-## Monorepo layout
+- Website and docs: [its-janghoon.github.io/matrix-os](https://its-janghoon.github.io/matrix-os/)
+- Releases: [GitHub Releases](https://github.com/its-janghoon/matrix-os/releases)
 
-- [`services/core`](services/core/README.md) - Matrix Core, the Go P2P daemon that turns any machine into a Matrix node.
-- [`proto`](proto/README.md) - Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
-- [`apps/web`](apps/web) - the website, a static Next.js export published to GitHub Pages at <https://its-janghoon.github.io/matrix-os/>. No public network is run: start your own with the network-setup guide there.
-- [`apps/console`](apps/console/README.md) - Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
-- [`contracts`](contracts/README.md) - the Base-primary Hardhat project for wMATRIX, the 1:1 escrow-backed EVM mirror of native MATRIX. Base Sepolia (`84532`) is rehearsed before Base production (`8453`); the native Go L1 remains the source of truth.
-- [`packages/protocol`](packages/protocol) - the one TypeScript implementation of the wire byte layouts a client signs over (payment digests, run authorizations, message digests). It exists because those layouts were copied into three places and a drift between any copy and the Go verifier is a signature the node rejects for no visible reason.
-- [`packages/sdk`](packages/sdk) - the TypeScript client SDK. Its layout-parity test signs randomized inputs through both this package and the Go encoder and fails on a single differing byte.
+![Matrix OS home](docs/screenshots/web-home.png)
 
-## Screenshots
+## Start a network
 
-Five screenshots, one per distinct claim: what the network is, the two sides of its market,
-what makes balances agreed rather than local, and the desktop app actually running. Native
-MATRIX is the coin of the Go consensus L1 and the single source of truth for balances,
-capped at 1,000,000,000 whole MATRIX at 9 decimals; wMATRIX is the bridged ERC-20 mirror
-that lets the asset list on exchanges, and is not the settlement token. Images live in
-[`docs/screenshots`](docs/screenshots).
+You need Go, [`buf`](https://buf.build/docs/installation) and `make`.
 
-### Marketing site (`apps/web`)
+```sh
+git clone https://github.com/its-janghoon/matrix-os
+cd matrix-os
+make devnet-keep
+```
 
-![Matrix OS home hero](docs/screenshots/web-home.png)
-*The home page: the peer-to-peer market for compute and inference, routing out to the
-product pages.*
+`make devnet-keep` starts three validators on this machine and leaves them running, so a
+wallet, the console or the website's `/market` page can point at them. Three is the smallest
+quorum that means anything. `make devnet` does the same, checks leader rotation, quorum, the
+state root and a wallet round trip, prints a verdict, and stops.
 
-![Compute Marketplace product page](docs/screenshots/web-marketplace.png)
-*Compute Marketplace: peer-to-peer capacity announce and discovery over libp2p, with signed
-jobs that settle in native MATRIX.*
-
-![LLM Inference product page](docs/screenshots/web-inference.png)
-*LLM Inference: the other half of the market, fulfilled by a local runner or a provider-API
-proxy and settled through the same consensus path as compute.*
-
-![Consensus product page](docs/screenshots/web-consensus.png)
-*Consensus: fast leader-based BFT, so a balance is one globally agreed fact rather than a
-private per-node number.*
-
-### Console (`apps/console`)
-
-![Matrix Console desktop app](docs/screenshots/console-app.png)
-*Matrix Console: providers, jobs, native MATRIX wallet, consensus and inference tabs in one
-window, here on the Providers tab showing local and remote capacity with the peer ids they
-were discovered from - the whole thing running.*
-
-## Repository tooling
-
-A root [`go.work`](go.work) ties the Go modules (`services/core` and `proto`) together so
-they resolve consistently in workspace mode. A single merged [`.gitignore`](.gitignore)
-covers the build artifacts of every subtree.
-
-## Build and test
-
-Each toolchain is invoked from its own subdirectory.
-
-### Go - `services/core`
+To run real nodes on separate machines:
 
 ```sh
 cd services/core
-go build ./...
-go test ./...
+go build ./cmd/...
+./matrixd -init -config ./config.yaml   # writes a 0600 config and an admin API key
+./matrixd -config ./config.yaml
 ```
 
-### Protocol Buffers - `proto`
+Every node must start from the same `genesis` and the same `consensus.validators` list. The
+[network-setup guide](https://its-janghoon.github.io/matrix-os/docs/guides/network-setup/)
+walks through it, and [`services/core/README.md`](services/core/README.md) covers every
+config key.
+
+## Runbooks
+
+| Task | Runbook |
+|---|---|
+| Sell GPU capacity on a running network | [gpu-provider.md](docs/runbooks/gpu-provider.md) |
+| Buy compute or inference | [consumer.md](docs/runbooks/consumer.md) |
+| Join the validator set with a bond | [validator-join.md](docs/runbooks/validator-join.md) |
+| Upgrade validators | [validator-upgrade.md](docs/runbooks/validator-upgrade.md) |
+| Turn on spend budgets | [budget-activation.md](docs/runbooks/budget-activation.md) |
+| Turn on inference escrow | [escrow-activation.md](docs/runbooks/escrow-activation.md) |
+| Bridge to Base as wMATRIX | [base-launch.md](docs/runbooks/base-launch.md), rehearsed first with [sepolia-rehearsal.md](docs/runbooks/sepolia-rehearsal.md) |
+
+## What is in this repository
+
+| Path | What it is |
+|---|---|
+| [`services/core`](services/core/README.md) | `matrixd`, the Go node: P2P, consensus, ledger, market, inference |
+| [`proto`](proto/README.md) | Protocol Buffers shared across the network |
+| [`apps/console`](apps/console/README.md) | Matrix Console, a Tauri desktop app for a local node |
+| [`apps/web`](apps/web) | The website, a static Next.js export on GitHub Pages |
+| [`contracts`](contracts/README.md) | wMATRIX, the escrow-backed ERC-20 mirror on Base |
+| [`packages/protocol`](packages/protocol) | The one TypeScript copy of the byte layouts a client signs |
+| [`packages/sdk`](packages/sdk) | TypeScript client SDK |
+
+A few facts worth knowing before you change anything:
+
+- Native MATRIX is capped at 1,000,000,000 whole tokens at 9 decimals. wMATRIX on Base is a
+  mirror for exchanges, not the settlement token.
+- Ethereum wallets are first-class clients: secp256k1 keys, EIP-155 and EIP-1559 envelopes,
+  EIP-55 addresses and the JSON-RPC a wallet needs. The chain runs no EVM, and contract calls
+  are refused rather than ignored.
+- Every block commits to a Merkle root over all balances, so a node with different apply logic
+  refuses to vote, and one balance can be proven to someone holding nothing else.
+- An idle chain produces no blocks. Check that validators agree on the head hash and state root
+  at a named height, not that the height moved.
+
+## Build
 
 ```sh
-cd proto
-buf lint
-buf generate
+make build       # proto + Go
+make test
+cd apps/web && corepack yarn install --frozen-lockfile && corepack yarn build
+cd apps/console && corepack yarn install && corepack yarn build
+cd contracts && npm install && npx hardhat test
 ```
 
-### Web - `apps/web`
+## Contributing
 
-```sh
-cd apps/web
-corepack yarn install --frozen-lockfile
-corepack yarn lint
-corepack yarn build
-```
-
-### Console - `apps/console`
-
-```sh
-cd apps/console
-corepack yarn install
-corepack yarn build   # tsc --noEmit && vite build -> dist/
-corepack yarn dev     # Vite dev server on http://localhost:5173
-```
-
-The console is a Tauri + React + Vite desktop app. The web frontend builds and
-runs everywhere; the native desktop bundle (`corepack yarn tauri build`)
-additionally needs the WebKitGTK/libsoup system libraries. See the
-[console README](apps/console/README.md) for the connection configuration and
-the documented native-build limitation.
-
-### Contracts - `contracts`
-
-```sh
-cd contracts
-npm install
-npx hardhat compile
-npx hardhat test
-```
-
-### SDK - `packages/sdk`
-
-```sh
-cd packages/sdk
-corepack yarn install --frozen-lockfile
-corepack yarn typecheck
-corepack yarn test    # includes the layout-parity differential test
-corepack yarn build
-```
-
-`packages/protocol` has no build of its own: it is consumed as TypeScript source
-by the web app and mirrored by the SDK, and the parity test above is what keeps
-the mirror honest.
-
-## Launch and operator documentation
-
-Base is the primary EVM launch target. The authoritative procedure is the
-[Base launch runbook](docs/runbooks/base-launch.md): first rehearse on Base
-Sepolia (`84532`), then perform the reviewed Base production (`8453`) ceremony.
-It covers the immutable 6% wMATRIX cap, exact-backed 5% founder vault, dynamic
-native validators versus immutable EVM attestors, bonded-open stake, zero
-emission, fee/maintainer policy, user-paid Base gas, and reconciliation evidence.
-
-Start every node from `matrixd -init` and merge—do not run standalone—the
-[Base launch overlay example](services/core/configs/base-launch.overlay.yaml.example).
-The example intentionally contains unresolved deployment inputs and no real
-accounts, addresses, origins, RPC credentials, or secrets.
-
-An Ethereum wallet is a first-class client. An account can be controlled by a
-secp256k1 key, a transaction can be an ordinary EIP-155 or EIP-1559 envelope
-bound to `consensus.chain_id`, addresses carry an EIP-55 checksum, and
-`eth_rpc.addr` serves the JSON-RPC a wallet needs to add the network. The chain
-still runs no EVM: contract creation and calldata are refused rather than
-ignored, and `eth_call` says so instead of returning an empty result.
-
-A block commits to the ledger it was built on - a Merkle root over every balance -
-so a node whose apply logic differs refuses to vote and says which two roots
-differ, instead of quietly reaching different numbers from the same blocks. The
-same root makes one balance provable to someone holding nothing else, which is
-what lets anyone check that the bridge escrow actually backs the wrapped supply
-(`matrix_getAccountProof`). It also
-carries a protocol version, so the next rule change is an activation height and a
-rolling upgrade rather than a coordinated restart. Moving an existing network
-onto these formats is [the relaunch runbook](docs/runbooks/evm-relaunch.md); the
-wrapped token, its pools and its holders are not touched by it.
-
-To contribute GPU capacity to a network that is already running, the
-[GPU provider runbook](docs/runbooks/gpu-provider.md) and its
-[overlay example](services/core/configs/gpu-provider.overlay.yaml.example) cover
-the whole path: sizing a model to one card, running the model server on loopback,
-declaring it under `inference.backends`, pricing tokens against an observed cost
-basis, and which single port a buyer is actually meant to reach. A provider is
-not a validator and needs no stake, no attestor keystore, and no genesis.
-
-Joining the validator set instead is
-[the validator-join runbook](docs/runbooks/validator-join.md). Membership is
-bought with a bond rather than granted, so the whole procedure is: lower the
-admission floor if it is out of reach, fund the candidate's own consensus
-account, and let the node bond and ask for itself. It is written around the
-parts that are not obvious - that the protocol fee comes out of the amount sent
-rather than on top of it, so funding exactly the floor lands under it; that
-`min_bond` decides block validity and so cannot differ across nodes while an
-admission is in flight; that a candidate with no bridge configured tallies
-attestations and releases nothing, and diverges the first time a burn reaches
-quorum; and that an idle chain produces no blocks, so a height that does not move
-proves nothing and the acceptance test is stopping a node, not reading a config.
-
-Holding your own key used to cost a wallet prompt per message, twice. A spend
-budget removes that without anyone taking custody: the owner signs one transfer
-into an account whose NAME carries the terms - which key may draw, the most one
-job may cost, the price ceiling, when it dies - and a delegate spends it until it
-runs out or expires. In a browser the delegate is the non-extractable key the
-page already generates, so it stops being a second account that needs its own
-funding. Turning it on is a rule change over money and activates at an agreed
-height: [the budget activation runbook](docs/runbooks/budget-activation.md), and
-the design, the prior art and what it deliberately does not bound are in
-[the proposal](docs/proposals/spending-authorization.md).
-
-The buying side is the [consumer runbook](docs/runbooks/consumer.md): getting
-MATRIX into an account, and the two doors a buyer can come through. The
-OpenAI-compatible `/v1/chat/completions` is a drop-in for any OpenAI SDK and is
-custodial - that protocol carries no buyer field, so the API key is what names
-the account to charge and the node must hold its key. A buyer who is not the node
-operator wants the other door instead, where a signed `RunAuthorization` asks for
-the work and a signed transfer accepts the bill, and nobody but the buyer ever
-holds the key. Both are served on `connect.addr`.
+Branches are `<type>/<slug>`, pull requests fill in the four-section template, and the author
+reviews their own pull request before asking for review. The rules are in
+[CONTRIBUTING.md](https://github.com/its-janghoon/.github/blob/main/CONTRIBUTING.md). Report
+vulnerabilities privately as described in
+[SECURITY.md](https://github.com/its-janghoon/.github/blob/main/SECURITY.md).
 
 ## License
 
-Matrix OS is [MIT licensed](LICENSE).
+[MIT](LICENSE).

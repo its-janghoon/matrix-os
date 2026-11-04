@@ -1,0 +1,18 @@
+# Branch names are <type>/<slug>. The rules and the type list live in its-janghoon/.github.
+# This repository has no develop branch, so the back-merge job has nothing to do and passes.
+
+name: gitflow
+
+on:
+  pull_request:
+    types: [opened, reopened, edited, synchronize]
+
+# The reusable workflow's back-merge job declares these; a caller that grants less fails to
+# start even though that job is skipped on pull requests.
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  gitflow:
+    uses: its-janghoon/.github/.github/workflows/gitflow.yml@main
