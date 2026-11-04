@@ -52,7 +52,9 @@ function firstPublicNode(): string {
     .split(',')
     .map((url) => url.trim())
     .filter((url) => url !== '');
-  return configured[0] ?? 'https://validator-1.ecirlabs.com';
+  // No public network is run for this site. A reader starts their own node
+  // (see /docs/guides/network-setup) or types another node's address.
+  return configured[0] ?? LOCAL_ENDPOINT;
 }
 
 export const DEFAULT_ENDPOINT = firstPublicNode();

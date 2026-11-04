@@ -557,9 +557,9 @@ function Funding({ account }: { account: string }) {
       </p>
       <p className='text-sm text-yellow-100/90'>
         If you hold wMATRIX on Base, the{' '}
-        <a className='underline underline-offset-2' href='/bridge'>
+        <Link className='underline underline-offset-2' href='/bridge'>
           bridge
-        </a>{' '}
+        </Link>{' '}
         is the way in: burn it there naming this account as the recipient, and the escrow is released to you here. You
         pay Base gas, and the page uses only the configured contract.
       </p>

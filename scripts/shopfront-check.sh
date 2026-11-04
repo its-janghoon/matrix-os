@@ -30,19 +30,12 @@
 
 set -uo pipefail
 
-# The site's own default, so this checks the address a visitor is actually sent
-# to rather than one that only agrees with it by coincidence.
-DEFAULT_NODES=(
-  https://validator-1.ecirlabs.com
-  https://validator-2.ecirlabs.com
-  https://validator-3.ecirlabs.com
-)
-
-if [ "$#" -gt 0 ]; then
-  NODES=("$@")
-else
-  NODES=("${DEFAULT_NODES[@]}")
+# There is no public network to default to: pass the nodes to check.
+if [ "$#" -eq 0 ]; then
+  echo "usage: $0 <node-url> [<node-url> ...]" >&2
+  exit 2
 fi
+NODES=("$@")
 
 TIMEOUT=${MATRIX_SHOPFRONT_TIMEOUT:-15}
 LIST=matrix.market.v1.MarketService/ListProviders

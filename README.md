@@ -13,7 +13,7 @@ document describes the layout and how to build and test each piece.
 
 - [`services/core`](services/core/README.md) - Matrix Core, the Go P2P daemon that turns any machine into a Matrix node.
 - [`proto`](proto/README.md) - Matrix Proto, the buf-managed Protocol Buffers definitions shared across the network.
-- [`apps/web`](apps/web) - the Next.js marketing website (ecirlabs-web).
+- [`apps/web`](apps/web) - the website, a static Next.js export published to GitHub Pages at <https://its-janghoon.github.io/matrix-os/>. No public network is run: start your own with the network-setup guide there.
 - [`apps/console`](apps/console/README.md) - Matrix Console, a Tauri + React + TypeScript + Vite desktop app that connects to a local `matrixd` node to observe and control the marketplace (providers, jobs, wallet/token, consensus, and LLM inference).
 - [`contracts`](contracts/README.md) - the Base-primary Hardhat project for wMATRIX, the 1:1 escrow-backed EVM mirror of native MATRIX. Base Sepolia (`84532`) is rehearsed before Base production (`8453`); the native Go L1 remains the source of truth.
 - [`packages/protocol`](packages/protocol) - the one TypeScript implementation of the wire byte layouts a client signs over (payment digests, run authorizations, message digests). It exists because those layouts were copied into three places and a drift between any copy and the Go verifier is a signature the node rejects for no visible reason.

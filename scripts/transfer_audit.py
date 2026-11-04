@@ -42,11 +42,7 @@ import sys
 import urllib.error
 import urllib.request
 
-DEFAULT_NODES = [
-    "https://validator-1.ecirlabs.com",
-    "https://validator-2.ecirlabs.com",
-    "https://validator-3.ecirlabs.com",
-]
+DEFAULT_NODES: list[str] = []  # no public network; pass --node URL
 
 LIST_PATH = "/matrix.market.v1.MarketService/ListTransactions"
 PAGE = 200
@@ -170,6 +166,8 @@ def main() -> int:
     ap.add_argument("--timeout", type=float, default=20.0)
     args = ap.parse_args()
     nodes = args.nodes or DEFAULT_NODES
+    if not nodes:
+        sys.exit("pass the nodes to audit")
 
     print("== Reading every committed transfer, from outside, with no keys\n")
 
