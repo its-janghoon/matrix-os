@@ -1,0 +1,14 @@
+# Open-PR cap and self-review gate. The rules live in its-janghoon/.github.
+
+name: PR policy
+
+on:
+  pull_request_target:
+    types: [opened, reopened, review_requested]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  policy:
+    uses: its-janghoon/.github/.github/workflows/pr-policy.yml@main
